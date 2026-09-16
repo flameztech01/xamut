@@ -1,0 +1,15 @@
+# Dependencies
+node_modules/
+*/node_modules/
+
+# Environment variables
+.env
+*.env
+
+# Build outputs
+dist/
+build/
+
+# Firebase configuration files (private)
+android/app/xircle-f60ef-firebase-adminsdk-fbsvc-f6cae4a18f.json
+ios/App/App/GoogleService-Info.plist
