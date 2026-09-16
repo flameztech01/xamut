@@ -1,48 +1,34 @@
 // utils/groqClipper.js
 //
-// Groq video clipper — local-source version.
+// Cloudinary-only video clipper.
 //
 // Pipeline:
-//   1. Download source to a temp file
-//        • YouTube    → youtubei.js (multi-client retry)
-//        • Direct URL → plain fetch
-//   2. Extract a small mp3 from the temp file with ffmpeg
-//   3. Send the mp3 to Groq Whisper
-//   4. Ask Groq Llama for the top N highlight windows
-//   5. Cut + reframe each clip locally with ffmpeg
-//   6. Upload ONLY the final clips to Cloudinary
-//   7. Delete every temp file
+//   1. Ingest source into Cloudinary via remote fetch
+//        (only direct video URLs — MP4 / WebM / MOV / HLS work;
+//         YouTube, TikTok, Instagram do NOT and are rejected up front)
+//   2. Ask Cloudinary for an audio-only MP3 rendition of the source
+//   3. Send that MP3 to Groq Whisper for transcription
+//   4. Ask Groq Llama to find the top N highlight windows
+//   5. Build clip URLs via Cloudinary trim transformations
+//   6. Return the clip URLs
+//
+// No yt-dlp. No ffmpeg. No local disk. Runs on any Node host —
+// including Render's free tier.
 //
 // Requires:
-//   - GROQ_API_KEY in .env
-//   - CLOUD_NAME / API_KEY / API_SECRET in .env
-//   - ffmpeg-static installed
-//   - youtubei.js installed
-
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
-import { createWriteStream } from "node:fs";
-import fs from "node:fs/promises";
-import { stat } from "node:fs/promises";
-import os from "node:os";
-import path from "node:path";
-import { spawn } from "node:child_process";
+//   • CLOUD_NAME, API_KEY, API_SECRET in .env (Cloudinary)
+//   • GROQ_API_KEY in .env (Groq)
 
 import { v2 as cloudinary } from "cloudinary";
-import { Innertube } from "youtubei.js";
-import ffmpegPath from "ffmpeg-static";
-
 import { groqJSON } from "./xamutAI.js";
 
 // ─────────────────────────────────────────────────────────────
 // Config
 // ─────────────────────────────────────────────────────────────
-const DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000;
-const FFMPEG_TIMEOUT_MS = 5 * 60 * 1000;
-const UPLOAD_TIMEOUT_MS = 5 * 60 * 1000;
-
-const YT_CLIENTS = ["ANDROID", "IOS", "TV", "MWEB", "WEB"];
-const YT_QUALITIES = ["720p", "480p", "360p"];
+const FETCH_TIMEOUT_MS = 2 * 60 * 1000;
+const AUDIO_FETCH_TIMEOUT_MS = 90 * 1000;
+const WHISPER_TIMEOUT_MS = 3 * 60 * 1000;
+const HIGHLIGHT_TIMEOUT_MS = 2 * 60 * 1000;
 
 const MIN_CLIP_SECONDS = 5;
 const MAX_CLIP_SECONDS = 90;
@@ -50,6 +36,8 @@ const MAX_CLIP_SECONDS = 90;
 // ─────────────────────────────────────────────────────────────
 // Small utils
 // ─────────────────────────────────────────────────────────────
+const log = (...args) => console.log("[clip]", ...args);
+
 const withTimeout = (promise, ms, label) => {
   let timer;
   return Promise.race([
@@ -62,8 +50,6 @@ const withTimeout = (promise, ms, label) => {
     }),
   ]);
 };
-
-const log = (...args) => console.log("[clip]", ...args);
 
 const toNumber = (v) => {
   if (typeof v === "number" && Number.isFinite(v)) return v;
@@ -80,317 +66,164 @@ const clamp01 = (v) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Source URL helpers
+// Source URL validation
+//
+// Cloudinary's fetch pipeline can ingest ANY publicly reachable URL
+// that returns a media stream. It CANNOT resolve social media watch
+// pages (YouTube / TikTok / Instagram / Twitter) to a video stream —
+// those need signature deciphering that Cloudinary doesn't do.
+//
+// So we reject those hosts up front with a clear error, and pass
+// everything else through to Cloudinary. If Cloudinary can't reach
+// a URL, the ingest step translates its opaque error into a friendly
+// message.
 // ─────────────────────────────────────────────────────────────
-const YOUTUBE_HOST_RE =
-  /^(?:https?:\/\/)?(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)\//i;
+const BLOCKED_HOSTS_RE =
+  /(?:youtube\.com|youtu\.be|tiktok\.com|instagram\.com|facebook\.com\/watch|twitter\.com\/.+\/status|x\.com\/.+\/status)/i;
 
 export function isYouTubeUrl(url = "") {
-  return YOUTUBE_HOST_RE.test(url);
+  return /(?:youtube\.com|youtu\.be)/i.test(url);
 }
 
-export function extractYouTubeId(url = "") {
-  const patterns = [
-    /(?:youtube\.com\/watch\?(?:.*&)?v=)([A-Za-z0-9_-]{11})/,
-    /(?:youtu\.be\/)([A-Za-z0-9_-]{11})/,
-    /(?:youtube\.com\/shorts\/)([A-Za-z0-9_-]{11})/,
-    /(?:youtube\.com\/embed\/)([A-Za-z0-9_-]{11})/,
-    /(?:youtube\.com\/live\/)([A-Za-z0-9_-]{11})/,
-  ];
-  for (const re of patterns) {
-    const match = re.exec(url);
-    if (match) return match[1];
-  }
-  return null;
-}
-
-export function isDirectVideoUrl(url = "") {
+export function isFetchableVideoUrl(url = "") {
   if (!url) return false;
   if (!/^https?:\/\//i.test(url)) return false;
-  if (isYouTubeUrl(url)) return false;
+  if (BLOCKED_HOSTS_RE.test(url)) return false;
   return true;
 }
 
 // ─────────────────────────────────────────────────────────────
-// Temp file helpers
+// Step 1 — Ingest source into Cloudinary via remote fetch
 // ─────────────────────────────────────────────────────────────
-async function createTempPath(prefix, ext = "mp4") {
-  const filename = `xamut-${prefix}-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 10)}.${ext}`;
-  return path.join(os.tmpdir(), filename);
-}
-
-async function safeDeleteFile(filePath) {
-  if (!filePath) return;
-  try {
-    await fs.unlink(filePath);
-  } catch (err) {
-    if (err?.code !== "ENOENT") {
-      log("cleanup warning:", err.message);
+export async function ingestVideo({ url }) {
+  if (!isFetchableVideoUrl(url)) {
+    if (isYouTubeUrl(url)) {
+      throw new Error(
+        "YouTube links aren't supported on this deployment. Paste a direct link to a video file instead (MP4, WebM, MOV, or HLS)."
+      );
     }
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// ffmpeg runner
-// ─────────────────────────────────────────────────────────────
-function runFfmpeg(args, timeoutMs = FFMPEG_TIMEOUT_MS) {
-  if (!ffmpegPath) {
-    return Promise.reject(
-      new Error(
-        "ffmpeg-static is not installed. Run: npm install ffmpeg-static"
-      )
+    throw new Error(
+      "That URL can't be ingested. Make sure it points directly to a video file (MP4, WebM, MOV, or HLS) that's publicly accessible."
     );
   }
 
-  return new Promise((resolve, reject) => {
-    const proc = spawn(ffmpegPath, args, { windowsHide: true });
-    let stderr = "";
+  log("Cloudinary fetch:", url.slice(0, 120));
 
-    const timer = setTimeout(() => {
-      try {
-        proc.kill("SIGKILL");
-      } catch {}
-      reject(new Error(`ffmpeg timed out after ${timeoutMs / 1000}s`));
-    }, timeoutMs);
+  try {
+    const result = await withTimeout(
+      cloudinary.uploader.upload(url, {
+        resource_type: "video",
+        folder: "xamut/clips/sources",
+        public_id: `src_${Date.now()}_${Math.random()
+          .toString(36)
+          .slice(2, 8)}`,
+      }),
+      FETCH_TIMEOUT_MS,
+      "Cloudinary ingest"
+    );
 
-    proc.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-      if (stderr.length > 8000) stderr = stderr.slice(-8000);
-    });
+    if (!result?.public_id) {
+      throw new Error("Cloudinary returned no public_id.");
+    }
 
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      reject(new Error(`ffmpeg spawn failed: ${err.message}`));
-    });
+    log(`✅ ingested → ${result.public_id} (${result.duration || 0}s)`);
 
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) return resolve();
-      reject(new Error(`ffmpeg exited ${code}: ${stderr.slice(-600)}`));
-    });
+    return {
+      publicId: result.public_id,
+      secureUrl: result.secure_url,
+      duration: Number(result.duration) || 0,
+      format: result.format || "mp4",
+      width: result.width || 0,
+      height: result.height || 0,
+      title: "",
+    };
+  } catch (err) {
+    const msg = err?.message || String(err);
+    if (/fetch|remote|404|400|unable|denied|not accessible|timed out/i.test(msg)) {
+      throw new Error(
+        "Cloudinary couldn't fetch that video. Make sure the URL is a direct link to a video file (MP4, WebM, MOV, or HLS) that's publicly accessible."
+      );
+    }
+    throw new Error(`Cloudinary ingest failed: ${msg.slice(0, 300)}`);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Step 2 — Fetch the audio-only MP3 rendition from Cloudinary
+//
+// Cloudinary can produce an audio-only rendition of any video asset
+// on the fly. We hand the URL back and the caller streams it into
+// Groq Whisper. The MP3 stays small (Cloudinary uses ~64kbps by
+// default for mp3 audio extractions) so it fits Whisper's 25MB cap
+// for videos up to ~40 minutes.
+// ─────────────────────────────────────────────────────────────
+export function buildAudioUrl(publicId) {
+  return cloudinary.url(publicId, {
+    resource_type: "video",
+    format: "mp3",
+    transformation: [{ audio_codec: "mp3" }],
+    secure: true,
   });
 }
 
-// ─────────────────────────────────────────────────────────────
-// Stream → temp file
-// ─────────────────────────────────────────────────────────────
-async function downloadStreamToTempFile(webStream, filePath, timeoutMs) {
-  if (!webStream) throw new Error("Source returned no download stream.");
+async function fetchAudioBuffer(publicId) {
+  const audioUrl = buildAudioUrl(publicId);
+  log("fetching audio from Cloudinary…");
 
-  const nodeStream = Readable.fromWeb(webStream);
-
-  await withTimeout(
-    pipeline(nodeStream, createWriteStream(filePath)),
-    timeoutMs,
-    "stream → temp file"
+  const res = await withTimeout(
+    fetch(audioUrl),
+    AUDIO_FETCH_TIMEOUT_MS,
+    "Cloudinary audio fetch"
   );
 
-  const info = await stat(filePath);
-  if (info.size === 0) throw new Error("Download produced an empty file.");
-  return { sizeMB: info.size / (1024 * 1024), sizeBytes: info.size };
-}
-
-// ─────────────────────────────────────────────────────────────
-// YouTube download
-// ─────────────────────────────────────────────────────────────
-async function downloadYouTube(videoId, destPath) {
-  const errors = [];
-
-  for (const clientType of YT_CLIENTS) {
-    let yt;
-    try {
-      log(`Innertube.create(${clientType})…`);
-      yt = await withTimeout(
-        Innertube.create({ client_type: clientType, retrieve_player: true }),
-        20000,
-        `Innertube.create(${clientType})`
-      );
-    } catch (err) {
-      errors.push(`${clientType}/init: ${err.message.slice(0, 100)}`);
-      log(`${clientType} init failed:`, err.message);
-      continue;
-    }
-
-    for (const quality of YT_QUALITIES) {
-      const tag = `${clientType}/${quality}/mp4`;
-      try {
-        log(`trying ${tag}…`);
-
-        const stream = await withTimeout(
-          yt.download(videoId, {
-            type: "video+audio",
-            quality,
-            format: "mp4",
-          }),
-          60000,
-          `${tag} stream`
-        );
-        if (!stream) {
-          errors.push(`${tag}: no stream`);
-          continue;
-        }
-
-        log(`${tag} → writing to temp file…`);
-        const { sizeMB } = await downloadStreamToTempFile(
-          stream,
-          destPath,
-          DOWNLOAD_TIMEOUT_MS
-        );
-
-        log(`✅ downloaded ${tag} — ${sizeMB.toFixed(2)} MB`);
-        return { client: clientType, quality, sizeMB };
-      } catch (err) {
-        errors.push(`${tag}: ${err.message.slice(0, 120)}`);
-        log(`${tag} failed:`, err.message);
-        await safeDeleteFile(destPath);
-      }
-    }
+  if (!res.ok) {
+    throw new Error(`Cloudinary audio fetch failed (${res.status})`);
   }
 
-  throw new Error(
-    `YouTube download failed after all attempts. Last errors: ${errors
-      .slice(-6)
-      .join(" | ")}`
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Direct URL download
-// ─────────────────────────────────────────────────────────────
-async function downloadDirect(url, destPath) {
-  log(`fetching ${url.slice(0, 120)}…`);
-  const res = await withTimeout(fetch(url), 60000, "direct fetch");
-  if (!res.ok) throw new Error(`Source returned HTTP ${res.status}`);
-  if (!res.body) throw new Error("Source returned no body");
-
-  const { sizeMB } = await downloadStreamToTempFile(
-    res.body,
-    destPath,
-    DOWNLOAD_TIMEOUT_MS
-  );
-  log(`✅ downloaded — ${sizeMB.toFixed(2)} MB`);
-  return { sizeMB };
-}
-
-// ─────────────────────────────────────────────────────────────
-// Best-effort metadata
-// ─────────────────────────────────────────────────────────────
-async function fetchYouTubeMeta(videoId) {
-  try {
-    const yt = await withTimeout(
-      Innertube.create(),
-      15000,
-      "Innertube.create (meta)"
-    );
-    const info = await withTimeout(
-      yt.getBasicInfo(videoId),
-      15000,
-      "getBasicInfo"
-    );
-    return {
-      title: info?.basic_info?.title || "",
-      duration: info?.basic_info?.duration || 0,
-      author: info?.basic_info?.author || "",
-    };
-  } catch (err) {
-    log("meta fetch failed (non-fatal):", err.message);
-    return { title: "", duration: 0, author: "" };
-  }
-}
-
-// ─────────────────────────────────────────────────────────────
-// Ingest → local temp path
-// ─────────────────────────────────────────────────────────────
-export async function ingestVideo({ url }) {
-  const localPath = await createTempPath("src", "mp4");
-
-  if (isYouTubeUrl(url)) {
-    const videoId = extractYouTubeId(url);
-    if (!videoId) {
-      throw new Error("Couldn't extract a video ID from that YouTube URL.");
-    }
-
-    const metaPromise = fetchYouTubeMeta(videoId);
-    await downloadYouTube(videoId, localPath);
-    const meta = await metaPromise;
-
-    return {
-      localPath,
-      title: meta.title || "",
-      duration: meta.duration || 0,
-    };
-  }
-
-  if (isDirectVideoUrl(url)) {
-    await downloadDirect(url, localPath);
-    return { localPath, title: "", duration: 0 };
-  }
-
-  throw new Error(
-    "That URL isn't a YouTube link or a direct video file. Paste a YouTube URL or a direct link to a video file."
-  );
-}
-
-// ─────────────────────────────────────────────────────────────
-// Extract audio locally
-// ─────────────────────────────────────────────────────────────
-async function extractAudio(videoPath, audioPath) {
-  log("extracting audio with ffmpeg…");
-  await runFfmpeg([
-    "-y",
-    "-i",
-    videoPath,
-    "-vn",
-    "-c:a",
-    "libmp3lame",
-    "-ar",
-    "16000",
-    "-ac",
-    "1",
-    "-b:a",
-    "64k",
-    audioPath,
-  ]);
-
-  const info = await stat(audioPath);
-  const sizeMB = info.size / (1024 * 1024);
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const sizeMB = buffer.length / (1024 * 1024);
   log(`audio ready: ${sizeMB.toFixed(2)} MB`);
-  return sizeMB;
-}
 
-// ─────────────────────────────────────────────────────────────
-// Whisper transcription
-// ─────────────────────────────────────────────────────────────
-async function transcribeLocalAudio(audioPath) {
-  const key = process.env.GROQ_API_KEY;
-  if (!key) throw new Error("GROQ_API_KEY is not set.");
-
-  const buffer = await fs.readFile(audioPath);
-  if (buffer.length > 25 * 1024 * 1024) {
+  if (sizeMB > 25) {
     throw new Error(
-      `Audio is ${(buffer.length / 1024 / 1024).toFixed(
+      `Audio track is ${sizeMB.toFixed(
         1
       )}MB — Groq's Whisper caps at 25MB. Try a shorter video.`
     );
   }
 
+  return buffer;
+}
+
+// ─────────────────────────────────────────────────────────────
+// Step 3 — Transcribe with Groq Whisper
+// ─────────────────────────────────────────────────────────────
+async function transcribeAudio({ publicId }) {
+  const key = process.env.GROQ_API_KEY;
+  if (!key) throw new Error("GROQ_API_KEY is not set.");
+
+  const buffer = await fetchAudioBuffer(publicId);
+
   const form = new FormData();
-  form.append("file", new Blob([buffer], { type: "audio/mpeg" }), "audio.mp3");
+  form.append(
+    "file",
+    new Blob([buffer], { type: "audio/mpeg" }),
+    "audio.mp3"
+  );
   form.append("model", "whisper-large-v3-turbo");
   form.append("response_format", "verbose_json");
   form.append("timestamp_granularities[]", "segment");
   form.append("timestamp_granularities[]", "word");
 
   log("sending to Groq Whisper…");
+
   const res = await withTimeout(
     fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${key}` },
       body: form,
     }),
-    180000,
+    WHISPER_TIMEOUT_MS,
     "Whisper"
   );
 
@@ -400,69 +233,27 @@ async function transcribeLocalAudio(audioPath) {
   }
 
   const data = await res.json();
-  log(`transcribed ${data.segments?.length || 0} segments`);
+  const segments = data.segments || [];
+  log(`transcribed ${segments.length} segments`);
+
   return {
     text: data.text || "",
-    segments: data.segments || [],
+    segments,
     words: data.words || [],
     duration: data.duration || 0,
   };
 }
 
 // ─────────────────────────────────────────────────────────────
-// Fallback clip picker — used when Llama returns nothing usable
+// Step 4 — Find highlights with Groq Llama
 // ─────────────────────────────────────────────────────────────
-function buildFallbackClips(segments, count, maxDuration) {
-  if (!segments.length) return [];
-  const total = Number(segments[segments.length - 1]?.end) || 0;
-  if (total <= 0) return [];
-
-  const windowSize = Math.min(maxDuration, total / count);
-  const clips = [];
-
-  for (let i = 0; i < count; i++) {
-    const targetStart = (total / count) * i;
-
-    // Snap to the nearest segment start
-    let anchor = segments[0];
-    let bestDelta = Math.abs(anchor.start - targetStart);
-    for (const s of segments) {
-      const d = Math.abs(s.start - targetStart);
-      if (d < bestDelta) {
-        anchor = s;
-        bestDelta = d;
-      }
-    }
-
-    const start = Math.max(0, anchor.start);
-    const end = Math.min(start + windowSize, total);
-    if (end - start < MIN_CLIP_SECONDS) continue;
-
-    clips.push({
-      start,
-      end,
-      title: `Segment ${i + 1}`,
-      hook: "",
-      reason: "Auto-selected segment",
-      viralityScore: 0.3,
-    });
+async function findHighlights({ segments, userPrompt, clipCount, videoDuration }) {
+  if (!segments.length) {
+    throw new Error("Transcript contains no segments.");
   }
-  return clips;
-}
 
-// ─────────────────────────────────────────────────────────────
-// Highlight detection — Groq Llama
-// ─────────────────────────────────────────────────────────────
-export async function findHighlights({
-  segments,
-  userPrompt,
-  clipCount,
-  videoDuration,
-}) {
   const transcript = segments
-    .map(
-      (s) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text.trim()}`
-    )
+    .map((s) => `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text.trim()}`)
     .join("\n");
 
   const estimatedTokens = Math.ceil(transcript.length / 4);
@@ -472,7 +263,7 @@ export async function findHighlights({
       : transcript;
 
   log(
-    `transcript length: ${transcript.length} chars (~${estimatedTokens} tokens)${
+    `transcript: ${transcript.length} chars (~${estimatedTokens} tokens)${
       estimatedTokens > 60000 ? " — SAMPLED" : ""
     }`
   );
@@ -507,7 +298,7 @@ You are NOT looking for:
 Each clip you return must be a complete thought that stands alone.
 Duration target: 20 to 60 seconds per clip.
 
-TIMESTAMPS ARE IN SECONDS. If you see [14:23-14:58] that means 14 minutes 23 seconds, so start = 863 and end = 898. Do NOT return milliseconds, do NOT return minutes — always seconds as a plain number.
+TIMESTAMPS ARE IN SECONDS. If you see [14:23-14:58] that means start = 863, end = 898. Do NOT return milliseconds, do NOT return minutes — always seconds as a plain number.
 
 ${userPrompt ? `The user specifically asked for: ${userPrompt}` : ""}
 
@@ -540,18 +331,17 @@ No markdown, no commentary.`,
         temperature: 0.3,
         maxTokens: 2000,
       }),
-      120000,
+      HIGHLIGHT_TIMEOUT_MS,
       "Llama highlight scan"
     );
   } catch (err) {
     log("Llama call failed:", err.message);
-    log("⚠️ falling back to evenly-spaced windows");
-    const fallback = buildFallbackClips(segments, clipCount, MAX_CLIP_SECONDS);
-    if (!fallback.length) throw new Error(err.message);
+    const fallback = buildFallbackClips(segments, clipCount);
+    if (!fallback.length) throw err;
+    log(`⚠️ using fallback: ${fallback.length} evenly-spaced clips`);
     return fallback;
   }
 
-  // Log what we actually got so the terminal shows the raw response
   log("Llama raw response:", JSON.stringify(raw).slice(0, 900));
 
   const rawClips = Array.isArray(raw?.clips) ? raw.clips : [];
@@ -562,34 +352,27 @@ No markdown, no commentary.`,
   for (const c of rawClips) {
     const start = toNumber(c.start);
     const end = toNumber(c.end);
-    if (!Number.isFinite(start) || !Number.isFinite(end)) {
-      log(`  ✗ rejected (bad numbers): ${JSON.stringify(c).slice(0, 120)}`);
-      continue;
-    }
+    if (!Number.isFinite(start) || !Number.isFinite(end)) continue;
 
     let s = Math.max(0, start);
-    let e = Math.min(end, duration);
+    let e = Number.isFinite(duration) ? Math.min(end, duration) : end;
 
-    // If Llama gave us ms instead of seconds, scale down
-    if (e > duration * 1.5 && duration > 0) {
+    // If Llama gave us milliseconds instead of seconds, scale down
+    if (Number.isFinite(duration) && duration > 0 && e > duration * 1.5) {
       s = s / 1000;
       e = e / 1000;
     }
 
-    if (e <= s) {
-      log(`  ✗ rejected (end <= start): ${s} → ${e}`);
-      continue;
-    }
+    if (e <= s) continue;
 
     // Clamp duration into the acceptable window instead of rejecting
-    let dur = e - s;
+    const dur = e - s;
     if (dur > MAX_CLIP_SECONDS) e = s + MAX_CLIP_SECONDS;
-    if (dur < MIN_CLIP_SECONDS) e = Math.min(s + MIN_CLIP_SECONDS, duration);
-
-    if (e - s < MIN_CLIP_SECONDS) {
-      log(`  ✗ rejected (duration ${(e - s).toFixed(1)}s): ${s} → ${e}`);
-      continue;
+    if (dur < MIN_CLIP_SECONDS) {
+      e = Math.min(s + MIN_CLIP_SECONDS, Number.isFinite(duration) ? duration : s + MIN_CLIP_SECONDS);
     }
+
+    if (e - s < MIN_CLIP_SECONDS) continue;
 
     normalized.push({
       start: s,
@@ -606,9 +389,8 @@ No markdown, no commentary.`,
     return normalized.slice(0, clipCount);
   }
 
-  // Llama returned something but nothing survived normalization
   log("⚠️ Llama response was unusable — falling back to evenly-spaced windows");
-  const fallback = buildFallbackClips(segments, clipCount, MAX_CLIP_SECONDS);
+  const fallback = buildFallbackClips(segments, clipCount);
   if (!fallback.length) {
     throw new Error(
       "Couldn't find any usable segments in the transcript — try a longer video."
@@ -618,63 +400,81 @@ No markdown, no commentary.`,
   return fallback;
 }
 
-// ─────────────────────────────────────────────────────────────
-// Cut one clip locally
-// ─────────────────────────────────────────────────────────────
-async function cutClipLocally({
-  videoPath,
-  outputPath,
-  start,
-  end,
-  aspectRatio = "portrait",
-}) {
-  const duration = Math.max(0.5, end - start);
+function buildFallbackClips(segments, count) {
+  if (!segments.length) return [];
+  const total = Number(segments[segments.length - 1]?.end) || 0;
+  if (total <= 0) return [];
 
-  const vf =
-    aspectRatio === "portrait"
-      ? "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920"
-      : "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2";
+  const windowSize = Math.min(MAX_CLIP_SECONDS, total / count);
+  const clips = [];
 
-  await runFfmpeg([
-    "-y",
-    "-ss",
-    String(start),
-    "-i",
-    videoPath,
-    "-t",
-    String(duration),
-    "-vf",
-    vf,
-    "-c:v",
-    "libx264",
-    "-preset",
-    "fast",
-    "-crf",
-    "23",
-    "-c:a",
-    "aac",
-    "-b:a",
-    "128k",
-    "-movflags",
-    "+faststart",
-    outputPath,
-  ]);
+  for (let i = 0; i < count; i++) {
+    const targetStart = (total / count) * i;
+
+    // Snap to the nearest segment boundary
+    let anchor = segments[0];
+    let bestDelta = Math.abs(anchor.start - targetStart);
+    for (const s of segments) {
+      const d = Math.abs(s.start - targetStart);
+      if (d < bestDelta) {
+        anchor = s;
+        bestDelta = d;
+      }
+    }
+
+    const start = Math.max(0, anchor.start);
+    const end = Math.min(start + windowSize, total);
+    if (end - start < MIN_CLIP_SECONDS) continue;
+
+    clips.push({
+      start,
+      end,
+      title: `Segment ${i + 1}`,
+      hook: "",
+      reason: "Auto-selected segment",
+      viralityScore: 0.3,
+    });
+  }
+  return clips;
 }
 
 // ─────────────────────────────────────────────────────────────
-// Upload a finished clip
+// Step 5 — Build clip URLs via Cloudinary trim transformations
+//
+// Cloudinary trims videos on the fly using:
+//   so_ (start_offset) — start time in seconds
+//   eo_ (end_offset)   — end time in seconds
+//
+// We also apply the reframe in the same URL so the delivered MP4
+// is already cropped for social (1080×1920) or standard (1280×720).
 // ─────────────────────────────────────────────────────────────
-async function uploadClip(localPath) {
-  const res = await withTimeout(
-    cloudinary.uploader.upload(localPath, {
-      resource_type: "video",
-      folder: "xamut/clips",
-      public_id: `clip_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-    }),
-    UPLOAD_TIMEOUT_MS,
-    "Cloudinary clip upload"
-  );
-  return res.secure_url;
+export function buildClipUrl({ publicId, start, end, aspectRatio = "portrait" }) {
+  const transformation = [
+    { start_offset: String(start), end_offset: String(end) },
+  ];
+
+  if (aspectRatio === "portrait") {
+    transformation.push({
+      width: 1080,
+      height: 1920,
+      crop: "fill",
+      gravity: "auto",
+    });
+  } else {
+    transformation.push({
+      width: 1280,
+      height: 720,
+      crop: "fill",
+      gravity: "auto",
+    });
+  }
+
+  return cloudinary.url(publicId, {
+    resource_type: "video",
+    format: "mp4",
+    transformation,
+    secure: true,
+  });
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -700,100 +500,64 @@ export async function processClipJob({
 
   if (!url) throw new Error("videoUrl is required");
 
-  const cleanup = [];
+  // 1. Ingest
+  await report("downloading");
+  const source = await ingestVideo({ url });
 
-  try {
-    // 1. Download
-    await report("downloading");
-    const source = await ingestVideo({ url });
-    cleanup.push(source.localPath);
-    log(`source ready: ${source.localPath}`);
-
-    // 2. Extract audio
-    await report("transcribing");
-    const audioPath = await createTempPath("audio", "mp3");
-    cleanup.push(audioPath);
-    await extractAudio(source.localPath, audioPath);
-
-    // 3. Transcribe
-    const { text, segments, duration } = await transcribeLocalAudio(audioPath);
-    if (!segments.length) {
-      throw new Error("Transcription returned no segments.");
-    }
-
-    // 4. Find highlights
-    await report("analyzing");
-    const candidates = await findHighlights({
-      segments,
-      userPrompt,
-      clipCount,
-      videoDuration: duration || source.duration || 0,
-    });
-
-    // 5. Cut + upload each clip
-    await report("clipping");
-    const clips = [];
-    for (let i = 0; i < candidates.length; i++) {
-      const c = candidates[i];
-      const clipPath = await createTempPath(`clip-${i}`, "mp4");
-      cleanup.push(clipPath);
-
-      try {
-        log(
-          `cutting clip ${i + 1}/${candidates.length} — ${c.start.toFixed(
-            1
-          )}s → ${c.end.toFixed(1)}s`
-        );
-        await cutClipLocally({
-          videoPath: source.localPath,
-          outputPath: clipPath,
-          start: c.start,
-          end: c.end,
-          aspectRatio,
-        });
-
-        const cloudUrl = await uploadClip(clipPath);
-        clips.push({
-          url: cloudUrl,
-          duration: Math.round(c.end - c.start),
-          startTime: c.start,
-          endTime: c.end,
-          title: c.title,
-          hook: c.hook,
-          viralityScore: c.viralityScore,
-          aspectRatio,
-        });
-      } catch (clipErr) {
-        log(`clip ${i + 1} failed: ${clipErr.message}`);
-      }
-    }
-
-    if (!clips.length) {
-      throw new Error("No clips were produced — every ffmpeg cut failed.");
-    }
-
-    return {
-      title: source.title || "",
-      duration: source.duration || duration,
-      transcript: text,
-      segments,
-      clips,
-    };
-  } finally {
-    for (const f of cleanup) {
-      await safeDeleteFile(f);
-    }
+  // 2. Transcribe
+  await report("transcribing");
+  const { text, segments, duration } = await transcribeAudio({
+    publicId: source.publicId,
+  });
+  if (!segments.length) {
+    throw new Error("Transcription returned no segments.");
   }
+
+  // 3. Find highlights
+  await report("analyzing");
+  const candidates = await findHighlights({
+    segments,
+    userPrompt,
+    clipCount,
+    videoDuration: source.duration || duration,
+  });
+
+  // 4. Build clip URLs
+  await report("clipping");
+  const clips = candidates.map((c) => ({
+    url: buildClipUrl({
+      publicId: source.publicId,
+      start: c.start,
+      end: c.end,
+      aspectRatio,
+    }),
+    duration: Math.round(c.end - c.start),
+    startTime: c.start,
+    endTime: c.end,
+    title: c.title,
+    hook: c.hook,
+    viralityScore: c.viralityScore,
+    aspectRatio,
+  }));
+
+  return {
+    title: source.title || "",
+    duration: source.duration || duration,
+    transcript: text,
+    segments,
+    clips,
+    sourcePublicId: source.publicId,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
-const formatTime = (secs) => {
+function formatTime(secs) {
   const m = Math.floor(secs / 60);
   const s = Math.floor(secs % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
-};
+}
 
 function sampleTranscript(segments, targetTokens) {
   const totalChars = segments.reduce((sum, s) => sum + s.text.length + 20, 0);
@@ -803,9 +567,7 @@ function sampleTranscript(segments, targetTokens) {
   const picked = [];
   for (let i = 0; i < segments.length; i += step) {
     const s = segments[i];
-    picked.push(
-      `[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text.trim()}`
-    );
+    picked.push(`[${formatTime(s.start)}-${formatTime(s.end)}] ${s.text.trim()}`);
   }
   return picked;
 }
