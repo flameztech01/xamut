@@ -1,1 +1,101 @@
 @import "tailwindcss";
+
+@import url('https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,100..900;1,100..900&display=swap');
+
+* {
+  font-family: 'Raleway', sans-serif;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Scrollbars
+   ───────────────────────────────────────────────────────────── */
+
+/* Firefox + modern Chromium (Chrome 121+) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(214 211 209) transparent; /* stone-300 on transparent */
+}
+
+/* Dark surface (code blocks, dark containers) */
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+*::-webkit-scrollbar-thumb {
+  background-color: rgb(214 211 209); /* stone-300 */
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(168 162 158); /* stone-400 */
+  background-clip: content-box;
+}
+
+*::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Utilities
+   ───────────────────────────────────────────────────────────── */
+
+/* Thinner + subtler, for the sidebar conversation list.
+   Use as: class="scrollbar-thin" */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+.scrollbar-thin:hover {
+  scrollbar-color: rgb(214 211 209) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 999px;
+}
+.scrollbar-thin:hover::-webkit-scrollbar-thumb {
+  background-color: rgb(214 211 209);
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(168 162 158);
+}
+
+/* Completely hidden but still scrollable.
+   Use as: class="scrollbar-none" on the mobile agent chip strip. */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+/* Dark variant for code blocks.
+   Use as: class="scrollbar-dark" on the <pre> in CodeBlock. */
+.scrollbar-dark {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(68 64 60) transparent; /* stone-700 */
+}
+.scrollbar-dark::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-dark::-webkit-scrollbar-thumb {
+  background-color: rgb(68 64 60);
+  border-radius: 999px;
+}
+.scrollbar-dark::-webkit-scrollbar-thumb:hover {
+  background-color: rgb(87 83 78); /* stone-600 */
+}
