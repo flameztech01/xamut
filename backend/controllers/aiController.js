@@ -19,6 +19,7 @@ import {
   resolveVisionModel,
   extractUserMemories,
   publicImageSources,
+  researchPerson,
 } from "../utils/xamutAI.js";
 
 // ─────────────────────────────────────────────────────────────────────
@@ -171,6 +172,11 @@ Tools (use them, don't just sit there):
 - fetch_website when they drop a link and want it read.
 - Name sources plainly. Never fabricate. Never invent a source, a
   detail, or a person.
+- If you were handed a "LIVE RESEARCH RESULTS" block in the user's
+  message, that data is real and current. Trust it over anything you
+  think you already know about the name in question, and answer using
+  it. If it clearly doesn't match what's being asked, say so instead
+  of guessing.
 
 Memory:
 - You may get a USER MEMORY block. That's stuff you know about this
@@ -710,6 +716,74 @@ Return JSON exactly:
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// Research intent detection
+//
+// The agent loop's tool_choice is "auto", which means the model is
+// free to skip searching and answer from memory instead. That's fine
+// for opinions and chit-chat, but for "who is X" / "what is X" style
+// questions it means the model can quietly hallucinate a plausible
+// sounding answer instead of admitting it doesn't know. This classifier
+// catches that class of question BEFORE the agent loop runs, forces a
+// real lookup, and hands the result to the model as grounding it's
+// told to trust over its own memory.
+// ─────────────────────────────────────────────────────────────────────
+async function detectResearchIntent({ message, history }) {
+  const recent = history
+    .slice(-6)
+    .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
+    .join("\n");
+
+  try {
+    const result = await groqJSON({
+      messages: [
+        {
+          role: "system",
+          content: `You classify whether the user wants a specific named person, brand, business, product, account, or thing looked up live, right now, rather than answered from memory.
+
+This includes: "who is X", "who's X", "what is X", "tell me about X",
+"do you know X", or any message that names a specific person, brand,
+handle, username, company, or app and asks about it directly.
+Especially trigger this for names that sound unfamiliar, niche, or
+like a small creator, freelancer, or personal brand, since those are
+exactly the ones a model is likely to get wrong from memory alone.
+
+This does NOT include: general knowledge questions with no specific
+name attached, opinions, advice, casual chat, requests to write or
+generate something, or a follow-up message that doesn't introduce a
+new name.
+
+Return STRICT JSON only:
+{
+  "needsResearch": boolean,
+  "query": "the name/handle/brand to look up, cleaned up, or null",
+  "context": "short hint like 'developer' or 'musician' if the message gives one, else null"
+}`,
+        },
+        {
+          role: "user",
+          content: `Recent conversation:
+${recent || "(none)"}
+
+Latest user message:
+${message}`,
+        },
+      ],
+      temperature: 0,
+      maxTokens: 200,
+    });
+
+    return {
+      needsResearch: !!result?.needsResearch,
+      query: result?.query || null,
+      context: result?.context || null,
+    };
+  } catch (err) {
+    console.warn("⚠️ Research intent detection failed:", err.message);
+    return { needsResearch: false, query: null, context: null };
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Shared turn engine
 // ─────────────────────────────────────────────────────────────────────
 async function executeChatTurn({
@@ -801,6 +875,7 @@ async function executeChatTurn({
   let replyImages = [];
   let replyImageSources = [];
   let replyWhereToFind = [];
+  let replyTextSources = [];
   const replyAttachments = [];
 
   try {
@@ -812,6 +887,45 @@ async function executeChatTurn({
         history,
         forceType: forceType || null,
       });
+    }
+
+    // Force a real lookup for "who/what is X" style messages instead of
+    // letting the model decide whether to bother searching.
+    if (!intent.wantsGeneration && !images.length && !docs.length && trimmed) {
+      const researchIntent = await detectResearchIntent({ message: trimmed, history });
+
+      if (researchIntent.needsResearch && researchIntent.query) {
+        report(`Looking up ${researchIntent.query}`);
+        try {
+          const research = await researchPerson(
+            researchIntent.query,
+            researchIntent.context || ""
+          );
+
+          if (research.images?.length) replyImages.push(...research.images);
+          if (research.imageSources?.length) replyImageSources.push(...research.imageSources);
+          if (research.whereToFind?.length) replyWhereToFind.push(...research.whereToFind);
+          if (research.sources?.length) replyTextSources.push(...research.sources);
+
+          const sourceLines = (research.sources || [])
+            .slice(0, 8)
+            .map((s) => `- ${s.title}: ${s.url}`)
+            .join("\n");
+
+          const grounding = `
+
+---
+LIVE RESEARCH RESULTS for "${researchIntent.query}" (real, current data — trust this over anything you think you already know about this name, and if it clearly doesn't match what's being asked, say that plainly instead of guessing):
+${research.answer || "(no summary, see sources below)"}
+
+Sources:
+${sourceLines || "(none found)"}`;
+
+          effectiveText = `${effectiveText}${grounding}`;
+        } catch (err) {
+          console.warn("⚠️ Forced research lookup failed:", err.message);
+        }
+      }
     }
 
     if (intent.wantsGeneration && intent.readyToGenerate && intent.topic) {
@@ -895,9 +1009,9 @@ async function executeChatTurn({
           });
           reply = refine.content || reply;
           usedModel = refine.model;
-          replyImages = refine.images || [];
-          replyImageSources = refine.imageSources || [];
-          replyWhereToFind = refine.whereToFind || [];
+          replyImages.push(...(refine.images || []));
+          replyImageSources.push(...(refine.imageSources || []));
+          replyWhereToFind.push(...(refine.whereToFind || []));
         }
       } else {
         const turn = await runAgentTurn({
@@ -908,9 +1022,9 @@ async function executeChatTurn({
         });
         reply = turn.content;
         usedModel = turn.model;
-        replyImages = turn.images || [];
-        replyImageSources = turn.imageSources || [];
-        replyWhereToFind = turn.whereToFind || [];
+        replyImages.push(...(turn.images || []));
+        replyImageSources.push(...(turn.imageSources || []));
+        replyWhereToFind.push(...(turn.whereToFind || []));
       }
     }
   } catch (aiErr) {
@@ -945,6 +1059,7 @@ async function executeChatTurn({
     });
   };
 
+  for (const s of replyTextSources) pushLink(s?.title, s?.url);
   for (const s of replyImageSources) pushLink(s?.title, s?.url);
   for (const s of replyWhereToFind) pushLink(s?.name, s?.url);
 
