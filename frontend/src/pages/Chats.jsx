@@ -268,7 +268,7 @@ const CodeBlock = ({ code, language }) => {
           )}
         </button>
       </div>
-      <pre className="overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed text-stone-100 sm:px-4 sm:text-[12.5px]">
+      <pre className="scrollbar-dark overflow-x-auto px-3.5 py-3 text-[12px] leading-relaxed text-stone-100 sm:px-4 sm:text-[12.5px]">
         <code className="font-mono">{code}</code>
       </pre>
     </div>
@@ -365,7 +365,7 @@ const markdownComponents = {
     );
   },
   table: ({ node, ...props }) => (
-    <div className="my-3.5 overflow-x-auto rounded-xl border border-stone-200">
+    <div className="scrollbar-thin my-3.5 overflow-x-auto rounded-xl border border-stone-200">
       <table className="w-full min-w-[520px] border-collapse text-sm" {...props} />
     </div>
   ),
@@ -1116,7 +1116,7 @@ const Chat = () => {
   const showForcePill = input.trim().length > 0;
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-[#f7f5f0] text-stone-900 antialiased">
+    <div className="flex h-dvh w-full overflow-hidden bg-[#f7f5f0] text-stone-900 antialiased">
       {sidebarOpen ? (
         <div
           className="fixed inset-0 z-30 bg-stone-900/40 backdrop-blur-[3px] transition-opacity md:hidden"
@@ -1133,7 +1133,10 @@ const Chat = () => {
             : "-translate-x-full"
         }`}
       >
-        <div className="flex items-center justify-between px-4 pb-3 pt-4">
+        <div
+          className="flex items-center justify-between px-4 pb-3 pt-4"
+          style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}
+        >
           <Link to="/" className="flex items-center gap-2.5">
             <XamutMark className="h-8 w-8" />
             <span className="text-[15px] font-semibold tracking-tight text-stone-900">
@@ -1206,7 +1209,7 @@ const Chat = () => {
           </button>
         </div>
 
-        <nav className="flex-1 overflow-y-auto px-2 pb-4">
+        <nav className="scrollbar-thin flex-1 overflow-y-auto px-2 pb-4">
           {listLoading ? (
             <div className="space-y-1.5 px-1">
               {[1, 2, 3, 4].map((i) => (
@@ -1298,7 +1301,10 @@ const Chat = () => {
 
       {/* ─── Main ────────────────────────────────────────── */}
       <main className="relative flex h-full min-w-0 flex-1 flex-col">
-        <header className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/85 px-2.5 backdrop-blur-xl sm:h-16 sm:gap-3 sm:px-4 md:px-6">
+        <header
+          className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/85 px-2.5 backdrop-blur-xl sm:h-16 sm:gap-3 sm:px-4 md:px-6"
+          style={{ paddingTop: "env(safe-area-inset-top)" }}
+        >
           <button
             onClick={() => setSidebarOpen(true)}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-stone-600 transition-all hover:bg-stone-100 hover:text-stone-900 active:scale-95 md:hidden"
@@ -1349,7 +1355,7 @@ const Chat = () => {
           </button>
         </header>
 
-        <div className="flex gap-1.5 overflow-x-auto border-b border-stone-200/70 bg-white/70 px-2.5 py-2 backdrop-blur-xl sm:hidden">
+        <div className="scrollbar-none flex gap-1.5 overflow-x-auto border-b border-stone-200/70 bg-white/70 px-2.5 py-2 backdrop-blur-xl sm:hidden">
           {AGENTS.map((a) => (
             <button
               key={a.id}
@@ -1369,7 +1375,7 @@ const Chat = () => {
           <div
             ref={scrollRef}
             onScroll={handleScroll}
-            className="h-full overflow-y-auto scroll-smooth"
+            className="scrollbar-thin h-full overflow-y-auto scroll-smooth"
           >
             <div className="mx-auto w-full max-w-3xl px-2.5 pb-6 pt-5 sm:px-6 sm:pt-8">
               {isEmpty && !isSending ? (
@@ -1414,7 +1420,12 @@ const Chat = () => {
           ) : null}
         </div>
 
-        <div className="shrink-0 bg-gradient-to-t from-[#f7f5f0] via-[#f7f5f0] to-transparent px-2.5 pb-2.5 pt-2 sm:px-6 sm:pb-4">
+        <div
+          className="shrink-0 bg-gradient-to-t from-[#f7f5f0] via-[#f7f5f0] to-transparent px-2.5 pt-2 sm:px-6"
+          style={{
+            paddingBottom: "max(env(safe-area-inset-bottom), 0.625rem)",
+          }}
+        >
           <div className="mx-auto max-w-3xl">
             {showForcePill ? (
               <div className="mb-2 flex items-center justify-end gap-1.5 overflow-x-auto pb-0.5">
@@ -1581,7 +1592,7 @@ const Chat = () => {
               </div>
             </div>
 
-            <p className="mt-2 text-center text-[10px] text-stone-400 sm:mt-2.5 sm:text-[11px]">
+            <p className="mt-2 mb-0 text-center text-[10px] text-stone-400 sm:mt-2.5 sm:text-[11px]">
               Xamut can make mistakes. Verify important info.
             </p>
           </div>

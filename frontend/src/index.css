@@ -7,6 +7,54 @@
 }
 
 /* ─────────────────────────────────────────────────────────────
+   Document shell
+   Locks the page so only inner scrollers scroll. Fixes the
+   mobile URL-bar dance on Chrome for Android where the header
+   slides off and the composer falls below the fold.
+   ───────────────────────────────────────────────────────────── */
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Prevent iOS Safari from zooming the page when the composer
+   textarea is focused. 16px is the threshold. */
+input,
+textarea,
+select,
+button {
+  font-size: 16px;
+}
+@media (min-width: 640px) {
+  input,
+  textarea,
+  select {
+    font-size: inherit;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
    Scrollbars
    ───────────────────────────────────────────────────────────── */
 
@@ -16,7 +64,7 @@
   scrollbar-color: rgb(214 211 209) transparent; /* stone-300 on transparent */
 }
 
-/* Dark surface (code blocks, dark containers) */
+/* WebKit (Chrome, Edge, Safari) */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -46,7 +94,8 @@
    Utilities
    ───────────────────────────────────────────────────────────── */
 
-/* Thinner + subtler, for the sidebar conversation list.
+/* Thinner + subtler, for the sidebar conversation list and the
+   message scroll area. Bar fades in on hover.
    Use as: class="scrollbar-thin" */
 .scrollbar-thin {
   scrollbar-width: thin;
@@ -98,4 +147,28 @@
 }
 .scrollbar-dark::-webkit-scrollbar-thumb:hover {
   background-color: rgb(87 83 78); /* stone-600 */
+}
+
+/* Keeps the layout from jumping a few pixels when a scrollbar
+   appears or disappears. Chrome + Firefox honour it, Safari
+   silently ignores it.
+   Use as: class="scroll-stable" */
+.scroll-stable {
+  scrollbar-gutter: stable;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Safe area
+   Helpers for iPhone notch / Android gesture bar.
+   ───────────────────────────────────────────────────────────── */
+
+/* Top: pushes content below the notch / status bar. */
+.safe-top {
+  padding-top: env(safe-area-inset-top);
+}
+
+/* Bottom: keeps a comfortable minimum gap even on phones with
+   no home indicator, grows it on phones that have one. */
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0.625rem);
 }
