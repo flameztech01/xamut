@@ -137,7 +137,7 @@ const XamutMark = ({ className = "h-9 w-9" }) => (
 );
 
 const XamutAvatar = ({ size = "md" }) => {
-  const dims = size === "sm" ? "h-7 w-7" : "h-8 w-8";
+  const dims = size === "sm" ? "h-6 w-6 sm:h-7 sm:w-7" : "h-7 w-7 sm:h-8 sm:w-8";
   return (
     <div
       className={`${dims} flex shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-orange-400 to-orange-600 shadow-sm shadow-orange-500/25 ring-2 ring-white`}
@@ -153,7 +153,10 @@ const XamutAvatar = ({ size = "md" }) => {
 };
 
 const UserAvatar = ({ userInfo, size = "md" }) => {
-  const dims = size === "sm" ? "h-8 w-8 text-[11px]" : "h-9 w-9 text-xs";
+  const dims =
+    size === "sm"
+      ? "h-7 w-7 text-[10px] sm:h-8 sm:w-8 sm:text-[11px]"
+      : "h-9 w-9 text-xs";
   const initial = (userInfo?.name || "U").charAt(0).toUpperCase();
   const photo = userInfo?.profilePhoto || userInfo?.profile;
 
@@ -212,8 +215,9 @@ const AgentSwitch = ({ agent, onChange, className = "" }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Mobile agent picker — a compact pill + popover so we don't
-// burn a whole row of vertical space on small screens.
+// Mobile agent picker — compact pill + popover.
+// Sizes are aggressively small on mobile to free up vertical
+// space on 320–375px screens.
 // ─────────────────────────────────────────────────────────────
 const AgentPickerMobile = ({ agent, onChange }) => {
   const [open, setOpen] = useState(false);
@@ -241,20 +245,20 @@ const AgentPickerMobile = ({ agent, onChange }) => {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors active:scale-95 ${
+        className={`flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-semibold leading-none transition-colors active:scale-95 ${
           open
             ? "border-orange-300 bg-orange-50 text-orange-700"
             : "border-stone-200/80 bg-white text-stone-700 hover:bg-stone-50"
         }`}
       >
-        <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+        <span className="h-1 w-1 rounded-full bg-orange-500" />
         {active.label}
         <svg
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
-          strokeWidth="2.4"
-          className={`h-3 w-3 text-stone-400 transition-transform duration-200 ${
+          strokeWidth="2.6"
+          className={`h-2.5 w-2.5 text-stone-400 transition-transform duration-200 ${
             open ? "rotate-180" : ""
           }`}
         >
@@ -263,7 +267,7 @@ const AgentPickerMobile = ({ agent, onChange }) => {
       </button>
 
       {open ? (
-        <div className="absolute right-0 top-full z-50 mt-2 w-44 overflow-hidden rounded-2xl border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10">
+        <div className="absolute right-0 top-full z-50 mt-1.5 w-36 overflow-hidden rounded-xl border border-stone-200/80 bg-white py-0.5 shadow-xl shadow-stone-900/10">
           {AGENTS.map((a) => {
             const isActive = a.id === agent;
             return (
@@ -274,14 +278,14 @@ const AgentPickerMobile = ({ agent, onChange }) => {
                   onChange(a.id);
                   setOpen(false);
                 }}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] transition-colors ${
+                className={`flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-[11px] leading-tight transition-colors ${
                   isActive
                     ? "bg-orange-50/80 font-semibold text-orange-700"
                     : "text-stone-700 hover:bg-stone-50"
                 }`}
               >
                 <span
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  className={`h-1 w-1 shrink-0 rounded-full ${
                     isActive ? "bg-orange-500" : "bg-stone-300"
                   }`}
                 />
@@ -291,8 +295,8 @@ const AgentPickerMobile = ({ agent, onChange }) => {
                     viewBox="0 0 24 24"
                     fill="none"
                     stroke="currentColor"
-                    strokeWidth="2.6"
-                    className="h-3 w-3 text-orange-500"
+                    strokeWidth="2.8"
+                    className="h-2.5 w-2.5 shrink-0 text-orange-500"
                   >
                     <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
                   </svg>
@@ -506,14 +510,14 @@ const LinkPreview = ({ attachment }) => {
       href={url}
       target="_blank"
       rel="noopener noreferrer"
-      className="group flex items-center gap-2.5 rounded-xl border border-stone-200/80 bg-white px-3 py-2.5 transition-all duration-150 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-sm"
+      className="group flex items-center gap-2 rounded-xl border border-stone-200/80 bg-white px-2.5 py-2 transition-all duration-150 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-sm sm:gap-2.5 sm:px-3 sm:py-2.5"
     >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-stone-100 ring-1 ring-stone-200/60">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-stone-100 ring-1 ring-stone-200/60 sm:h-9 sm:w-9">
         {favicon ? (
           <img
             src={favicon}
             alt=""
-            className="h-4 w-4"
+            className="h-3.5 w-3.5 sm:h-4 sm:w-4"
             loading="lazy"
             onError={(e) => {
               e.currentTarget.style.display = "none";
@@ -525,7 +529,7 @@ const LinkPreview = ({ attachment }) => {
             fill="none"
             stroke="currentColor"
             strokeWidth="1.8"
-            className="h-4 w-4 text-stone-400"
+            className="h-3.5 w-3.5 text-stone-400 sm:h-4 sm:w-4"
           >
             <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07L12 5" />
             <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07L12 19" />
@@ -533,10 +537,10 @@ const LinkPreview = ({ attachment }) => {
         )}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[12.5px] font-semibold text-stone-800">
+        <span className="block truncate text-[12px] font-semibold text-stone-800 sm:text-[12.5px]">
           {title}
         </span>
-        <span className="mt-0.5 block truncate text-[11px] text-stone-400">
+        <span className="mt-0.5 block truncate text-[10.5px] text-stone-400 sm:text-[11px]">
           {domain || url}
         </span>
       </span>
@@ -570,7 +574,7 @@ const AssistantImageGrid = ({ images }) => {
         href={img.url}
         target="_blank"
         rel="noopener noreferrer"
-        className="group block w-full max-w-[260px] overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100 shadow-sm"
+        className="group block w-full max-w-[220px] overflow-hidden rounded-2xl border border-stone-200/80 bg-stone-100 shadow-sm sm:max-w-[260px]"
       >
         <img
           src={img.url}
@@ -586,7 +590,7 @@ const AssistantImageGrid = ({ images }) => {
   const shown = images.slice(0, 6);
 
   return (
-    <div className={`grid w-full max-w-sm ${cols} gap-1.5`}>
+    <div className={`grid w-full max-w-xs ${cols} gap-1.5 sm:max-w-sm`}>
       {shown.map((img, i) => (
         <a
           key={`${img.url}-${i}`}
@@ -620,10 +624,10 @@ const DocumentCard = ({ attachment, onOpen }) => {
     <button
       type="button"
       onClick={() => onOpen(attachment.documentId)}
-      className="group flex w-full items-center gap-3 rounded-2xl border border-stone-200/80 bg-white px-3.5 py-3 text-left shadow-sm shadow-stone-900/[0.02] transition-all duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-[0_10px_24px_-16px_rgba(234,88,12,0.4)]"
+      className="group flex w-full items-center gap-2.5 rounded-2xl border border-stone-200/80 bg-white px-3 py-2.5 text-left shadow-sm shadow-stone-900/[0.02] transition-all duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-[0_10px_24px_-16px_rgba(234,88,12,0.4)] sm:gap-3 sm:px-3.5 sm:py-3"
     >
       <span
-        className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${meta.bg} ${meta.text}`}
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl sm:h-10 sm:w-10 ${meta.bg} ${meta.text}`}
       >
         {isPresentation ? (
           <svg
@@ -631,7 +635,7 @@ const DocumentCard = ({ attachment, onOpen }) => {
             fill="none"
             stroke="currentColor"
             strokeWidth="1.8"
-            className="h-5 w-5"
+            className="h-4 w-4 sm:h-5 sm:w-5"
           >
             <rect x="3" y="4" width="18" height="12" rx="1.5" />
             <path d="M8 20h8M12 16v4" strokeLinecap="round" />
@@ -642,7 +646,7 @@ const DocumentCard = ({ attachment, onOpen }) => {
             fill="none"
             stroke="currentColor"
             strokeWidth="1.8"
-            className="h-5 w-5"
+            className="h-4 w-4 sm:h-5 sm:w-5"
           >
             <path
               d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
@@ -654,11 +658,11 @@ const DocumentCard = ({ attachment, onOpen }) => {
         )}
       </span>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[13px] font-semibold text-stone-800">
+        <span className="block truncate text-[12.5px] font-semibold text-stone-800 sm:text-[13px]">
           {attachment.title || "Generated file"}
         </span>
         <span
-          className={`mt-0.5 block text-[10px] font-semibold uppercase tracking-wider ${meta.text}`}
+          className={`mt-0.5 block text-[9.5px] font-semibold uppercase tracking-wider sm:text-[10px] ${meta.text}`}
         >
           {meta.label} · {attachment.pageCount || 0}{" "}
           {isPresentation ? "slides" : "pages"} · Open
@@ -696,7 +700,7 @@ const UserAttachmentPreview = ({ attachment }) => {
         <img
           src={attachment.url}
           alt={attachment.name || "attachment"}
-          className="max-h-56 max-w-[220px] object-cover sm:max-w-[280px]"
+          className="max-h-48 max-w-[180px] object-cover sm:max-h-56 sm:max-w-[280px]"
         />
       </a>
     );
@@ -706,15 +710,15 @@ const UserAttachmentPreview = ({ attachment }) => {
       href={attachment.url}
       target="_blank"
       rel="noopener noreferrer"
-      className="flex items-center gap-2 rounded-2xl border border-stone-200/80 bg-white px-3 py-2 text-xs text-stone-600 shadow-sm transition-colors hover:bg-stone-50"
+      className="flex items-center gap-2 rounded-2xl border border-stone-200/80 bg-white px-2.5 py-1.5 text-[11px] text-stone-600 shadow-sm transition-colors hover:bg-stone-50 sm:px-3 sm:py-2 sm:text-xs"
     >
-      <span className="flex h-6 w-6 items-center justify-center rounded-lg bg-orange-100 text-orange-600">
+      <span className="flex h-5 w-5 items-center justify-center rounded-lg bg-orange-100 text-orange-600 sm:h-6 sm:w-6">
         <svg
           viewBox="0 0 24 24"
           fill="none"
           stroke="currentColor"
           strokeWidth="2"
-          className="h-3.5 w-3.5"
+          className="h-3 w-3 sm:h-3.5 sm:w-3.5"
         >
           <path
             d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"
@@ -723,7 +727,7 @@ const UserAttachmentPreview = ({ attachment }) => {
           <path d="M14 2v6h6" strokeLinecap="round" />
         </svg>
       </span>
-      <span className="max-w-[160px] truncate">
+      <span className="max-w-[130px] truncate sm:max-w-[160px]">
         {attachment.name || "Document"}
       </span>
     </a>
@@ -741,22 +745,24 @@ const ThinkingBubble = ({ statuses = [] }) => {
       <div className="hidden sm:block">
         <XamutAvatar size="sm" />
       </div>
-      <div className="min-w-0 max-w-full rounded-2xl rounded-bl-md border border-stone-200/70 bg-white px-3.5 py-2.5 shadow-sm shadow-stone-900/[0.02] sm:max-w-md sm:rounded-bl-md">
+      <div className="min-w-0 max-w-full rounded-2xl rounded-bl-md border border-stone-200/70 bg-white px-3 py-2 shadow-sm shadow-stone-900/[0.02] sm:max-w-md sm:px-3.5 sm:py-2.5">
         {tail.length === 0 ? (
           <div className="flex items-center gap-2">
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-orange-400 [animation-delay:-0.3s]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-orange-400 [animation-delay:-0.15s]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-orange-400" />
-            <span className="ml-1 text-[12px] text-stone-400">Thinking…</span>
+            <span className="ml-1 text-[11px] text-stone-400 sm:text-[12px]">
+              Thinking…
+            </span>
           </div>
         ) : (
-          <ul className="space-y-1.5">
+          <ul className="space-y-1">
             {tail.map((s, i) => {
               const isLast = i === tail.length - 1;
               return (
                 <li
                   key={`${s}-${i}`}
-                  className={`flex items-start gap-2 text-[12.5px] leading-snug ${
+                  className={`flex items-start gap-2 text-[11.5px] leading-snug sm:text-[12.5px] ${
                     isLast ? "text-stone-800" : "text-stone-400"
                   }`}
                 >
@@ -808,7 +814,7 @@ const MessageBubble = ({ message, userInfo }) => {
         )}
 
         {message.content ? (
-          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-gradient-to-br from-orange-500 to-orange-600 px-3.5 py-2.5 text-[14px] leading-relaxed text-white shadow-sm shadow-orange-500/20 sm:max-w-[70%] sm:text-[14.5px]">
+          <div className="max-w-[85%] rounded-2xl rounded-br-md bg-gradient-to-br from-orange-500 to-orange-600 px-3 py-2 text-[13.5px] leading-relaxed text-white shadow-sm shadow-orange-500/20 sm:max-w-[70%] sm:px-3.5 sm:py-2.5 sm:text-[14.5px]">
             <p className="whitespace-pre-wrap break-words">{message.content}</p>
           </div>
         ) : null}
@@ -843,7 +849,7 @@ const MessageBubble = ({ message, userInfo }) => {
 
       <div className="min-w-0 flex-1">
         <div className="mb-1 flex items-center gap-2 px-1">
-          <span className="text-[11.5px] font-semibold text-stone-700">
+          <span className="text-[11px] font-semibold text-stone-700 sm:text-[11.5px]">
             Xamut
           </span>
           {message.createdAt ? (
@@ -854,7 +860,7 @@ const MessageBubble = ({ message, userInfo }) => {
         </div>
 
         {cleanedContent ? (
-          <div className="max-w-full rounded-2xl rounded-bl-md border border-stone-200/70 bg-white px-3.5 py-2.5 text-stone-700 shadow-sm shadow-stone-900/[0.02] sm:max-w-[80%]">
+          <div className="max-w-full rounded-2xl rounded-bl-md border border-stone-200/70 bg-white px-3 py-2 text-stone-700 shadow-sm shadow-stone-900/[0.02] sm:max-w-[80%] sm:px-3.5 sm:py-2.5">
             <Markdown>{cleanedContent}</Markdown>
           </div>
         ) : null}
@@ -929,30 +935,30 @@ const MessageBubble = ({ message, userInfo }) => {
 // ─────────────────────────────────────────────────────────────
 const EmptyState = ({ userInfo, onSuggestion }) => (
   <div className="flex flex-col items-center px-1 pb-6 pt-4 text-center sm:pb-10 sm:pt-8">
-    <XamutMark className="h-11 w-11 rounded-2xl sm:h-14 sm:w-14" />
+    <XamutMark className="h-10 w-10 rounded-2xl sm:h-14 sm:w-14" />
 
-    <h2 className="mt-4 text-[20px] font-semibold tracking-tight text-stone-900 sm:mt-6 sm:text-[26px]">
+    <h2 className="mt-3 text-[18px] font-semibold tracking-tight text-stone-900 sm:mt-6 sm:text-[26px]">
       Hi{userInfo?.name ? `, ${userInfo.name.split(" ")[0]}` : ""} 👋
     </h2>
-    <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-stone-500 sm:text-[14px]">
+    <p className="mt-1.5 max-w-sm text-[12.5px] leading-relaxed text-stone-500 sm:text-[14px]">
       Ask anything, drop a file, or pick a starting point below.
     </p>
 
-    <div className="mt-5 w-full max-w-md space-y-2 sm:mt-9">
+    <div className="mt-4 w-full max-w-md space-y-1.5 sm:mt-9 sm:space-y-2">
       {SUGGESTIONS.map((s) => (
         <button
           key={s.text}
           onClick={() => onSuggestion(s.text)}
-          className="group flex w-full items-center gap-3 rounded-2xl border border-stone-200/80 bg-white p-3 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-[0_10px_28px_-16px_rgba(234,88,12,0.35)] sm:p-3.5"
+          className="group flex w-full items-center gap-2.5 rounded-2xl border border-stone-200/80 bg-white p-2.5 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-[0_10px_28px_-16px_rgba(234,88,12,0.35)] sm:gap-3 sm:p-3.5"
         >
-          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-orange-50 text-[10px] font-bold uppercase tracking-wide text-orange-500 transition-colors duration-200 group-hover:bg-orange-500 group-hover:text-white">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-orange-50 text-[9px] font-bold uppercase tracking-wide text-orange-500 transition-colors duration-200 group-hover:bg-orange-500 group-hover:text-white sm:h-9 sm:w-9 sm:text-[10px]">
             {s.tag.slice(0, 2)}
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-[10px] font-semibold uppercase tracking-[0.12em] text-stone-400 transition-colors group-hover:text-orange-500">
+            <span className="block text-[9.5px] font-semibold uppercase tracking-[0.12em] text-stone-400 transition-colors group-hover:text-orange-500 sm:text-[10px]">
               {s.tag}
             </span>
-            <span className="mt-0.5 line-clamp-2 block text-[12.5px] leading-snug text-stone-700 sm:text-[13px]">
+            <span className="mt-0.5 line-clamp-2 block text-[12px] leading-snug text-stone-700 sm:text-[13px]">
               {s.text}
             </span>
           </span>
@@ -961,7 +967,7 @@ const EmptyState = ({ userInfo, onSuggestion }) => (
             fill="none"
             stroke="currentColor"
             strokeWidth="2"
-            className="h-4 w-4 shrink-0 text-stone-300 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-orange-500"
+            className="h-3.5 w-3.5 shrink-0 text-stone-300 transition-all duration-200 group-hover:translate-x-0.5 group-hover:text-orange-500 sm:h-4 sm:w-4"
           >
             <path
               d="M5 12h14M12 5l7 7-7 7"
@@ -1397,12 +1403,12 @@ const Chat = () => {
       {/* ─── Main ────────────────────────────────────────── */}
       <main className="relative flex h-full min-w-0 flex-1 flex-col">
         <header
-          className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/85 px-2.5 backdrop-blur-xl sm:h-16 sm:gap-3 sm:px-4 md:px-6"
+          className="z-20 flex h-12 shrink-0 items-center gap-1.5 border-b border-stone-200/70 bg-white/85 px-2 backdrop-blur-xl sm:h-16 sm:gap-3 sm:px-4 md:px-6"
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
           <button
             onClick={() => setSidebarOpen(true)}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl text-stone-600 transition-all hover:bg-stone-100 hover:text-stone-900 active:scale-95 md:hidden"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-stone-600 transition-all hover:bg-stone-100 hover:text-stone-900 active:scale-95 sm:h-9 sm:w-9 sm:rounded-xl md:hidden"
             aria-label="Open menu"
           >
             <svg
@@ -1419,15 +1425,15 @@ const Chat = () => {
           <XamutAvatar size="sm" />
 
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[13px] font-semibold tracking-tight text-stone-900 sm:text-sm">
+            <h1 className="truncate text-[12.5px] font-semibold tracking-tight text-stone-900 sm:text-sm">
               {activeTitle}
             </h1>
-            <p className="truncate text-[10.5px] text-stone-400 sm:text-[11px]">
+            <p className="truncate text-[10px] text-stone-400 sm:text-[11px]">
               {activeAgent.hint}
             </p>
           </div>
 
-          {/* Compact mobile agent picker — replaces the old chip row */}
+          {/* Compact mobile agent picker */}
           <AgentPickerMobile agent={agent} onChange={setAgent} />
 
           {/* Desktop segmented control */}
@@ -1460,7 +1466,7 @@ const Chat = () => {
             onScroll={handleScroll}
             className="scrollbar-thin h-full overflow-y-auto scroll-smooth"
           >
-            <div className="mx-auto w-full max-w-3xl px-2.5 pb-6 pt-4 sm:px-6 sm:pt-8">
+            <div className="mx-auto w-full max-w-3xl px-2.5 pb-6 pt-3 sm:px-6 sm:pt-8">
               {isEmpty && !isSending ? (
                 <EmptyState
                   userInfo={userInfo}
@@ -1468,7 +1474,7 @@ const Chat = () => {
                 />
               ) : null}
 
-              <div className="space-y-4 sm:space-y-5">
+              <div className="space-y-3.5 sm:space-y-5">
                 {messages.map((m) => (
                   <MessageBubble key={m._id} message={m} userInfo={userInfo} />
                 ))}
@@ -1483,7 +1489,7 @@ const Chat = () => {
                 atBottomRef.current = true;
                 scrollToBottom();
               }}
-              className="absolute bottom-4 left-1/2 flex h-9 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-stone-200/80 bg-white text-stone-500 shadow-lg shadow-stone-900/5 transition-all hover:-translate-y-0.5 hover:text-orange-600"
+              className="absolute bottom-4 left-1/2 flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full border border-stone-200/80 bg-white text-stone-500 shadow-lg shadow-stone-900/5 transition-all hover:-translate-y-0.5 hover:text-orange-600 sm:h-9 sm:w-9"
               aria-label="Scroll to latest"
             >
               <svg
@@ -1491,7 +1497,7 @@ const Chat = () => {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth="2"
-                className="h-4 w-4"
+                className="h-3.5 w-3.5 sm:h-4 sm:w-4"
               >
                 <path
                   d="M12 5v14M19 12l-7 7-7-7"
@@ -1504,14 +1510,14 @@ const Chat = () => {
         </div>
 
         <div
-          className="shrink-0 bg-gradient-to-t from-[#f7f5f0] via-[#f7f5f0] to-transparent px-2.5 pt-2 sm:px-6"
+          className="shrink-0 bg-gradient-to-t from-[#f7f5f0] via-[#f7f5f0] to-transparent px-2 pt-1.5 sm:px-6 sm:pt-2"
           style={{
-            paddingBottom: "max(env(safe-area-inset-bottom), 0.625rem)",
+            paddingBottom: "max(env(safe-area-inset-bottom), 0.5rem)",
           }}
         >
           <div className="mx-auto max-w-3xl">
             {showForcePill ? (
-              <div className="mb-2 flex items-center justify-end gap-1.5 overflow-x-auto pb-0.5">
+              <div className="mb-1.5 flex items-center justify-end gap-1.5 overflow-x-auto pb-0.5">
                 <span className="hidden text-[10px] font-semibold uppercase tracking-wider text-stone-400 sm:inline">
                   Output
                 </span>
@@ -1527,7 +1533,7 @@ const Chat = () => {
                         key={String(opt.id)}
                         type="button"
                         onClick={() => setForceType(opt.id)}
-                        className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold transition-colors ${
+                        className={`shrink-0 rounded-full px-2 py-0.5 text-[9.5px] font-semibold leading-none transition-colors sm:px-2.5 sm:py-1 sm:text-[10px] ${
                           active
                             ? "bg-orange-500 text-white shadow-sm shadow-orange-500/25"
                             : "text-stone-500 hover:text-stone-800"
@@ -1541,22 +1547,22 @@ const Chat = () => {
               </div>
             ) : null}
 
-            <div className="rounded-[22px] border border-stone-200/90 bg-white p-1.5 shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_28px_-18px_rgba(28,25,23,0.28)] transition-all duration-200 focus-within:border-orange-300/80 focus-within:shadow-[0_1px_2px_rgba(28,25,23,0.04),0_14px_34px_-16px_rgba(234,88,12,0.35)] sm:rounded-[24px]">
+            <div className="rounded-[20px] border border-stone-200/90 bg-white p-1 shadow-[0_1px_2px_rgba(28,25,23,0.04),0_12px_28px_-18px_rgba(28,25,23,0.28)] transition-all duration-200 focus-within:border-orange-300/80 focus-within:shadow-[0_1px_2px_rgba(28,25,23,0.04),0_14px_34px_-16px_rgba(234,88,12,0.35)] sm:rounded-[24px] sm:p-1.5">
               {pending.length > 0 || uploading ? (
-                <div className="flex flex-wrap gap-1.5 px-1.5 pb-1.5 pt-2 sm:gap-2 sm:px-2">
+                <div className="flex flex-wrap gap-1.5 px-1 pb-1 pt-1.5 sm:gap-2 sm:px-2 sm:pb-1.5 sm:pt-2">
                   {pending.map((a, i) => (
                     <div
                       key={i}
-                      className="flex items-center gap-1.5 rounded-xl border border-stone-200/80 bg-stone-50 py-1 pl-1.5 pr-0.5 text-[11px] sm:gap-2 sm:py-1.5 sm:pl-2 sm:pr-1 sm:text-xs"
+                      className="flex items-center gap-1.5 rounded-lg border border-stone-200/80 bg-stone-50 py-0.5 pl-1 pr-0.5 text-[10.5px] sm:gap-2 sm:rounded-xl sm:py-1.5 sm:pl-2 sm:pr-1 sm:text-xs"
                     >
                       {a.type === "image" ? (
                         <img
                           src={a.url}
                           alt={a.name}
-                          className="h-5 w-5 rounded-md object-cover sm:h-6 sm:w-6 sm:rounded-lg"
+                          className="h-5 w-5 rounded object-cover sm:h-6 sm:w-6 sm:rounded-lg"
                         />
                       ) : (
-                        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-orange-100 text-orange-600 sm:h-6 sm:w-6 sm:rounded-lg">
+                        <span className="flex h-5 w-5 items-center justify-center rounded bg-orange-100 text-orange-600 sm:h-6 sm:w-6 sm:rounded-lg">
                           <svg
                             viewBox="0 0 24 24"
                             fill="none"
@@ -1572,12 +1578,12 @@ const Chat = () => {
                           </svg>
                         </span>
                       )}
-                      <span className="max-w-[110px] truncate text-stone-600 sm:max-w-[150px]">
+                      <span className="max-w-[100px] truncate text-stone-600 sm:max-w-[150px]">
                         {a.name}
                       </span>
                       <button
                         onClick={() => handleRemovePending(i)}
-                        className="rounded-md p-0.5 text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-700"
+                        className="rounded p-0.5 text-stone-400 transition-colors hover:bg-stone-200 hover:text-stone-700"
                         aria-label="Remove attachment"
                       >
                         <svg
@@ -1597,7 +1603,7 @@ const Chat = () => {
                   ))}
 
                   {uploading ? (
-                    <div className="flex items-center gap-2 rounded-xl border border-stone-200/80 bg-stone-50 px-2.5 py-1.5 text-[11px] text-stone-500 sm:px-3 sm:py-2 sm:text-xs">
+                    <div className="flex items-center gap-2 rounded-lg border border-stone-200/80 bg-stone-50 px-2 py-1 text-[10.5px] text-stone-500 sm:rounded-xl sm:px-3 sm:py-2 sm:text-xs">
                       <span className="h-3 w-3 animate-spin rounded-full border-2 border-stone-300 border-t-orange-500 sm:h-3.5 sm:w-3.5" />
                       Uploading…
                     </div>
@@ -1605,12 +1611,12 @@ const Chat = () => {
                 </div>
               ) : null}
 
-              <div className="flex items-end gap-0.5 sm:gap-1">
+              <div className="flex items-end gap-0 sm:gap-1">
                 <button
                   type="button"
                   onClick={handleFilePick}
                   disabled={uploading}
-                  className="shrink-0 rounded-full p-2 text-stone-400 transition-colors hover:bg-stone-100 hover:text-orange-600 disabled:opacity-40 sm:p-2.5"
+                  className="shrink-0 rounded-full p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-orange-600 disabled:opacity-40 sm:p-2.5"
                   aria-label="Attach file"
                 >
                   <svg
@@ -1618,7 +1624,7 @@ const Chat = () => {
                     fill="none"
                     stroke="currentColor"
                     strokeWidth="1.9"
-                    className="h-[17px] w-[17px] sm:h-[18px] sm:w-[18px]"
+                    className="h-4 w-4 sm:h-[18px] sm:w-[18px]"
                   >
                     <path
                       d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"
@@ -1642,7 +1648,7 @@ const Chat = () => {
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
                   placeholder={`Message ${activeAgent.label}…`}
-                  className="max-h-[160px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2.5 text-[15px] leading-relaxed text-stone-900 outline-none placeholder:text-stone-400 sm:max-h-[200px] sm:px-1.5"
+                  className="max-h-[140px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-stone-900 outline-none placeholder:text-stone-400 sm:max-h-[200px] sm:px-1.5 sm:py-2.5"
                 />
 
                 <button
@@ -1651,7 +1657,7 @@ const Chat = () => {
                   disabled={
                     isSending || uploading || (!input.trim() && !pending.length)
                   }
-                  className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow-md shadow-orange-500/25 transition-all duration-200 hover:shadow-lg hover:shadow-orange-500/35 active:scale-95 disabled:bg-none disabled:bg-stone-200 disabled:text-stone-400 disabled:shadow-none"
+                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow-md shadow-orange-500/25 transition-all duration-200 hover:shadow-lg hover:shadow-orange-500/35 active:scale-95 disabled:bg-none disabled:bg-stone-200 disabled:text-stone-400 disabled:shadow-none sm:h-9 sm:w-9"
                   aria-label="Send message"
                 >
                   {isSending ? (
@@ -1675,7 +1681,7 @@ const Chat = () => {
               </div>
             </div>
 
-            <p className="mt-2 mb-0 text-center text-[10px] text-stone-400 sm:mt-2.5 sm:text-[11px]">
+            <p className="mt-1.5 mb-0 text-center text-[9.5px] text-stone-400 sm:mt-2.5 sm:text-[11px]">
               Xamut can make mistakes. Verify important info.
             </p>
           </div>

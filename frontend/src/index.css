@@ -8,9 +8,6 @@
 
 /* ─────────────────────────────────────────────────────────────
    Document shell
-   Keeps the app the same height as the visible viewport so the
-   mobile URL bar can show and hide without dragging the header
-   off screen or pushing the composer below the fold.
    ───────────────────────────────────────────────────────────── */
 html,
 body,
@@ -36,40 +33,44 @@ body {
   height: 100dvh;
 }
 
-/* Fallback for browsers that don't support dvh yet. */
 @supports not (height: 100dvh) {
   #root {
     height: 100vh;
   }
 }
 
-/* Prevent iOS Safari from zooming the whole page when the
-   composer textarea is focused. 16px is the threshold. */
-input,
-textarea,
-select,
-button {
-  font-size: 16px;
-}
-@media (min-width: 640px) {
-  input,
-  textarea,
-  select {
-    font-size: inherit;
+/* ─────────────────────────────────────────────────────────────
+   iOS zoom guard
+   Only text-entry fields need to be 16px on mobile, otherwise
+   Safari zooms the whole page when they're focused. Buttons and
+   selects do not need this and forcing it there was breaking
+   every small UI control on mobile.
+
+   We target inputs by type so we don't accidentally hit checkboxes,
+   radios, or range sliders (which have no font size anyway and
+   shouldn't be stretched).
+   ───────────────────────────────────────────────────────────── */
+@media (max-width: 639px) {
+  input[type="text"],
+  input[type="email"],
+  input[type="password"],
+  input[type="search"],
+  input[type="tel"],
+  input[type="url"],
+  input[type="number"],
+  textarea {
+    font-size: 16px;
   }
 }
 
 /* ─────────────────────────────────────────────────────────────
    Scrollbars
    ───────────────────────────────────────────────────────────── */
-
-/* Firefox + modern Chromium (Chrome 121+) */
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgb(214 211 209) transparent; /* stone-300 on transparent */
+  scrollbar-color: rgb(214 211 209) transparent;
 }
 
-/* WebKit (Chrome, Edge, Safari) */
 *::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -80,14 +81,14 @@ button {
 }
 
 *::-webkit-scrollbar-thumb {
-  background-color: rgb(214 211 209); /* stone-300 */
+  background-color: rgb(214 211 209);
   border-radius: 999px;
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(168 162 158); /* stone-400 */
+  background-color: rgb(168 162 158);
   background-clip: content-box;
 }
 
@@ -99,9 +100,6 @@ button {
    Utilities
    ───────────────────────────────────────────────────────────── */
 
-/* Thinner + subtler, fades in on hover. For the sidebar
-   conversation list and the message scroll area.
-   Use as: class="scrollbar-thin" */
 .scrollbar-thin {
   scrollbar-width: thin;
   scrollbar-color: transparent transparent;
@@ -124,8 +122,6 @@ button {
   background-color: rgb(168 162 158);
 }
 
-/* Completely hidden but still scrollable.
-   Use as: class="scrollbar-none" */
 .scrollbar-none {
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -136,11 +132,9 @@ button {
   height: 0;
 }
 
-/* Dark variant for code blocks.
-   Use as: class="scrollbar-dark" on the <pre> in CodeBlock. */
 .scrollbar-dark {
   scrollbar-width: thin;
-  scrollbar-color: rgb(68 64 60) transparent; /* stone-700 */
+  scrollbar-color: rgb(68 64 60) transparent;
 }
 .scrollbar-dark::-webkit-scrollbar {
   width: 8px;
@@ -151,28 +145,20 @@ button {
   border-radius: 999px;
 }
 .scrollbar-dark::-webkit-scrollbar-thumb:hover {
-  background-color: rgb(87 83 78); /* stone-600 */
+  background-color: rgb(87 83 78);
 }
 
-/* Keeps the layout from jumping when a scrollbar appears.
-   Chrome + Firefox honour it, Safari silently ignores it.
-   Use as: class="scroll-stable" */
 .scroll-stable {
   scrollbar-gutter: stable;
 }
 
 /* ─────────────────────────────────────────────────────────────
    Safe area
-   Helpers for iPhone notch / Android gesture bar.
    ───────────────────────────────────────────────────────────── */
-
-/* Top: pushes content below the notch / status bar. */
 .safe-top {
   padding-top: env(safe-area-inset-top);
 }
 
-/* Bottom: comfortable minimum gap on phones without a home
-   indicator, grows it on phones that have one. */
 .safe-bottom {
   padding-bottom: max(env(safe-area-inset-bottom), 0.625rem);
 }
