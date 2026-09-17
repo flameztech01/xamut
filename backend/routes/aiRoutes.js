@@ -19,9 +19,6 @@ import {
   analyzeImage,
   generateDocument,
   generatePresentation,
-  startClipJobController,
-  getClipJobStatus,
-  listClipJobs,
   getResolvedModels,
 } from "../controllers/aiController.js";
 
@@ -91,7 +88,7 @@ router.post(
 // ─── Chat ────────────────────────────────────────────────────
 // @route   POST /api/ai/chat
 // @desc    Send a message — runs the selected agent (with tools, vision,
-//          and intent-driven document/presentation/clip generation)
+//          and intent-driven document/presentation generation)
 // @access  Private
 router.post("/chat", protect, sendMessage);
 
@@ -121,20 +118,6 @@ router
   .get(protect, getConversation)
   .put(protect, updateConversation)
   .delete(protect, deleteConversation);
-
-// ─── Clips ───────────────────────────────────────────────────
-// Order matters: /clips (list) must be registered before /clips/:id,
-// otherwise Express would treat GET /clips as a lookup for id="list".
-//
-// @route   GET  /api/ai/clips
-// @route   POST /api/ai/clips
-router
-  .route("/clips")
-  .get(protect, listClipJobs)
-  .post(protect, startClipJobController);
-
-// @route   GET /api/ai/clips/:id
-router.get("/clips/:id", protect, getClipJobStatus);
 
 // ─── Tools ───────────────────────────────────────────────────
 // @route   POST /api/ai/tools/search

@@ -6,6 +6,7 @@ const attachmentSchema = new mongoose.Schema(
     // "image"              → user-uploaded image
     // "document"           → user-uploaded pdf/docx/txt
     // "url"                → reserved (paste-a-link flows)
+    // "link"               → assistant source links (Wikimedia, Wikipedia, etc.)
     // "generated-document" → AI-written doc/ppt, references Document._id
     // "clip-job"           → Groq clipper job, references ClipJob._id
     type: {
@@ -14,13 +15,14 @@ const attachmentSchema = new mongoose.Schema(
         "image",
         "document",
         "url",
+        "link",
         "generated-document",
         "clip-job",
       ],
       required: true,
     },
 
-    // For user uploads (image / document / url)
+    // For user uploads (image / document / url) and assistant links
     url: { type: String, default: "" },
     name: { type: String, default: "" },
     mimeType: { type: String, default: "" },
@@ -74,7 +76,7 @@ const conversationSchema = new mongoose.Schema(
 
     agent: {
       type: String,
-      enum: ["chat", "coding", "assignment", "research"],
+      enum: ["chat", "coding", "writer", "research"],
       default: "chat",
     },
 

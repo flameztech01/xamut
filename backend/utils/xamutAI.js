@@ -3,29 +3,13 @@
 // Groq-backed AI service.
 // Env vars are read lazily so nothing depends on dotenv import order.
 //
-// Models are RESOLVED AT RUNTIME against GET /v1/models, so a model being
-// retired or moved behind an enterprise plan degrades instead of 404-ing.
-//
-// Web access: GPT-OSS models get Groq's SERVER-SIDE browser_search built-in
-// (no API key of your own needed). Tavily is only used as an extra local
-// function when TAVILY_API_KEY happens to be set.
-//
-// TPM budgeting: gpt-oss-120b / gpt-oss-20b / qwen3.8-27b are capped at 8,000
-// tokens-per-minute on the free plan — input + reserved output both count.
-// groq/compound and groq/compound-mini get 70,000. Before every agent call we
-// estimate the request size and trim history/output to fit; if Groq still
-// rejects it with a 413, we parse the real limit out of the error, shrink
-// further, and as a last resort fall over to groq/compound for that turn.
-//
-// Live status: runAgentTurn accepts an optional onStatus(text) callback that
-// fires as tools execute, so SSE/streaming callers can show "Searching the
-// web..." in real time while the turn is still running.
+// Model resolution, TPM budgeting, tool calling, image search, live
+// status streaming.
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_URL = `${GROQ_BASE}/chat/completions`;
 const MODELS_URL = `${GROQ_BASE}/models`;
 
-// ─── Lazy env getters ─────────────────────────────────────────
 const getGroqKey = () => process.env.GROQ_API_KEY;
 
 const TEXT_CANDIDATES = [
@@ -53,20 +37,76 @@ const isCompoundSystem = (model = "") => /^groq\/compound/.test(model);
 // Small helpers
 // ─────────────────────────────────────────────────────────────────────
 const truncate = (s, n) =>
-  s.length > n ? s.slice(0, Math.max(0, n - 1)) + "…" : s;
+  s.length > n ? s.slice(0, Math.max(0, n - 1)) + "..." : s;
 
-// Safely fire an onStatus callback without ever letting it break the turn.
 const emitStatus = (onStatus, text) => {
   if (typeof onStatus !== "function" || !text) return;
   try {
     onStatus(text);
   } catch {
-    /* progress reporting must never kill the request */
+    /* never let progress reporting kill the request */
   }
 };
 
+const dedupeByUrl = (list = []) => {
+  const seen = new Set();
+  const out = [];
+  for (const item of list) {
+    const url = item?.url;
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    out.push(item);
+  }
+  return out;
+};
+
 // ─────────────────────────────────────────────────────────────────────
-// TPM budgets — known free-plan defaults, self-corrected from real 413s.
+// Public image sources
+//
+// When the user asks to see a picture of someone or something, we hand
+// them real public archive links. Tavily's image search may or may not
+// return direct image URLs on every plan, so this is the reliable
+// fallback: always give the user somewhere real to go look.
+// ─────────────────────────────────────────────────────────────────────
+export function publicImageSources(query) {
+  const q = encodeURIComponent(String(query || "").trim());
+  if (!q) return [];
+  return [
+    {
+      name: "Wikimedia Commons",
+      url: `https://commons.wikimedia.org/w/index.php?search=${q}`,
+      note: "Free-licensed and public-domain photos.",
+    },
+    {
+      name: "Wikipedia",
+      url: `https://en.wikipedia.org/w/index.php?search=${q}`,
+      note: "Encyclopedic article, usually with a portrait.",
+    },
+    {
+      name: "Getty Images",
+      url: `https://www.gettyimages.com/photos/${q}`,
+      note: "Editorial and press photography.",
+    },
+    {
+      name: "Google Images",
+      url: `https://www.google.com/search?tbm=isch&q=${q}`,
+      note: "Broad web image results.",
+    },
+    {
+      name: "Bing Images",
+      url: `https://www.bing.com/images/search?q=${q}`,
+      note: "Broad web image results.",
+    },
+    {
+      name: "IMDb",
+      url: `https://www.imdb.com/find/?q=${q}`,
+      note: "Headshots for actors and filmmakers.",
+    },
+  ];
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// TPM budgets
 // ─────────────────────────────────────────────────────────────────────
 const DEFAULT_TPM = {
   "openai/gpt-oss-120b": 8000,
@@ -79,16 +119,13 @@ const DEFAULT_TPM = {
   "llama-3.3-70b-versatile": 8000,
 };
 const _learnedTpm = new Map();
-
 const tpmFor = (model) => _learnedTpm.get(model) || DEFAULT_TPM[model] || 8000;
-
 const learnTpm = (model, limit) => {
   if (limit && Number.isFinite(limit)) _learnedTpm.set(model, limit);
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Rough token estimation (chars/4 heuristic — good enough for budgeting,
-// not billing). ~4 tokens overhead per message for role/formatting.
+// Token estimation
 // ─────────────────────────────────────────────────────────────────────
 const textOf = (content) => {
   if (typeof content === "string") return content;
@@ -116,7 +153,7 @@ const trimHistoryToBudget = (history, fixedTokens, budget) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Model discovery (cached for the process lifetime)
+// Model discovery
 // ─────────────────────────────────────────────────────────────────────
 let _modelCache = null;
 let _modelCachePromise = null;
@@ -143,7 +180,7 @@ export async function listAvailableModels({ force = false } = {}) {
     }
     const data = await res.json();
     _modelCache = (data?.data || []).map((m) => m.id);
-    console.log(`✅ Groq models available to this key: ${_modelCache.join(", ")}`);
+    console.log(`✅ Groq models available: ${_modelCache.join(", ")}`);
     return _modelCache;
   })();
 
@@ -160,15 +197,13 @@ async function pickModel(candidates, envOverride) {
   try {
     available = await listAvailableModels();
   } catch (err) {
-    console.warn("⚠️ Model discovery failed, using first candidate:", err.message);
+    console.warn("⚠️ Model discovery failed:", err.message);
     return forced || candidates[0];
   }
 
   if (forced) {
     if (available.includes(forced)) return forced;
-    console.warn(
-      `⚠️ "${forced}" from .env is not available to this key — falling back.`
-    );
+    console.warn(`⚠️ "${forced}" not available, falling back.`);
   }
 
   const match = candidates.find((c) => available.includes(c));
@@ -178,22 +213,15 @@ async function pickModel(candidates, envOverride) {
     (m) =>
       !/whisper|guard|orpheus|tts|embed/i.test(m) && !m.startsWith("groq/compound")
   );
-  if (generic) {
-    console.warn(`⚠️ No preferred model available, using "${generic}".`);
-    return generic;
-  }
+  if (generic) return generic;
 
-  throw new Error(
-    `No usable chat model on this Groq key. Available: ${available.join(", ") || "none"}`
-  );
+  throw new Error(`No usable chat model. Available: ${available.join(", ")}`);
 }
 
 export const resolveTextModel = () =>
   pickModel(TEXT_CANDIDATES, process.env.GROQ_TEXT_MODEL);
-
 export const resolveVisionModel = () =>
   pickModel(VISION_CANDIDATES, process.env.GROQ_VISION_MODEL);
-
 export const getTextModel = () =>
   process.env.GROQ_TEXT_MODEL || TEXT_CANDIDATES[0];
 export const getVisionModel = () =>
@@ -228,10 +256,7 @@ export async function groqChat({
   reasoningEffort,
 }) {
   const GROQ_KEY = getGroqKey();
-  if (!GROQ_KEY)
-    throw new Error(
-      "GROQ_API_KEY is not set. Add it to your .env and restart the server."
-    );
+  if (!GROQ_KEY) throw new Error("GROQ_API_KEY is not set.");
 
   const chosenModel = model || (await resolveTextModel());
 
@@ -248,9 +273,6 @@ export async function groqChat({
   }
   if (/gpt-oss|qwen/i.test(chosenModel)) {
     body.reasoning_format = "hidden";
-    // Low reasoning effort on JSON-mode calls leaves the model less room to
-    // wander before it has to commit to output, which reduces truncated /
-    // malformed JSON on small token budgets.
     body.reasoning_effort = reasoningEffort || (jsonMode ? "low" : undefined);
   }
 
@@ -275,11 +297,9 @@ export async function groqChat({
     try {
       parsedBody = JSON.parse(raw);
       detail = parsedBody?.error?.message || raw;
-    } catch {
-      /* keep raw */
-    }
+    } catch {}
 
-    if (res.status === 404) _modelCache = null; // retired model: self-heal
+    if (res.status === 404) _modelCache = null;
     if (res.status === 413 || res.status === 429) {
       const { limit, namedModel } = parseLimitError(detail);
       if (!namedModel || namedModel === chosenModel) {
@@ -288,16 +308,13 @@ export async function groqChat({
     }
 
     const err = new Error(
-      `Groq ${res.status} on model "${chosenModel}": ${
+      `Groq ${res.status} on "${chosenModel}": ${
         detail?.slice ? detail.slice(0, 500) : detail || res.statusText
       }`
     );
     err.status = res.status;
     err.model = chosenModel;
     err.detail = detail || "";
-    // Groq includes the model's raw (invalid) attempt here on json-mode
-    // validation failures — surfaced so callers can log/retry intelligently
-    // instead of just seeing "adjust your prompt".
     err.failedGeneration = parsedBody?.error?.failed_generation || null;
     throw err;
   }
@@ -323,16 +340,12 @@ const extractJson = (raw) => {
   } catch {
     const start = cleaned.indexOf("{");
     const end = cleaned.lastIndexOf("}");
-    if (start !== -1 && end > start) return JSON.parse(cleaned.slice(start, end + 1));
+    if (start !== -1 && end > start)
+      return JSON.parse(cleaned.slice(start, end + 1));
     throw new Error("Model did not return valid JSON.");
   }
 };
 
-// Groq's own json_object-mode validator can reject a response outright
-// (400 "Failed to validate JSON") before it ever reaches us as text — this
-// usually means the schema was too complex for the token budget or the
-// model wandered off-format. We retry once with a blunter, shorter-form
-// instruction and a bumped token budget before giving up.
 export async function groqJSON(args) {
   try {
     const raw = await groqText({ ...args, jsonMode: true, tools: undefined });
@@ -340,18 +353,9 @@ export async function groqJSON(args) {
   } catch (err) {
     const isValidationFailure =
       err.status === 400 && /validate json/i.test(err.detail || "");
-    const isParseFailure = !err.status; // extractJson threw locally
-
+    const isParseFailure = !err.status;
     if (!isValidationFailure && !isParseFailure) throw err;
 
-    console.warn(
-      `⚠️ groqJSON first attempt failed (${
-        isValidationFailure ? "Groq validation" : "local parse"
-      }) — retrying once with a stricter prompt.`,
-      err.failedGeneration ? `Model attempted: ${JSON.stringify(err.failedGeneration).slice(0, 300)}` : ""
-    );
-
-    const lastUserMsg = [...args.messages].reverse().find((m) => m.role === "user");
     const retryMessages = [
       ...args.messages,
       {
@@ -382,11 +386,33 @@ export const TOOLS = [
     function: {
       name: "web_search",
       description:
-        "Search the internet for current information. Returns top results with titles, URLs and snippets.",
+        "Search the internet for current information. Returns titles, URLs, and snippets.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "The search query." },
+          query: { type: "string" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "image_search",
+      description:
+        "Search the web for pictures of a person, place, or thing. Use whenever the user asks to see a photo, a face, a place, or a product. Returns direct image URLs plus the public source pages the images came from and a list of public archives (Wikimedia Commons, Wikipedia, Getty, Google Images, IMDb) that host more photos of the same subject. Never claim you cannot find or show images, always call this instead.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "What to find images of, e.g. 'Cristiano Ronaldo'.",
+          },
+          count: {
+            type: "number",
+            description: "How many images to return. Defaults to 6, max 8.",
+          },
         },
         required: ["query"],
       },
@@ -397,13 +423,51 @@ export const TOOLS = [
     function: {
       name: "fetch_website",
       description:
-        "Fetch a public website by URL and return its readable text content (scripts/styles stripped).",
+        "Fetch a public website by URL and return its readable text content.",
       parameters: {
         type: "object",
         properties: {
-          url: { type: "string", description: "Absolute http(s) URL." },
+          url: { type: "string" },
         },
         required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "deep_search",
+      description:
+        "Run 3 to 5 web searches at once on different angles of the same topic. Use for comparisons, deep dives, or anything one query can't cover. Returns merged results.",
+      parameters: {
+        type: "object",
+        properties: {
+          queries: {
+            type: "array",
+            items: { type: "string" },
+          },
+        },
+        required: ["queries"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "research_person",
+      description:
+        "Look up a public figure (celebrity, athlete, founder, politician, creator). Returns bio, career, verified socials, news, quotes, public family information, direct image URLs, the public pages those images came from, and a list of public archives where more photos of the person are available. Use this for fans, interviews, career questions, 'who is X' requests, and any 'show me a picture of X' request about a real public figure.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "The person's name." },
+          context: {
+            type: "string",
+            description:
+              "Optional context like 'football player' or 'Nigerian musician'.",
+          },
+        },
+        required: ["name"],
       },
     },
   },
@@ -421,11 +485,7 @@ const builtInTools = (model) => {
 
 export const toolsFor = (model) => {
   if (isCompoundSystem(model)) return [];
-
-  const local = [TOOLS.find((t) => t.function.name === "fetch_website")];
-  if (process.env.TAVILY_API_KEY && !supportsBuiltIns(model))
-    local.unshift(TOOLS.find((t) => t.function.name === "web_search"));
-  return [...builtInTools(model), ...local.filter(Boolean)];
+  return [...builtInTools(model), ...TOOLS];
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -433,8 +493,7 @@ export const toolsFor = (model) => {
 // ─────────────────────────────────────────────────────────────────────
 export async function webSearch(query, maxResults = 5) {
   const key = process.env.TAVILY_API_KEY;
-  if (!key)
-    throw new Error("TAVILY_API_KEY is not set (needed for web search).");
+  if (!key) throw new Error("TAVILY_API_KEY is not set.");
 
   const res = await fetch("https://api.tavily.com/search", {
     method: "POST",
@@ -464,9 +523,60 @@ export async function webSearch(query, maxResults = 5) {
   };
 }
 
+// imageSearch — Tavily with include_images, plus a public-archive
+// fallback list so the model always has real links to hand the user.
+export async function imageSearch(query, count = 6) {
+  const key = process.env.TAVILY_API_KEY;
+  if (!key) throw new Error("TAVILY_API_KEY is not set.");
+
+  const limit = Math.max(1, Math.min(Number(count) || 6, 8));
+
+  const res = await fetch("https://api.tavily.com/search", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${key}`,
+    },
+    body: JSON.stringify({
+      query,
+      max_results: 6,
+      include_images: true,
+      include_image_descriptions: true,
+      search_depth: "basic",
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.text().catch(() => "");
+    throw new Error(`Image search failed (${res.status}): ${err.slice(0, 200)}`);
+  }
+  const data = await res.json();
+
+  // Tavily returns either strings or { url, description } depending on plan
+  const raw = data.images || [];
+  const images = raw
+    .map((img) =>
+      typeof img === "string"
+        ? { url: img, description: "" }
+        : { url: img.url || img, description: img.description || "" }
+    )
+    .filter((img) => img.url)
+    .slice(0, limit);
+
+  const sources = (data.results || []).slice(0, 6).map((r) => ({
+    title: r.title,
+    url: r.url,
+  }));
+
+  return {
+    query,
+    images,
+    sources,
+    whereToFind: publicImageSources(query),
+  };
+}
+
 export async function fetchWebsite(url) {
-  if (!/^https?:\/\//i.test(url))
-    throw new Error("URL must start with http(s).");
+  if (!/^https?:\/\//i.test(url)) throw new Error("URL must start with http(s).");
 
   const res = await fetch(url, {
     headers: {
@@ -492,46 +602,148 @@ export async function fetchWebsite(url) {
   return text.slice(0, 20000);
 }
 
+export async function deepSearch(queries) {
+  if (!Array.isArray(queries) || queries.length === 0) {
+    throw new Error("deep_search requires a non-empty queries array.");
+  }
+
+  const capped = queries
+    .filter((q) => typeof q === "string" && q.trim())
+    .slice(0, 5);
+
+  const results = await Promise.all(
+    capped.map((q) =>
+      webSearch(q.trim(), 5).catch(() => ({ answer: "", results: [] }))
+    )
+  );
+
+  const seen = new Set();
+  const merged = [];
+  for (let i = 0; i < results.length; i++) {
+    for (const item of results[i].results || []) {
+      if (!item.url || seen.has(item.url)) continue;
+      seen.add(item.url);
+      merged.push({ ...item, fromQuery: capped[i] });
+      if (merged.length >= 20) break;
+    }
+    if (merged.length >= 20) break;
+  }
+
+  return {
+    queries: capped,
+    answers: results.map((r) => r.answer).filter(Boolean),
+    sources: merged,
+  };
+}
+
+// researchPerson — public figure deep lookup + images + public archives
+export async function researchPerson(name, context = "") {
+  if (!name || typeof name !== "string") {
+    throw new Error("research_person requires a name.");
+  }
+
+  const base = context ? `${name} ${context}` : name;
+
+  const queries = [
+    `${base} biography career`,
+    `${base} news`,
+    `${base} interview quotes`,
+    `${base} family parents wife children`,
+    `${base} instagram twitter verified`,
+  ];
+
+  const [textResults, imageResults] = await Promise.all([
+    Promise.all(
+      queries.map((q) =>
+        webSearch(q, 4).catch(() => ({ answer: "", results: [] }))
+      )
+    ),
+    imageSearch(base, 6).catch(() => ({
+      images: [],
+      sources: [],
+      whereToFind: [],
+    })),
+  ]);
+
+  const seen = new Set();
+  const merged = [];
+  for (const r of textResults) {
+    for (const item of r.results || []) {
+      if (!item.url || seen.has(item.url)) continue;
+      seen.add(item.url);
+      merged.push(item);
+      if (merged.length >= 15) break;
+    }
+    if (merged.length >= 15) break;
+  }
+
+  return {
+    name,
+    context: context || null,
+    answer: textResults
+      .map((r) => r.answer)
+      .filter(Boolean)
+      .join(" ")
+      .slice(0, 1200),
+    sources: merged,
+    images: imageResults.images || [],
+    imageSources: imageResults.sources || [],
+    whereToFind:
+      imageResults.whereToFind?.length
+        ? imageResults.whereToFind
+        : publicImageSources(base),
+  };
+}
+
 export async function runTool(name, args) {
   switch (name) {
     case "web_search":
       return await webSearch(args.query);
+    case "image_search":
+      return await imageSearch(args.query, args.count);
     case "fetch_website":
       return await fetchWebsite(args.url);
+    case "deep_search":
+      return await deepSearch(args.queries);
+    case "research_person":
+      return await researchPerson(args.name, args.context);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Human-readable status text for a tool call.
-// Returns null when we don't have anything useful to say.
+// Status text for streaming
 // ─────────────────────────────────────────────────────────────────────
 const statusForToolCall = (call) => {
   const name = call?.function?.name;
-  let parsedArgs = {};
+  let args = {};
   try {
-    parsedArgs = JSON.parse(call?.function?.arguments || "{}");
-  } catch {
-    /* ignore */
-  }
+    args = JSON.parse(call?.function?.arguments || "{}");
+  } catch {}
 
-  if (name === "web_search") {
-    const q = parsedArgs.query;
-    return q ? `Searching the web for "${truncate(String(q), 60)}"` : "Searching the web";
+  if (name === "web_search")
+    return args.query
+      ? `Searching for "${truncate(String(args.query), 60)}"`
+      : "Searching";
+  if (name === "image_search")
+    return args.query
+      ? `Finding public images of ${truncate(String(args.query), 40)}`
+      : "Finding public images";
+  if (name === "fetch_website") return "Reading the page";
+  if (name === "deep_search") {
+    const n = Array.isArray(args.queries) ? args.queries.length : 0;
+    return n > 1 ? `Running ${n} searches` : "Searching";
   }
-  if (name === "fetch_website") {
-    return parsedArgs.url ? "Reading the linked page" : "Reading the page";
-  }
+  if (name === "research_person")
+    return args.name
+      ? `Looking up ${truncate(String(args.name), 40)}`
+      : "Looking someone up";
   return null;
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Agentic loop — TPM-budget aware.
-//
-// `onStatus` (optional): (text: string) => void. Fires as the turn
-// progresses so streaming callers can render live status lines like
-// "Searching the web…". Never awaited; failures are swallowed.
+// Agentic loop
 // ─────────────────────────────────────────────────────────────────────
 export async function runAgentTurn({
   systemPrompt,
@@ -548,17 +760,17 @@ export async function runAgentTurn({
   const MAX_SHRINK_ATTEMPTS = 3;
   const MAX_429_WAIT_MS = 15000;
   const executed = [];
+  const collectedImages = [];
+  const collectedImageSources = [];
+  const collectedWhereToFind = [];
 
-  // Kick off with a generic status so the UI has something to show
-  // during the first (potentially slow) model call.
   emitStatus(onStatus, "Thinking");
 
   let available = [];
   try {
     available = await listAvailableModels();
-  } catch {
-    /* fall through — pickModel below already warns */
-  }
+  } catch {}
+
   const preferred = model || (await resolveTextModel());
   const chain = [
     preferred,
@@ -569,6 +781,15 @@ export async function runAgentTurn({
   ].filter((m, i, arr) => arr.indexOf(m) === i);
 
   let lastErr = null;
+
+  const finish = (content, attemptModel) => ({
+    content,
+    model: attemptModel,
+    executed,
+    images: dedupeByUrl(collectedImages),
+    imageSources: dedupeByUrl(collectedImageSources),
+    whereToFind: dedupeByUrl(collectedWhereToFind),
+  });
 
   for (const attemptModel of chain) {
     let outputBudget = maxTokens;
@@ -615,12 +836,11 @@ export async function runAgentTurn({
 
         if (err.status === 413 && shrinkAttempts < MAX_SHRINK_ATTEMPTS) {
           shrinkAttempts++;
-          const budget = tpmFor(attemptModel);
           outputBudget = Math.max(400, Math.floor(outputBudget * 0.6));
           trimmedHistory = trimHistoryToBudget(
             trimmedHistory,
             fixedTokens(),
-            budget
+            tpmFor(attemptModel)
           );
           messages = buildMessages();
           i--;
@@ -634,11 +854,6 @@ export async function runAgentTurn({
             MAX_429_WAIT_MS - totalWaitedMs
           );
           if (waitMs > 0 && totalWaitedMs < MAX_429_WAIT_MS) {
-            console.warn(
-              `⚠️ "${attemptModel}" rate limited, waiting ${Math.round(
-                waitMs / 1000
-              )}s before retry...`
-            );
             emitStatus(
               onStatus,
               `Waiting ${Math.round(waitMs / 1000)}s on the rate limit`
@@ -685,7 +900,7 @@ export async function runAgentTurn({
 
       if (toolCalls.length === 0) {
         const content = messageText(choice);
-        if (content) return { content, model: attemptModel, executed };
+        if (content) return finish(content, attemptModel);
 
         messages.push({
           role: "user",
@@ -703,17 +918,32 @@ export async function runAgentTurn({
 
       for (const call of choice.tool_calls) {
         let result;
-
-        // Emit a status line based on which tool is firing
         const statusText = statusForToolCall(call);
         if (statusText) emitStatus(onStatus, statusText);
 
         try {
           const args = JSON.parse(call.function?.arguments || "{}");
           result = await runTool(call.function.name, args);
+
+          // Collect images and public source links so the frontend can
+          // render them alongside the text reply.
+          if (call.function.name === "image_search") {
+            for (const img of result?.images || []) collectedImages.push(img);
+            for (const s of result?.sources || []) collectedImageSources.push(s);
+            for (const s of result?.whereToFind || [])
+              collectedWhereToFind.push(s);
+          }
+          if (call.function.name === "research_person") {
+            for (const img of result?.images || []) collectedImages.push(img);
+            for (const s of result?.imageSources || [])
+              collectedImageSources.push(s);
+            for (const s of result?.whereToFind || [])
+              collectedWhereToFind.push(s);
+          }
         } catch (err) {
           result = { error: err.message };
         }
+
         messages.push({
           role: "tool",
           tool_call_id: call.id,
@@ -729,7 +959,7 @@ export async function runAgentTurn({
     console.warn(
       `⚠️ "${attemptModel}" could not complete this turn (${
         lastErr?.message || "ran out of iterations"
-      }) — trying next model.`
+      }), trying next model.`
     );
   }
 
@@ -737,6 +967,83 @@ export async function runAgentTurn({
     lastErr ||
     new Error("No Groq model in the fallback chain could handle this request.")
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Memory extraction — used by the controller after every turn
+// ─────────────────────────────────────────────────────────────────────
+export async function extractUserMemories({ userMessage, assistantReply, recentHistory = [] }) {
+  const context = [
+    ...recentHistory.slice(-4).map((m) => `${m.role.toUpperCase()}: ${m.content}`),
+    `USER: ${userMessage}`,
+    `ASSISTANT: ${assistantReply}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  try {
+    const result = await groqJSON({
+      messages: [
+        {
+          role: "system",
+          content: `You extract durable facts about the USER from a conversation turn.
+
+Only extract things that are true about the user and worth remembering long-term:
+- name, location, age, school, job, relationship status
+- preferences (how they like responses, tone, format)
+- interests, favourites (teams, celebs, music, shows)
+- projects they're working on
+- important dates or events
+
+Do NOT extract:
+- things the user was just asking about (a question is not a fact)
+- transient info ("I'm tired today")
+- assistant's own statements
+- anything the assistant inferred without the user saying it
+
+Return STRICT JSON only.`,
+        },
+        {
+          role: "user",
+          content: `Conversation turn:
+
+${context}
+
+Return JSON exactly:
+{
+  "memories": [
+    {
+      "category": "identity" | "preference" | "interest" | "project" | "fact",
+      "text": "short statement, e.g. 'Their name is Samuel'",
+      "importance": number between 0 and 1
+    }
+  ]
+}
+
+Return an empty array if there's nothing durable. Max 4 memories per turn.`,
+        },
+      ],
+      temperature: 0.2,
+      maxTokens: 400,
+    });
+
+    const memories = Array.isArray(result?.memories) ? result.memories : [];
+    return memories
+      .filter((m) => m?.text && typeof m.text === "string")
+      .slice(0, 4)
+      .map((m) => ({
+        category: ["identity", "preference", "interest", "project", "fact"].includes(
+          m.category
+        )
+          ? m.category
+          : "fact",
+        text: m.text.trim().slice(0, 300),
+        importance: Math.min(Math.max(Number(m.importance) || 0.5, 0), 1),
+      }));
+  } catch (err) {
+    console.warn("⚠️ Memory extraction failed:", err.message);
+    return [];
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────
