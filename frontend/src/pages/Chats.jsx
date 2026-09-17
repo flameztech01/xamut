@@ -212,6 +212,101 @@ const AgentSwitch = ({ agent, onChange, className = "" }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Mobile agent picker — a compact pill + popover so we don't
+// burn a whole row of vertical space on small screens.
+// ─────────────────────────────────────────────────────────────
+const AgentPickerMobile = ({ agent, onChange }) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+
+  const active = AGENTS.find((a) => a.id === agent) || AGENTS[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const handle = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handle);
+    document.addEventListener("touchstart", handle);
+    return () => {
+      document.removeEventListener("mousedown", handle);
+      document.removeEventListener("touchstart", handle);
+    };
+  }, [open]);
+
+  return (
+    <div ref={wrapRef} className="relative sm:hidden">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-semibold transition-colors active:scale-95 ${
+          open
+            ? "border-orange-300 bg-orange-50 text-orange-700"
+            : "border-stone-200/80 bg-white text-stone-700 hover:bg-stone-50"
+        }`}
+      >
+        <span className="h-1.5 w-1.5 rounded-full bg-orange-500" />
+        {active.label}
+        <svg
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.4"
+          className={`h-3 w-3 text-stone-400 transition-transform duration-200 ${
+            open ? "rotate-180" : ""
+          }`}
+        >
+          <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open ? (
+        <div className="absolute right-0 top-full z-50 mt-2 w-44 overflow-hidden rounded-2xl border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10">
+          {AGENTS.map((a) => {
+            const isActive = a.id === agent;
+            return (
+              <button
+                key={a.id}
+                type="button"
+                onClick={() => {
+                  onChange(a.id);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] transition-colors ${
+                  isActive
+                    ? "bg-orange-50/80 font-semibold text-orange-700"
+                    : "text-stone-700 hover:bg-stone-50"
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                    isActive ? "bg-orange-500" : "bg-stone-300"
+                  }`}
+                />
+                <span className="min-w-0 flex-1 truncate">{a.label}</span>
+                {isActive ? (
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.6"
+                    className="h-3 w-3 text-orange-500"
+                  >
+                    <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
+                  </svg>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Code block
 // ─────────────────────────────────────────────────────────────
 const CodeBlock = ({ code, language }) => {
@@ -833,17 +928,17 @@ const MessageBubble = ({ message, userInfo }) => {
 // Empty state
 // ─────────────────────────────────────────────────────────────
 const EmptyState = ({ userInfo, onSuggestion }) => (
-  <div className="flex flex-col items-center px-1 pb-8 pt-6 text-center sm:pb-10 sm:pt-8">
-    <XamutMark className="h-12 w-12 rounded-2xl sm:h-14 sm:w-14" />
+  <div className="flex flex-col items-center px-1 pb-6 pt-4 text-center sm:pb-10 sm:pt-8">
+    <XamutMark className="h-11 w-11 rounded-2xl sm:h-14 sm:w-14" />
 
-    <h2 className="mt-5 text-[22px] font-semibold tracking-tight text-stone-900 sm:mt-6 sm:text-[26px]">
+    <h2 className="mt-4 text-[20px] font-semibold tracking-tight text-stone-900 sm:mt-6 sm:text-[26px]">
       Hi{userInfo?.name ? `, ${userInfo.name.split(" ")[0]}` : ""} 👋
     </h2>
-    <p className="mt-1.5 max-w-sm text-[13.5px] leading-relaxed text-stone-500 sm:text-[14px]">
+    <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-stone-500 sm:text-[14px]">
       Ask anything, drop a file, or pick a starting point below.
     </p>
 
-    <div className="mt-7 w-full max-w-md space-y-2 sm:mt-9">
+    <div className="mt-5 w-full max-w-md space-y-2 sm:mt-9">
       {SUGGESTIONS.map((s) => (
         <button
           key={s.text}
@@ -1328,10 +1423,14 @@ const Chat = () => {
               {activeTitle}
             </h1>
             <p className="truncate text-[10.5px] text-stone-400 sm:text-[11px]">
-              {activeAgent.label} · {activeAgent.hint}
+              {activeAgent.hint}
             </p>
           </div>
 
+          {/* Compact mobile agent picker — replaces the old chip row */}
+          <AgentPickerMobile agent={agent} onChange={setAgent} />
+
+          {/* Desktop segmented control */}
           <AgentSwitch
             agent={agent}
             onChange={setAgent}
@@ -1355,29 +1454,13 @@ const Chat = () => {
           </button>
         </header>
 
-        <div className="scrollbar-none flex gap-1.5 overflow-x-auto border-b border-stone-200/70 bg-white/70 px-2.5 py-2 backdrop-blur-xl sm:hidden">
-          {AGENTS.map((a) => (
-            <button
-              key={a.id}
-              onClick={() => setAgent(a.id)}
-              className={`shrink-0 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors ${
-                agent === a.id
-                  ? "bg-orange-500 text-white shadow-sm shadow-orange-500/25"
-                  : "bg-stone-100 text-stone-500 hover:bg-stone-200"
-              }`}
-            >
-              {a.label}
-            </button>
-          ))}
-        </div>
-
         <div className="relative min-h-0 flex-1">
           <div
             ref={scrollRef}
             onScroll={handleScroll}
             className="scrollbar-thin h-full overflow-y-auto scroll-smooth"
           >
-            <div className="mx-auto w-full max-w-3xl px-2.5 pb-6 pt-5 sm:px-6 sm:pt-8">
+            <div className="mx-auto w-full max-w-3xl px-2.5 pb-6 pt-4 sm:px-6 sm:pt-8">
               {isEmpty && !isSending ? (
                 <EmptyState
                   userInfo={userInfo}
