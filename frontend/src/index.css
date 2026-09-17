@@ -8,9 +8,9 @@
 
 /* ─────────────────────────────────────────────────────────────
    Document shell
-   Locks the page so only inner scrollers scroll. Fixes the
-   mobile URL-bar dance on Chrome for Android where the header
-   slides off and the composer falls below the fold.
+   Keeps the app the same height as the visible viewport so the
+   mobile URL bar can show and hide without dragging the header
+   off screen or pushing the composer below the fold.
    ───────────────────────────────────────────────────────────── */
 html,
 body,
@@ -21,9 +21,6 @@ body,
 }
 
 body {
-  position: fixed;
-  inset: 0;
-  width: 100%;
   overflow: hidden;
   overscroll-behavior: none;
   -webkit-tap-highlight-color: transparent;
@@ -36,10 +33,18 @@ body {
 #root {
   display: flex;
   flex-direction: column;
+  height: 100dvh;
 }
 
-/* Prevent iOS Safari from zooming the page when the composer
-   textarea is focused. 16px is the threshold. */
+/* Fallback for browsers that don't support dvh yet. */
+@supports not (height: 100dvh) {
+  #root {
+    height: 100vh;
+  }
+}
+
+/* Prevent iOS Safari from zooming the whole page when the
+   composer textarea is focused. 16px is the threshold. */
 input,
 textarea,
 select,
@@ -94,8 +99,8 @@ button {
    Utilities
    ───────────────────────────────────────────────────────────── */
 
-/* Thinner + subtler, for the sidebar conversation list and the
-   message scroll area. Bar fades in on hover.
+/* Thinner + subtler, fades in on hover. For the sidebar
+   conversation list and the message scroll area.
    Use as: class="scrollbar-thin" */
 .scrollbar-thin {
   scrollbar-width: thin;
@@ -120,7 +125,7 @@ button {
 }
 
 /* Completely hidden but still scrollable.
-   Use as: class="scrollbar-none" on the mobile agent chip strip. */
+   Use as: class="scrollbar-none" */
 .scrollbar-none {
   scrollbar-width: none;
   -ms-overflow-style: none;
@@ -149,9 +154,8 @@ button {
   background-color: rgb(87 83 78); /* stone-600 */
 }
 
-/* Keeps the layout from jumping a few pixels when a scrollbar
-   appears or disappears. Chrome + Firefox honour it, Safari
-   silently ignores it.
+/* Keeps the layout from jumping when a scrollbar appears.
+   Chrome + Firefox honour it, Safari silently ignores it.
    Use as: class="scroll-stable" */
 .scroll-stable {
   scrollbar-gutter: stable;
@@ -167,8 +171,8 @@ button {
   padding-top: env(safe-area-inset-top);
 }
 
-/* Bottom: keeps a comfortable minimum gap even on phones with
-   no home indicator, grows it on phones that have one. */
+/* Bottom: comfortable minimum gap on phones without a home
+   indicator, grows it on phones that have one. */
 .safe-bottom {
   padding-bottom: max(env(safe-area-inset-bottom), 0.625rem);
 }

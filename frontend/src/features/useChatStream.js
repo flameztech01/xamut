@@ -32,6 +32,7 @@
 //     can't end up with two parallel turns fighting over state.
 
 import { useCallback, useRef, useState } from "react";
+import { useSelector } from "react-redux";
 
 const API_BASE = import.meta.env.VITE_API_URL || "";
 
@@ -39,6 +40,11 @@ export function useChatStream() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [statuses, setStatuses] = useState([]);
   const abortRef = useRef(null);
+
+  // Read the token from the auth slice so we can send it on the
+  // stream request. RTK Query's prepareHeaders doesn't apply here
+  // because this hook uses raw fetch, not the apiSlice base query.
+  const { userInfo } = useSelector((state) => state.auth);
 
   const cancel = useCallback(() => {
     if (abortRef.current) {
@@ -72,6 +78,14 @@ export function useChatStream() {
         if (typeof onStatus === "function") onStatus(text);
       };
 
+      // Grab the token fresh each turn so a re-login mid-session
+      // is picked up without remounting the hook.
+      const token =
+        userInfo?.token ||
+        userInfo?.accessToken ||
+        userInfo?.jwt ||
+        null;
+
       try {
         const res = await fetch(`${API_BASE}/api/ai/chat/stream`, {
           method: "POST",
@@ -80,6 +94,8 @@ export function useChatStream() {
             "Content-Type": "application/json",
             // Explicitly ask for SSE — some proxies need the hint
             Accept: "text/event-stream",
+            // Auth header — required for the backend to accept the turn
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
           },
           body: JSON.stringify(payload),
           signal: controller.signal,
@@ -101,6 +117,12 @@ export function useChatStream() {
               /* ignore */
             }
           }
+
+          // Special-case 401 so the UI can react meaningfully
+          if (res.status === 401) {
+            msg = "Session expired. Please sign in again.";
+          }
+
           throw new Error(msg);
         }
 
@@ -164,7 +186,7 @@ export function useChatStream() {
         if (abortRef.current === controller) abortRef.current = null;
       }
     },
-    [cancel]
+    [cancel, userInfo]
   );
 
   return { stream, cancel, isStreaming, statuses };

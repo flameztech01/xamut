@@ -13,22 +13,32 @@ import Signin from './pages/Signin.jsx'
 import Chat from './pages/Chats.jsx'
 import DocumentViewer from './pages/DocumentViewer.jsx'
 import ClipViewer from './pages/ClipViewer.jsx';
+import PrivateRoute from './components/PrivateRoute.jsx';
 
 const router = createBrowserRouter([
-  {path : '/', element: <App />, children: [
-    {index: true, element: <Welcome />},
-    {path: 'signup', element: <Signup />},
-    {path: 'signin', element: <Signin />},
-    {path: 'chat', element: <Chat />},
-    {path: 'documents/:id', element: <DocumentViewer />},
-    {path: 'clips/:id', element: <ClipViewer />},
-  ]},
+  {
+    path: '/',
+    element: <App />,
+    children: [
+      { index: true, element: <Welcome /> },
+      { path: 'signup', element: <Signup /> },
+      { path: 'signin', element: <Signin /> },
+      {
+        element: <PrivateRoute />,
+        children: [
+          { path: 'chat', element: <Chat /> },
+          { path: 'documents/:id', element: <DocumentViewer /> },
+          { path: 'clips/:id', element: <ClipViewer /> },
+        ],
+      },
+    ],
+  },
 ])
 
 createRoot(document.getElementById('root')).render(
- <Provider store={store}>
+  <Provider store={store}>
     <StrictMode>
-          <RouterProvider router={router} />
+      <RouterProvider router={router} />
     </StrictMode>
   </Provider>
 )
