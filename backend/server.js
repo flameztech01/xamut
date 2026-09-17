@@ -6,6 +6,8 @@ import cookieParser from "cookie-parser";
 
 import userRoutes from "./routes/userRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
+import formRoutes from "./routes/formRoutes.js";
+import formAiRoutes from "./routes/formAiRoutes.js";
 
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
@@ -38,6 +40,8 @@ app.get("/api/health", (req, res) => {
 //routes
 app.use("/api/users", userRoutes);
 app.use("/api/ai", aiRoutes);
+app.use("/api/forms", formRoutes);
+app.use("/api/form-ai", formAiRoutes);
 
 app.use(notFound);
 app.use(errorHandler);

@@ -5,6 +5,16 @@
 //
 // Model resolution, TPM budgeting, tool calling, image search, live
 // status streaming.
+//
+// Two model pools:
+//   • TEXT_CANDIDATES  — big models for real chat turns
+//   • FAST_CANDIDATES  — small models for background calls (intent
+//                        detection, memory extraction, JSON parsing)
+//
+// Groq gives each model its own daily token budget (TPD). Routing
+// background work to a smaller model keeps the big model's budget
+// free for actual replies, which roughly triples how far one day
+// of free-tier usage goes.
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_URL = `${GROQ_BASE}/chat/completions`;
@@ -12,10 +22,19 @@ const MODELS_URL = `${GROQ_BASE}/models`;
 
 const getGroqKey = () => process.env.GROQ_API_KEY;
 
+// Main chat: prefer quality.
 const TEXT_CANDIDATES = [
   "openai/gpt-oss-120b",
   "openai/gpt-oss-20b",
   "qwen/qwen3.8-27b",
+  "qwen/qwen3.6-27b",
+  "llama-3.3-70b-versatile",
+];
+
+// Background work: prefer speed and cheaper budget.
+const FAST_CANDIDATES = [
+  "openai/gpt-oss-20b",
+  "openai/gpt-oss-120b",
   "qwen/qwen3.6-27b",
   "llama-3.3-70b-versatile",
 ];
@@ -61,12 +80,42 @@ const dedupeByUrl = (list = []) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Public image sources
+// Daily budget tracking
 //
-// When the user asks to see a picture of someone or something, we hand
-// them real public archive links. Tavily's image search may or may not
-// return direct image URLs on every plan, so this is the reliable
-// fallback: always give the user somewhere real to go look.
+// Groq enforces a tokens-per-day cap per model. When we get a "tokens
+// per day (TPD)" 429, park that model until the retry-after window
+// expires so we stop hammering it. Prevents log spam and pointless
+// retries, and lets the model chain fall through to a model that
+// still has budget.
+// ─────────────────────────────────────────────────────────────────────
+const _dailyExhausted = new Map(); // model -> resetAt (ms epoch)
+
+export const isDailyExhausted = (model) => {
+  const resetAt = _dailyExhausted.get(model);
+  if (!resetAt) return false;
+  if (Date.now() >= resetAt) {
+    _dailyExhausted.delete(model);
+    return false;
+  }
+  return true;
+};
+
+const markDailyExhausted = (model, retryAfterSeconds) => {
+  const seconds = Number(retryAfterSeconds);
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 60;
+  _dailyExhausted.set(model, Date.now() + safe * 1000);
+};
+
+const isDailyLimitError = (detail = "") => {
+  if (typeof detail !== "string") return false;
+  return (
+    /tokens per day\s*\(TPD\)/i.test(detail) ||
+    /on tokens per day/i.test(detail)
+  );
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Public image sources
 // ─────────────────────────────────────────────────────────────────────
 export function publicImageSources(query) {
   const q = encodeURIComponent(String(query || "").trim());
@@ -206,10 +255,16 @@ async function pickModel(candidates, envOverride) {
     console.warn(`⚠️ "${forced}" not available, falling back.`);
   }
 
-  const match = candidates.find((c) => available.includes(c));
+  // Prefer candidates that aren't day-exhausted, but fall back to the
+  // full list if every candidate is exhausted (nothing to gain by
+  // refusing to try).
+  const usable = available.filter((m) => !isDailyExhausted(m));
+  const pool = usable.length ? usable : available;
+
+  const match = candidates.find((c) => pool.includes(c));
   if (match) return match;
 
-  const generic = available.find(
+  const generic = pool.find(
     (m) =>
       !/whisper|guard|orpheus|tts|embed/i.test(m) && !m.startsWith("groq/compound")
   );
@@ -220,10 +275,14 @@ async function pickModel(candidates, envOverride) {
 
 export const resolveTextModel = () =>
   pickModel(TEXT_CANDIDATES, process.env.GROQ_TEXT_MODEL);
+export const resolveFastModel = () =>
+  pickModel(FAST_CANDIDATES, process.env.GROQ_FAST_MODEL);
 export const resolveVisionModel = () =>
   pickModel(VISION_CANDIDATES, process.env.GROQ_VISION_MODEL);
 export const getTextModel = () =>
   process.env.GROQ_TEXT_MODEL || TEXT_CANDIDATES[0];
+export const getFastModel = () =>
+  process.env.GROQ_FAST_MODEL || FAST_CANDIDATES[0];
 export const getVisionModel = () =>
   process.env.GROQ_VISION_MODEL || VISION_CANDIDATES[0];
 
@@ -259,6 +318,18 @@ export async function groqChat({
   if (!GROQ_KEY) throw new Error("GROQ_API_KEY is not set.");
 
   const chosenModel = model || (await resolveTextModel());
+
+  // Short-circuit if we already know this model is parked for the day.
+  if (isDailyExhausted(chosenModel)) {
+    const err = new Error(
+      `Groq daily token budget for "${chosenModel}" is exhausted. Try again later.`
+    );
+    err.status = 429;
+    err.model = chosenModel;
+    err.isDailyLimit = true;
+    err.detail = "tokens per day (TPD) exhausted";
+    throw err;
+  }
 
   const body = {
     model: chosenModel,
@@ -300,7 +371,20 @@ export async function groqChat({
     } catch {}
 
     if (res.status === 404) _modelCache = null;
-    if (res.status === 413 || res.status === 429) {
+
+    const daily = isDailyLimitError(detail);
+
+    if (res.status === 429 && daily) {
+      const { retrySeconds, namedModel } = parseLimitError(detail);
+      // Park whichever model the error names, falling back to the one
+      // we called if the error doesn't say.
+      markDailyExhausted(namedModel || chosenModel, retrySeconds || 60);
+    }
+
+    if ((res.status === 413 || res.status === 429) && !daily) {
+      // Only learn per-minute budgets from non-TPD rate limit errors.
+      // A TPD error message also contains "Limit 200000" and if we
+      // learned that as TPM, we'd never trim history again.
       const { limit, namedModel } = parseLimitError(detail);
       if (!namedModel || namedModel === chosenModel) {
         learnTpm(chosenModel, limit);
@@ -315,6 +399,7 @@ export async function groqChat({
     err.status = res.status;
     err.model = chosenModel;
     err.detail = detail || "";
+    err.isDailyLimit = daily;
     err.failedGeneration = parsedBody?.error?.failed_generation || null;
     throw err;
   }
@@ -327,6 +412,14 @@ const messageText = (msg) => (msg?.content || "").trim();
 export async function groqText(args) {
   const data = await groqChat(args);
   return messageText(data?.choices?.[0]?.message);
+}
+
+// Convenience wrappers that default to the fast model. Use these for
+// background work (intent classification, memory extraction) so the
+// big model's daily budget stays free for real replies.
+export async function groqTextFast(args) {
+  const model = args.model || (await resolveFastModel());
+  return groqText({ ...args, model });
 }
 
 const extractJson = (raw) => {
@@ -377,13 +470,13 @@ export async function groqJSON(args) {
   }
 }
 
+export async function groqJSONFast(args) {
+  const model = args.model || (await resolveFastModel());
+  return groqJSON({ ...args, model });
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Tools
-//
-// Note: the descriptions are intentionally broad. The model uses them
-// to decide WHEN to call the tool, so anything that reads like a
-// restriction ("public figure", "celebrity") will cause it to skip the
-// tool for smaller names. Keep them open.
 // ─────────────────────────────────────────────────────────────────────
 export const TOOLS = [
   {
@@ -531,8 +624,6 @@ export async function webSearch(query, maxResults = 5) {
   };
 }
 
-// imageSearch — Tavily with include_images, plus a public-archive
-// fallback list so the model always has real links to hand the user.
 export async function imageSearch(query, count = 6) {
   const key = process.env.TAVILY_API_KEY;
   if (!key) throw new Error("TAVILY_API_KEY is not set.");
@@ -559,7 +650,6 @@ export async function imageSearch(query, count = 6) {
   }
   const data = await res.json();
 
-  // Tavily returns either strings or { url, description } depending on plan
   const raw = data.images || [];
   const images = raw
     .map((img) =>
@@ -644,9 +734,6 @@ export async function deepSearch(queries) {
   };
 }
 
-// researchPerson — broad lookup, no celebrity filter. Handles
-// personal brands, indie devs, small studios, single-name creators,
-// agencies, portfolio sites, anyone with a web footprint.
 export async function researchPerson(name, context = "") {
   if (!name || typeof name !== "string") {
     throw new Error("research_person requires a name.");
@@ -783,13 +870,18 @@ export async function runAgentTurn({
   } catch {}
 
   const preferred = model || (await resolveTextModel());
-  const chain = [
+  const fullChain = [
     preferred,
     ...TEXT_CANDIDATES.filter(
       (m) => available.includes(m) && m !== preferred && !isCompoundSystem(m)
     ),
     ...HIGH_BUDGET_MODELS.filter((m) => available.includes(m)),
   ].filter((m, i, arr) => arr.indexOf(m) === i);
+
+  // Prefer models that still have daily budget. If every candidate is
+  // parked, fall through to the full chain so we at least try.
+  const usable = fullChain.filter((m) => !isDailyExhausted(m));
+  const chain = usable.length ? usable : fullChain;
 
   let lastErr = null;
 
@@ -844,6 +936,12 @@ export async function runAgentTurn({
         });
       } catch (err) {
         lastErr = err;
+
+        // Daily budget exhausted. Don't retry, move to the next model
+        // in the chain.
+        if (err.isDailyLimit) {
+          break;
+        }
 
         if (err.status === 413 && shrinkAttempts < MAX_SHRINK_ATTEMPTS) {
           shrinkAttempts++;
@@ -936,8 +1034,6 @@ export async function runAgentTurn({
           const args = JSON.parse(call.function?.arguments || "{}");
           result = await runTool(call.function.name, args);
 
-          // Collect images and public source links so the frontend can
-          // render them alongside the text reply.
           if (call.function.name === "image_search") {
             for (const img of result?.images || []) collectedImages.push(img);
             for (const s of result?.sources || []) collectedImageSources.push(s);
@@ -981,9 +1077,17 @@ export async function runAgentTurn({
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Memory extraction — used by the controller after every turn
+// Memory extraction
+//
+// Routed to the fast model. Handles daily budget errors silently —
+// memory is a nice-to-have, it should never spam the log or block a
+// turn.
 // ─────────────────────────────────────────────────────────────────────
-export async function extractUserMemories({ userMessage, assistantReply, recentHistory = [] }) {
+export async function extractUserMemories({
+  userMessage,
+  assistantReply,
+  recentHistory = [],
+}) {
   const context = [
     ...recentHistory.slice(-4).map((m) => `${m.role.toUpperCase()}: ${m.content}`),
     `USER: ${userMessage}`,
@@ -993,7 +1097,7 @@ export async function extractUserMemories({ userMessage, assistantReply, recentH
     .join("\n");
 
   try {
-    const result = await groqJSON({
+    const result = await groqJSONFast({
       messages: [
         {
           role: "system",
@@ -1052,6 +1156,10 @@ Return an empty array if there's nothing durable. Max 4 memories per turn.`,
         importance: Math.min(Math.max(Number(m.importance) || 0.5, 0), 1),
       }));
   } catch (err) {
+    // Daily budget exhausted: skip silently. It'll work tomorrow.
+    if (err?.isDailyLimit || err?.status === 429) {
+      return [];
+    }
     console.warn("⚠️ Memory extraction failed:", err.message);
     return [];
   }

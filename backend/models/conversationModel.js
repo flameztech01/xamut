@@ -8,6 +8,7 @@ const attachmentSchema = new mongoose.Schema(
     // "url"                → reserved (paste-a-link flows)
     // "link"               → assistant source links (Wikimedia, Wikipedia, etc.)
     // "generated-document" → AI-written doc/ppt, references Document._id
+    // "form-session"       → live AI form-building session, holds snapshot
     // "clip-job"           → Groq clipper job, references ClipJob._id
     type: {
       type: String,
@@ -17,12 +18,13 @@ const attachmentSchema = new mongoose.Schema(
         "url",
         "link",
         "generated-document",
+        "form-session",
         "clip-job",
       ],
       required: true,
     },
 
-    // For user uploads (image / document / url) and assistant links
+    // For user uploads (image / document / url), assistant links, CTAs
     url: { type: String, default: "" },
     name: { type: String, default: "" },
     mimeType: { type: String, default: "" },
@@ -38,6 +40,10 @@ const attachmentSchema = new mongoose.Schema(
     title: { type: String, default: "" },
     pageCount: { type: Number, default: 0 },
     templateId: { type: String, default: "" },
+
+    // For form sessions (type === "form-session")
+    sessionId: { type: String, default: "" },
+    sessionSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // For clip jobs (type === "clip-job")
     jobId: { type: String, default: "" },

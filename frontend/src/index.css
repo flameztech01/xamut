@@ -8,18 +8,21 @@
 
 /* ─────────────────────────────────────────────────────────────
    Document shell
+   Body scrolls by default. Pages that want a locked, full-height
+   layout (like Chat) apply their own h-dvh + overflow-hidden to
+   their wrapper. This way every other page scrolls normally.
    ───────────────────────────────────────────────────────────── */
 html,
 body,
 #root {
-  height: 100%;
   margin: 0;
   padding: 0;
+  min-height: 100%;
 }
 
 body {
-  overflow: hidden;
-  overscroll-behavior: none;
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
   -webkit-tap-highlight-color: transparent;
   -webkit-text-size-adjust: 100%;
   text-rendering: optimizeLegibility;
@@ -30,12 +33,12 @@ body {
 #root {
   display: flex;
   flex-direction: column;
-  height: 100dvh;
+  min-height: 100dvh;
 }
 
 @supports not (height: 100dvh) {
   #root {
-    height: 100vh;
+    min-height: 100vh;
   }
 }
 
@@ -45,10 +48,6 @@ body {
    Safari zooms the whole page when they're focused. Buttons and
    selects do not need this and forcing it there was breaking
    every small UI control on mobile.
-
-   We target inputs by type so we don't accidentally hit checkboxes,
-   radios, or range sliders (which have no font size anyway and
-   shouldn't be stretched).
    ───────────────────────────────────────────────────────────── */
 @media (max-width: 639px) {
   input[type="text"],

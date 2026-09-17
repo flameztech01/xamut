@@ -7,9 +7,11 @@ import { v2 as cloudinary } from "cloudinary";
 import Conversation from "../models/conversationModel.js";
 import Document from "../models/documentModel.js";
 import UserMemory from "../models/userMemoryModel.js";
+import { startFormSessionCore } from "./formAiController.js";
 import {
   groqText,
   groqJSON,
+  groqJSONFast,
   groqVision,
   runAgentTurn,
   webSearch,
@@ -31,16 +33,6 @@ try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null;
 
 // ─────────────────────────────────────────────────────────────────────
 // Persona
-//
-// Xamut is a friend. Not an assistant, not a therapist, not a wikiHow
-// page. It talks like a real person who happens to know a lot. It is
-// allowed to be crude, naughty, opinionated, and blunt, and it never
-// moralises. It also reads the room: casual by default, sober when the
-// moment calls for it, and it writes deliverables in whatever voice
-// the deliverable needs.
-//
-// The bar: does this read like a text from a friend who knows their
-// shit, or does it read like a corporate help centre?
 // ─────────────────────────────────────────────────────────────────────
 const BASE_RULES = `
 You are Xamut. You are not an AI assistant, you are a friend with a
@@ -177,6 +169,14 @@ Tools (use them, don't just sit there):
   think you already know about the name in question, and answer using
   it. If it clearly doesn't match what's being asked, say so instead
   of guessing.
+
+Forms:
+- When the user asks for a form, questionnaire, survey, quiz, RSVP,
+  sign-up sheet, registration, or anything else people fill in and
+  send back, the backend handles it automatically. You don't need to
+  do anything special. A form-building session starts behind the
+  scenes and the user will see the interactive UI. If you're asked
+  to reply about a form step, keep it short and warm.
 
 Memory:
 - You may get a USER MEMORY block. That's stuff you know about this
@@ -640,15 +640,16 @@ async function detectGenerationIntent({ message, history, forceType = null }) {
 
   let result;
   try {
-    result = await groqJSON({
+    result = await groqJSONFast({
       messages: [
         {
           role: "system",
           content: `You classify whether a user wants an AI-generated deliverable file RIGHT NOW.
 
-Two deliverables:
+Three deliverables:
 1. "document" — an essay, report, chapter, thesis, paper, assignment, letter, article, proposal, memo, brief, notes, summary, study guide, review, analysis, write-up. Any prose deliverable that reads as pages.
 2. "presentation" — slide deck, slides, slideshow, pitch deck, keynote, PPT.
+3. "form" — a form, questionnaire, survey, quiz, RSVP, sign-up sheet, intake sheet, registration form, attendance form, or anything else where the user wants to send a link to people to fill in.
 
 Signal words for "document":
   chapter, chapters, essay, report, thesis, dissertation, paper, assignment,
@@ -659,8 +660,17 @@ Signal words for "presentation":
   slide, slides, slideshow, deck, pitch deck, keynote, PPT, powerpoint,
   "presentation", "present to", "presentation on", "make slides"
 
+Signal words for "form":
+  form, questionnaire, survey, quiz, RSVP, "sign up", "sign-up",
+  registration, attendance, intake, feedback form, "collect responses",
+  "collect info", "collect details", "ask people", "ask attendees",
+  "I need a form", "make a form", "create a form", "a form for",
+  "send a form", "an attendance sheet"
+
 Rules:
 - NEVER set "presentation" unless one of the presentation words appears.
+- NEVER set "form" unless one of the form words appears, or the user is
+  clearly asking for something people need to fill in.
 - If NEITHER signal words appear:
     - academic or school topic → "document"
     - business pitch or talk → "presentation"
@@ -686,7 +696,7 @@ ${message}
 Return JSON exactly:
 {
   "wantsGeneration": boolean,
-  "type": "document" | "presentation" | null,
+  "type": "document" | "presentation" | "form" | null,
   "readyToGenerate": boolean,
   "topic": "string or null",
   "companyName": "string or null",
@@ -717,15 +727,6 @@ Return JSON exactly:
 
 // ─────────────────────────────────────────────────────────────────────
 // Research intent detection
-//
-// The agent loop's tool_choice is "auto", which means the model is
-// free to skip searching and answer from memory instead. That's fine
-// for opinions and chit-chat, but for "who is X" / "what is X" style
-// questions it means the model can quietly hallucinate a plausible
-// sounding answer instead of admitting it doesn't know. This classifier
-// catches that class of question BEFORE the agent loop runs, forces a
-// real lookup, and hands the result to the model as grounding it's
-// told to trust over its own memory.
 // ─────────────────────────────────────────────────────────────────────
 async function detectResearchIntent({ message, history }) {
   const recent = history
@@ -734,7 +735,7 @@ async function detectResearchIntent({ message, history }) {
     .join("\n");
 
   try {
-    const result = await groqJSON({
+    const result = await groqJSONFast({
       messages: [
         {
           role: "system",
@@ -879,8 +880,13 @@ async function executeChatTurn({
   const replyAttachments = [];
 
   try {
+    // Only classify if the message is worth classifying. Short greetings,
+    // emoji, and one-word replies skip both classifiers and save tokens.
+    const worthClassifying =
+      trimmed.length > 12 && trimmed.split(/\s+/).length >= 3;
+
     let intent = { wantsGeneration: false };
-    if (!images.length && !docs.length && trimmed) {
+    if (!images.length && !docs.length && trimmed && worthClassifying) {
       report("Reading the room");
       intent = await detectGenerationIntent({
         message: trimmed,
@@ -891,7 +897,14 @@ async function executeChatTurn({
 
     // Force a real lookup for "who/what is X" style messages instead of
     // letting the model decide whether to bother searching.
-    if (!intent.wantsGeneration && !images.length && !docs.length && trimmed) {
+    if (
+      !intent.wantsGeneration &&
+      intent.type !== "form" &&
+      !images.length &&
+      !docs.length &&
+      trimmed &&
+      worthClassifying
+    ) {
       const researchIntent = await detectResearchIntent({ message: trimmed, history });
 
       if (researchIntent.needsResearch && researchIntent.query) {
@@ -929,7 +942,59 @@ ${sourceLines || "(none found)"}`;
     }
 
     if (intent.wantsGeneration && intent.readyToGenerate && intent.topic) {
-      if (intent.type === "presentation") {
+      // ── FORM ────────────────────────────────────────────────
+      // The chat auto-starts a form-building session. The reply is
+      // the current step of that session (a question, or a draft, or
+      // done), and the interactive UI is carried on a form-session
+      // attachment for the frontend to render above the composer.
+      if (intent.type === "form") {
+        report("Building your form");
+
+        try {
+          const session = await startFormSessionCore({
+            userId: user._id,
+            prompt: trimmed,
+            mode: "create",
+          });
+
+          if (session.pendingQuestion) {
+            reply = session.pendingQuestion.text;
+            if (session.pendingQuestion.helper) {
+              reply += `\n\n${session.pendingQuestion.helper}`;
+            }
+          } else if (session.awaitingConfirm && session.draft) {
+            const fieldCount = (session.draft.fields || []).filter(
+              (f) => f.type !== "section"
+            ).length;
+            reply = `Built a draft with **${fieldCount}** question${
+              fieldCount === 1 ? "" : "s"
+            }. Look it over. If you want anything changed, just say so. Otherwise tap create.`;
+          } else if (session.status === "done" && session.createdFormId) {
+            reply = "Done. Your form is ready.";
+          } else {
+            reply = "Working on it.";
+          }
+
+          replyAttachments.push({
+            type: "form-session",
+            sessionId: String(session._id),
+            sessionSnapshot: session,
+            name: session.draft?.title || "Form session",
+            url: "",
+            mimeType: "",
+            extractedText: "",
+          });
+
+          usedModel = "xamut-form-ai";
+        } catch (err) {
+          console.warn("⚠️ Form session start failed:", err.message);
+          reply = `I tried to build that form but hit a snag: ${err.message}. Try again with a little more detail.`;
+          usedModel = "xamut-chat";
+        }
+      }
+
+      // ── PRESENTATION ────────────────────────────────────────
+      else if (intent.type === "presentation") {
         const built = await generatePresentationContent({
           userId: user._id,
           conversationId: convo._id,
@@ -955,7 +1020,10 @@ ${sourceLines || "(none found)"}`;
 
         reply = `Made it. **${built.title}**, ${built.pages.length} slides. Tap to open and download.`;
         usedModel = "xamut-writer";
-      } else if (intent.type === "document") {
+      }
+
+      // ── DOCUMENT ────────────────────────────────────────────
+      else if (intent.type === "document") {
         const built = await generateDocumentContent({
           userId: user._id,
           conversationId: convo._id,
@@ -1094,24 +1162,32 @@ ${sourceLines || "(none found)"}`;
 
   const saved = convo.messages[convo.messages.length - 1];
 
-  (async () => {
-    try {
-      const mems = await extractUserMemories({
-        userMessage: trimmed,
-        assistantReply: reply || "",
-        recentHistory: history,
-      });
-      if (mems.length) {
-        await saveUserMemories({
-          userId: user._id,
-          conversationId: convo._id,
-          memories: mems,
+  // Memory extraction — only when there's likely something worth saving.
+  // Short exchanges rarely carry durable facts and the call burns tokens.
+  const shouldExtractMemory =
+    trimmed.split(/\s+/).length >= 5 &&
+    (reply || "").length > 80;
+
+  if (shouldExtractMemory) {
+    (async () => {
+      try {
+        const mems = await extractUserMemories({
+          userMessage: trimmed,
+          assistantReply: reply || "",
+          recentHistory: history,
         });
+        if (mems.length) {
+          await saveUserMemories({
+            userId: user._id,
+            conversationId: convo._id,
+            memories: mems,
+          });
+        }
+      } catch (err) {
+        // never surface memory errors
       }
-    } catch (err) {
-      // never surface memory errors
-    }
-  })();
+    })();
+  }
 
   return {
     conversationId: convo._id,

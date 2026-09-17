@@ -11,6 +11,13 @@ import {
   useUploadAttachmentMutation,
   aiApiSlice,
 } from "../features/aiApiSlice";
+import {
+  useGetFormAiSessionQuery,
+  useAnswerFormAiQuestionMutation,
+  useRegenerateFormAiDraftMutation,
+  useConfirmFormAiSessionMutation,
+  useCancelFormAiSessionMutation,
+} from "../features/formAiApiSlice";
 import { useChatStream } from "../features/useChatStream";
 import { useLogoutMutation } from "../features/userApiSlice";
 import { logout as logoutAction } from "../features/auth/authSlice";
@@ -33,6 +40,26 @@ const SUGGESTIONS = [
 ];
 
 const DAY = 86_400_000;
+
+const FIELD_LABEL = {
+  short_text: "Short answer",
+  long_text: "Paragraph",
+  email: "Email",
+  number: "Number",
+  date: "Date",
+  time: "Time",
+  url: "URL",
+  phone: "Phone",
+  radio: "Choice",
+  checkbox: "Checkboxes",
+  dropdown: "Dropdown",
+  multi_select: "Multi-select",
+  rating: "Rating",
+  scale: "Scale",
+  yes_no: "Yes / No",
+  file: "File",
+  section: "Section",
+};
 
 // ─────────────────────────────────────────────────────────────
 // Content preprocessing
@@ -179,6 +206,47 @@ const UserAvatar = ({ userInfo, size = "md" }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Icons
+// ─────────────────────────────────────────────────────────────
+const IconForms = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className}>
+    <path
+      d="M9 12h6M9 16h6M9 8h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const IconSparkle = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className}>
+    <path
+      d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 17l.9 2.1L22 20l-2.1.9L19 23l-.9-2.1L16 20l2.1-.9L19 17z"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const IconClose = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={className}>
+    <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+  </svg>
+);
+
+const IconCheck = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={className}>
+    <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
+  </svg>
+);
+
+const IconArrowRight = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
+// ─────────────────────────────────────────────────────────────
 // Agent switch (desktop segmented control)
 // ─────────────────────────────────────────────────────────────
 const AgentSwitch = ({ agent, onChange, className = "" }) => {
@@ -215,9 +283,7 @@ const AgentSwitch = ({ agent, onChange, className = "" }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Mobile agent picker — compact pill + popover.
-// Sizes are aggressively small on mobile to free up vertical
-// space on 320–375px screens.
+// Mobile agent picker
 // ─────────────────────────────────────────────────────────────
 const AgentPickerMobile = ({ agent, onChange }) => {
   const [open, setOpen] = useState(false);
@@ -492,7 +558,7 @@ const Markdown = ({ children }) => (
 );
 
 // ─────────────────────────────────────────────────────────────
-// Link preview card (assistant sources)
+// Link preview
 // ─────────────────────────────────────────────────────────────
 const LinkPreview = ({ attachment }) => {
   const url = attachment.url || "";
@@ -686,6 +752,48 @@ const DocumentCard = ({ attachment, onOpen }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Created form card
+//
+// Rendered inline in the thread once a form-session finishes.
+// Click opens the form editor.
+// ─────────────────────────────────────────────────────────────
+const CreatedFormCard = ({ session, onOpen }) => {
+  const draft = session?.draft || {};
+  const fieldCount = (draft.fields || []).filter(
+    (f) => f.type !== "section"
+  ).length;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onOpen(session.createdFormId)}
+      className="group flex w-full items-center gap-2.5 rounded-2xl border border-emerald-200 bg-gradient-to-br from-emerald-50/80 to-white px-3.5 py-3 text-left transition-all duration-200 hover:-translate-y-0.5 hover:border-emerald-300 hover:shadow-[0_10px_28px_-16px_rgba(16,185,129,0.45)]"
+    >
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-emerald-600 text-white shadow-sm shadow-emerald-500/30">
+        <IconCheck className="h-5 w-5" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-[9.5px] font-semibold uppercase tracking-[0.12em] text-emerald-600">
+          Form ready
+        </span>
+        <span className="mt-0.5 block truncate text-[13px] font-semibold text-stone-800">
+          {draft.title || "Untitled form"}
+        </span>
+        <span className="mt-0.5 block text-[10.5px] text-stone-500">
+          {fieldCount} question{fieldCount === 1 ? "" : "s"} ·{" "}
+          {draft.visibility === "private" ? "Invited only" : "Public"} ·{" "}
+          <span className="capitalize">{draft.type || "form"}</span>
+        </span>
+      </span>
+      <span className="flex shrink-0 items-center gap-1 text-[11px] font-semibold text-emerald-600">
+        Open
+        <IconArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
+      </span>
+    </button>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // User attachment preview
 // ─────────────────────────────────────────────────────────────
 const UserAttachmentPreview = ({ attachment }) => {
@@ -783,7 +891,381 @@ const ThinkingBubble = ({ statuses = [] }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Message bubble (DM style)
+// Form session panel
+//
+// Compact interaction strip above the composer. Handles three
+// states: asking a question, showing the draft preview, or done.
+// ─────────────────────────────────────────────────────────────
+const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
+  const [picked, setPicked] = useState([]);
+  const [otherText, setOtherText] = useState("");
+  const [feedback, setFeedback] = useState("");
+  const [showFeedback, setShowFeedback] = useState(false);
+  const [error, setError] = useState("");
+
+  const [answerFormAi, { isLoading: answering }] =
+    useAnswerFormAiQuestionMutation();
+  const [regenerateFormAi, { isLoading: regenning }] =
+    useRegenerateFormAiDraftMutation();
+  const [confirmFormAi, { isLoading: confirming }] =
+    useConfirmFormAiSessionMutation();
+  const [cancelFormAi, { isLoading: cancelling }] =
+    useCancelFormAiSessionMutation();
+
+  useEffect(() => {
+    setPicked([]);
+    setOtherText("");
+    setFeedback("");
+    setShowFeedback(false);
+    setError("");
+  }, [session._id, session.questionCount, session.awaitingConfirm, session.status]);
+
+  const question = session.pendingQuestion;
+  const awaitingConfirm = session.awaitingConfirm;
+  const draft = session.draft;
+
+  const toggleOption = (opt) => {
+    if (!question) return;
+    if (!question.multiSelect) {
+      setPicked([opt.id]);
+      return;
+    }
+    setPicked((prev) =>
+      prev.includes(opt.id) ? prev.filter((x) => x !== opt.id) : [...prev, opt.id]
+    );
+  };
+
+  const handleAnswer = async () => {
+    if (!question) return;
+    const other = otherText.trim();
+    if (!picked.length && !other) {
+      setError("Pick an option or type your own.");
+      return;
+    }
+    try {
+      const res = await answerFormAi({
+        sessionId: session._id,
+        answer: { optionIds: picked, otherText: other || undefined },
+      }).unwrap();
+      onSessionUpdate?.(res.session);
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't send that answer.");
+    }
+  };
+
+  const handleRegen = async () => {
+    if (!feedback.trim()) return;
+    try {
+      const res = await regenerateFormAi({
+        sessionId: session._id,
+        feedback: feedback.trim(),
+      }).unwrap();
+      onSessionUpdate?.(res.session);
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't rework the draft.");
+    }
+  };
+
+  const handleConfirm = async () => {
+    try {
+      const res = await confirmFormAi({ sessionId: session._id }).unwrap();
+      onSessionUpdate?.(res.session, res.result);
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't create the form.");
+    }
+  };
+
+  const handleCancel = async () => {
+    try {
+      const res = await cancelFormAi({ sessionId: session._id }).unwrap();
+      onSessionUpdate?.(res.session);
+      onCancel?.();
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't cancel.");
+    }
+  };
+
+  const busy = answering || regenning || confirming || cancelling;
+
+  // ── Question state ────────────────────────────────────────
+  if (question) {
+    return (
+      <div className="mb-2 overflow-hidden rounded-2xl border border-orange-200/80 bg-gradient-to-br from-orange-50/90 via-white to-white shadow-sm">
+        <div className="flex items-center justify-between gap-2 border-b border-orange-100/80 px-3 py-2 sm:px-3.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow-sm shadow-orange-500/30">
+              <IconSparkle className="h-3 w-3" />
+            </span>
+            <span className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-orange-600">
+              Building your form
+            </span>
+            {session.questionCount ? (
+              <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-orange-500 ring-1 ring-orange-100">
+                {session.questionCount}/5
+              </span>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={busy}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40"
+            aria-label="Cancel form session"
+          >
+            <IconClose className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div className="px-3 py-2.5 sm:px-3.5">
+          <p className="mb-2 text-[13px] font-medium leading-snug text-stone-800">
+            {question.text}
+          </p>
+          <div className="mb-2 flex flex-wrap gap-1.5">
+            {question.options.map((opt) => {
+              const active = picked.includes(opt.id);
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  onClick={() => toggleOption(opt)}
+                  disabled={busy}
+                  className={`rounded-full border px-2.5 py-1 text-[11.5px] font-medium transition-all active:scale-[0.97] disabled:opacity-60 ${
+                    active
+                      ? "border-orange-400 bg-orange-500 text-white shadow-sm shadow-orange-500/25"
+                      : "border-stone-200 bg-white text-stone-700 hover:border-orange-300 hover:bg-orange-50"
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              );
+            })}
+          </div>
+
+          {question.allowOther ? (
+            <input
+              type="text"
+              value={otherText}
+              onChange={(e) => {
+                setOtherText(e.target.value);
+                if (error) setError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleAnswer();
+                }
+              }}
+              placeholder={question.otherPlaceholder || "Or type your own…"}
+              disabled={busy}
+              className="mb-2 w-full rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12.5px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10 disabled:opacity-60"
+            />
+          ) : null}
+
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[10.5px] text-stone-400">
+              {question.multiSelect ? "Pick any that apply" : "Pick one"}
+            </span>
+            <button
+              type="button"
+              onClick={handleAnswer}
+              disabled={busy || (!picked.length && !otherText.trim())}
+              className="rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-4 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-orange-500/25 transition-all hover:shadow-md active:scale-95 disabled:opacity-50"
+            >
+              {answering ? "Sending…" : "Next"}
+            </button>
+          </div>
+        </div>
+
+        {error ? (
+          <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 sm:px-3.5">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  // ── Preview state ─────────────────────────────────────────
+  if (awaitingConfirm && draft) {
+    const realFields = (draft.fields || []).filter((f) => f.type !== "section");
+    const fieldCount = realFields.length;
+
+    return (
+      <div className="mb-2 overflow-hidden rounded-2xl border border-orange-200/80 bg-gradient-to-br from-orange-50/90 via-white to-white shadow-sm">
+        <div className="flex items-center justify-between gap-2 border-b border-orange-100/80 px-3 py-2 sm:px-3.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-orange-500 to-orange-600 text-white shadow-sm shadow-orange-500/30">
+              <IconCheck className="h-3 w-3" />
+            </span>
+            <span className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-orange-600">
+              Preview
+            </span>
+            <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-orange-500 ring-1 ring-orange-100">
+              {fieldCount} question{fieldCount === 1 ? "" : "s"}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={busy}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40"
+            aria-label="Cancel form session"
+          >
+            <IconClose className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        <div
+          className="scrollbar-thin overflow-y-auto px-3 py-2.5 sm:px-3.5"
+          style={{ maxHeight: "min(44dvh, 280px)" }}
+        >
+          {/* Title row */}
+          <div className="mb-2">
+            <p className="truncate text-[13.5px] font-semibold text-stone-900">
+              {draft.title || "Untitled form"}
+            </p>
+            {draft.description ? (
+              <p className="mt-0.5 line-clamp-2 text-[11.5px] leading-snug text-stone-500">
+                {draft.description}
+              </p>
+            ) : null}
+            <div className="mt-1.5 flex flex-wrap items-center gap-1">
+              <span className="rounded-full bg-orange-50 px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-orange-600">
+                {draft.type || "form"}
+              </span>
+              <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500">
+                {draft.visibility === "private" ? "Invited only" : "Public"}
+              </span>
+            </div>
+          </div>
+
+          {/* Questions list */}
+          <div className="space-y-1">
+            {realFields.length === 0 ? (
+              <p className="py-2 text-center text-[11.5px] text-stone-400">
+                No questions yet. Ask for a change below.
+              </p>
+            ) : (
+              realFields.map((f, i) => (
+                <div
+                  key={f.id || i}
+                  className="rounded-xl border border-stone-200/80 bg-white px-2.5 py-2"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 flex-1 break-words text-[12.5px] font-medium leading-snug text-stone-800">
+                      <span className="mr-1.5 text-stone-400">{i + 1}.</span>
+                      {f.label || `Question ${i + 1}`}
+                      {f.required ? (
+                        <span className="ml-1 text-orange-500">*</span>
+                      ) : null}
+                    </p>
+                    <span className="shrink-0 rounded-full bg-stone-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-stone-500">
+                      {FIELD_LABEL[f.type] || f.type}
+                    </span>
+                  </div>
+
+                  {f.options?.length ? (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {f.options.slice(0, 8).map((o) => (
+                        <span
+                          key={o.id}
+                          className="rounded-md border border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] text-stone-600"
+                        >
+                          {o.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  {f.scoring?.points ? (
+                    <p className="mt-1 text-[10px] font-semibold text-purple-600">
+                      {f.scoring.points} pt
+                      {f.scoring.points === 1 ? "" : "s"}
+                      {f.scoring.correct?.length
+                        ? ` · correct: ${f.scoring.correct.join(", ")}`
+                        : ""}
+                    </p>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Footer: change / create */}
+        {showFeedback ? (
+          <div className="border-t border-orange-100/80 px-3 py-2.5 sm:px-3.5">
+            <textarea
+              rows={2}
+              value={feedback}
+              onChange={(e) => setFeedback(e.target.value)}
+              placeholder="What should change? e.g. 'add a phone field' or 'make it 10 questions'"
+              autoFocus
+              disabled={busy}
+              className="w-full resize-none rounded-xl border border-stone-200 bg-white px-3 py-2 text-[12.5px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10 disabled:opacity-60"
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowFeedback(false);
+                  setFeedback("");
+                }}
+                disabled={busy}
+                className="rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-stone-500 hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleRegen}
+                disabled={busy || !feedback.trim()}
+                className="rounded-full border border-stone-200 bg-white px-3.5 py-1.5 text-[11.5px] font-semibold text-stone-700 transition-colors hover:border-orange-300 hover:bg-orange-50 hover:text-orange-700 disabled:opacity-50"
+              >
+                {regenning ? "Reworking…" : "Apply change"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2 border-t border-orange-100/80 px-3 py-2 sm:px-3.5">
+            <button
+              type="button"
+              onClick={() => setShowFeedback(true)}
+              disabled={busy}
+              className="rounded-full px-3 py-1.5 text-[11.5px] font-semibold text-stone-500 hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40"
+            >
+              Change
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={busy || realFields.length === 0}
+              className="rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-4 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-orange-500/25 transition-all hover:shadow-md active:scale-95 disabled:opacity-50"
+            >
+              {confirming ? "Creating…" : "Looks good, create"}
+            </button>
+          </div>
+        )}
+
+        {error ? (
+          <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 sm:px-3.5">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return null;
+};
+
+// ─────────────────────────────────────────────────────────────
+// Message bubble
+//
+// Knows about form-session attachments. When a session is done,
+// renders a CreatedFormCard so the user can click straight into
+// the new form. Otherwise those attachments stay hidden inline
+// (the panel above the composer is where the interaction lives).
 // ─────────────────────────────────────────────────────────────
 const MessageBubble = ({ message, userInfo }) => {
   const navigate = useNavigate();
@@ -801,7 +1283,6 @@ const MessageBubble = ({ message, userInfo }) => {
     }
   };
 
-  // ─── User message ─────────────────────────────────────────
   if (isUser) {
     return (
       <div className="flex flex-col items-end gap-1.5">
@@ -828,18 +1309,25 @@ const MessageBubble = ({ message, userInfo }) => {
     );
   }
 
-  // ─── Assistant message ────────────────────────────────────
   const generatedDocs = attachments.filter(
     (a) => a.type === "generated-document"
   );
   const images = attachments.filter((a) => a.type === "image");
   const links = attachments.filter((a) => a.type === "link");
+  const createdForms = attachments.filter(
+    (a) =>
+      a.type === "form-session" &&
+      a.sessionSnapshot?.status === "done" &&
+      a.sessionSnapshot?.createdFormId
+  );
 
   const cleanedContent = preprocessContent(message.content);
   const hasImages = images.length > 0;
   const hasLinks = links.length > 0;
   const hasDocs = generatedDocs.length > 0;
-  const hasExtras = hasImages || hasLinks || hasDocs;
+  const hasCreatedForms = createdForms.length > 0;
+  const hasExtras =
+    hasImages || hasLinks || hasDocs || hasCreatedForms;
 
   return (
     <div className="group flex items-end gap-0 sm:gap-2.5">
@@ -867,6 +1355,15 @@ const MessageBubble = ({ message, userInfo }) => {
 
         {hasExtras ? (
           <div className="mt-2 flex max-w-full flex-col gap-2 sm:max-w-[80%]">
+            {hasCreatedForms
+              ? createdForms.map((a, i) => (
+                  <CreatedFormCard
+                    key={`form-${i}`}
+                    session={a.sessionSnapshot}
+                    onOpen={(id) => navigate(`/forms/${id}/edit`)}
+                  />
+                ))
+              : null}
             {hasImages ? <AssistantImageGrid images={images} /> : null}
             {hasLinks ? (
               <div className="flex flex-col gap-1.5">
@@ -944,7 +1441,7 @@ const EmptyState = ({ userInfo, onSuggestion }) => (
       Ask anything, drop a file, or pick a starting point below.
     </p>
 
-    <div className="mt-4 w-full max-w-md space-y-1.5 sm:mt-9 sm:space-y-2">
+    <div className="mt-4 w-full max-w-md space-y-1.5 sm:mt-6 sm:space-y-2">
       {SUGGESTIONS.map((s) => (
         <button
           key={s.text}
@@ -1026,6 +1523,92 @@ const Chat = () => {
   const [liveStatuses, setLiveStatuses] = useState([]);
 
   const isSending = isStreaming;
+
+  // ─── Latest form session discovery ────────────────────────
+  // Scan the thread for the most recent assistant message that
+  // carries a form-session attachment. We subscribe to its live
+  // state so the panel reflects reality even if the snapshot on
+  // the message is stale.
+  const latestFormSessionId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== "assistant") continue;
+      const atts = m.attachments || [];
+      const att = atts.find((a) => a.type === "form-session");
+      if (!att) continue;
+      return att.sessionId || att.sessionSnapshot?._id || null;
+    }
+    return null;
+  }, [messages]);
+
+  const { data: sessionData } = useGetFormAiSessionQuery(latestFormSessionId, {
+    skip: !latestFormSessionId,
+  });
+
+  const liveFormSession = sessionData?.session || null;
+
+  // Reconcile live session state back into the message array.
+  // This is what makes the "Form created" card show up after confirm,
+  // and it also fixes the stale-snapshot problem on reload.
+  useEffect(() => {
+    if (!liveFormSession) return;
+    setMessages((prev) => {
+      let changed = false;
+      const next = prev.map((m) => {
+        if (m.role !== "assistant") return m;
+        const atts = (m.attachments || []).map((a) => {
+          if (
+            a.type === "form-session" &&
+            String(a.sessionId) === String(liveFormSession._id)
+          ) {
+            const prevSnap = a.sessionSnapshot || {};
+            if (
+              prevSnap.status !== liveFormSession.status ||
+              prevSnap.createdFormId !== liveFormSession.createdFormId ||
+              prevSnap.awaitingConfirm !== liveFormSession.awaitingConfirm ||
+              prevSnap.questionCount !== liveFormSession.questionCount
+            ) {
+              changed = true;
+              return { ...a, sessionSnapshot: liveFormSession };
+            }
+          }
+          return a;
+        });
+        if (!changed) return m;
+        return { ...m, attachments: atts };
+      });
+      return changed ? next : prev;
+    });
+  }, [liveFormSession]);
+
+  const showFormPanel =
+    !!liveFormSession &&
+    liveFormSession.status !== "done" &&
+    liveFormSession.status !== "cancelled";
+
+  // Called by the panel every time it gets a fresh session back from
+  // a mutation. Updates the message snapshot so the interaction is
+  // reflected everywhere in the UI at once.
+  const handleFormSessionUpdate = (updatedSession) => {
+    if (!updatedSession) return;
+    setMessages((prev) =>
+      prev.map((m) => {
+        if (m.role !== "assistant") return m;
+        let touched = false;
+        const atts = (m.attachments || []).map((a) => {
+          if (
+            a.type === "form-session" &&
+            String(a.sessionId) === String(updatedSession._id)
+          ) {
+            touched = true;
+            return { ...a, sessionSnapshot: updatedSession };
+          }
+          return a;
+        });
+        return touched ? { ...m, attachments: atts } : m;
+      })
+    );
+  };
 
   const scrollToBottom = (behavior = "smooth") => {
     const el = scrollRef.current;
@@ -1121,10 +1704,47 @@ const Chat = () => {
     setPending((p) => p.filter((_, i) => i !== index));
   };
 
+  const [regenerateFormAi] = useRegenerateFormAiDraftMutation();
+
   const handleSend = async () => {
     const text = input.trim();
     if (!text && pending.length === 0) return;
     if (isSending || uploading) return;
+
+    // If a form session is live and the user typed something with no
+    // attachments, route it as feedback to the form AI instead of the
+    // chat stream. That's what makes the panel feel conversational.
+    if (showFormPanel && liveFormSession && text && pending.length === 0) {
+      const optimistic = {
+        _id: `temp-${Date.now()}`,
+        role: "user",
+        content: text,
+        attachments: [],
+        createdAt: new Date().toISOString(),
+      };
+      atBottomRef.current = true;
+      setMessages((m) => [...m, optimistic]);
+      setInput("");
+      try {
+        const res = await regenerateFormAi({
+          sessionId: liveFormSession._id,
+          feedback: text,
+        }).unwrap();
+        handleFormSessionUpdate(res.session);
+      } catch (err) {
+        setMessages((m) => [
+          ...m,
+          {
+            _id: `err-${Date.now()}`,
+            role: "assistant",
+            content: `⚠️ Couldn't send that. ${
+              err?.data?.message || err?.message || "Try again."
+            }`,
+          },
+        ]);
+      }
+      return;
+    }
 
     const optimistic = {
       _id: `temp-${Date.now()}`,
@@ -1162,6 +1782,9 @@ const Chat = () => {
           const atts = evt.reply?.attachments || [];
           if (atts.some((a) => a.type === "generated-document")) {
             tags.push("DocumentList");
+          }
+          if (atts.some((a) => a.type === "form-session")) {
+            tags.push("FormList");
           }
           dispatch(aiApiSlice.util.invalidateTags(tags));
         },
@@ -1214,7 +1837,7 @@ const Chat = () => {
       "Conversation"
     : "New chat";
 
-  const showForcePill = input.trim().length > 0;
+  const showForcePill = input.trim().length > 0 && !showFormPanel;
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-[#f7f5f0] text-stone-900 antialiased">
@@ -1226,7 +1849,6 @@ const Chat = () => {
         />
       ) : null}
 
-      {/* ─── Sidebar ─────────────────────────────────────── */}
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-[280px] flex-col border-r border-stone-200/70 bg-white transition-transform duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] md:relative md:w-[276px] md:translate-x-0 ${
           sidebarOpen
@@ -1292,7 +1914,7 @@ const Chat = () => {
           </button>
         </div>
 
-        <div className="px-3 pb-3">
+        <div className="space-y-2 px-3 pb-3">
           <button
             onClick={handleNewChat}
             className="flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-br from-orange-500 to-orange-600 px-3 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-orange-500/25 transition-all duration-200 hover:shadow-md hover:shadow-orange-500/35 active:scale-[0.985]"
@@ -1308,6 +1930,14 @@ const Chat = () => {
             </svg>
             New chat
           </button>
+
+          <Link
+            to="/forms"
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-stone-200/80 bg-white px-3 py-2.5 text-[13px] font-semibold text-stone-700 transition-all duration-200 hover:border-orange-200 hover:bg-orange-50/60 hover:text-orange-700 active:scale-[0.985]"
+          >
+            <IconForms className="h-4 w-4" />
+            My forms
+          </Link>
         </div>
 
         <nav className="scrollbar-thin flex-1 overflow-y-auto px-2 pb-4">
@@ -1400,7 +2030,6 @@ const Chat = () => {
         </nav>
       </aside>
 
-      {/* ─── Main ────────────────────────────────────────── */}
       <main className="relative flex h-full min-w-0 flex-1 flex-col">
         <header
           className="z-20 flex h-12 shrink-0 items-center gap-1.5 border-b border-stone-200/70 bg-white/85 px-2 backdrop-blur-xl sm:h-16 sm:gap-3 sm:px-4 md:px-6"
@@ -1433,10 +2062,8 @@ const Chat = () => {
             </p>
           </div>
 
-          {/* Compact mobile agent picker */}
           <AgentPickerMobile agent={agent} onChange={setAgent} />
 
-          {/* Desktop segmented control */}
           <AgentSwitch
             agent={agent}
             onChange={setAgent}
@@ -1516,6 +2143,13 @@ const Chat = () => {
           }}
         >
           <div className="mx-auto max-w-3xl">
+            {showFormPanel && liveFormSession ? (
+              <FormSessionPanel
+                session={liveFormSession}
+                onSessionUpdate={handleFormSessionUpdate}
+              />
+            ) : null}
+
             {showForcePill ? (
               <div className="mb-1.5 flex items-center justify-end gap-1.5 overflow-x-auto pb-0.5">
                 <span className="hidden text-[10px] font-semibold uppercase tracking-wider text-stone-400 sm:inline">
@@ -1647,7 +2281,11 @@ const Chat = () => {
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder={`Message ${activeAgent.label}…`}
+                  placeholder={
+                    showFormPanel
+                      ? "Type a change, or tap an option above…"
+                      : `Message ${activeAgent.label}…`
+                  }
                   className="max-h-[140px] min-w-0 flex-1 resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-stone-900 outline-none placeholder:text-stone-400 sm:max-h-[200px] sm:px-1.5 sm:py-2.5"
                 />
 
