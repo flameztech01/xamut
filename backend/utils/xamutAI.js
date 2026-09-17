@@ -379,6 +379,11 @@ export async function groqJSON(args) {
 
 // ─────────────────────────────────────────────────────────────────────
 // Tools
+//
+// Note: the descriptions are intentionally broad. The model uses them
+// to decide WHEN to call the tool, so anything that reads like a
+// restriction ("public figure", "celebrity") will cause it to skip the
+// tool for smaller names. Keep them open.
 // ─────────────────────────────────────────────────────────────────────
 export const TOOLS = [
   {
@@ -386,7 +391,7 @@ export const TOOLS = [
     function: {
       name: "web_search",
       description:
-        "Search the internet for current information. Returns titles, URLs, and snippets.",
+        "Search the internet for current information about anything: people, brands, businesses, products, creators, events, prices, tools, code, whatever. Use this whenever you're not 100% sure of the answer or the name is unfamiliar. Returns titles, URLs, and snippets.",
       parameters: {
         type: "object",
         properties: {
@@ -456,15 +461,18 @@ export const TOOLS = [
     function: {
       name: "research_person",
       description:
-        "Look up a public figure (celebrity, athlete, founder, politician, creator). Returns bio, career, verified socials, news, quotes, public family information, direct image URLs, the public pages those images came from, and a list of public archives where more photos of the person are available. Use this for fans, interviews, career questions, 'who is X' requests, and any 'show me a picture of X' request about a real public figure.",
+        "Look up anyone or anything with a public web presence: celebrities, athletes, founders, politicians, creators, developers, designers, freelancers, studios, agencies, indie brands, personal portfolios, small businesses, YouTubers, TikTokers, musicians. Does NOT have to be a celebrity. If they have a website, social account, portfolio, GitHub, Dribbble, LinkedIn, or any public footprint, this tool can find them. Returns bio, career, socials, news, quotes, public family info, and image results. Use this any time the user asks who someone is, what a brand is, or wants info about a name you don't recognise.",
       parameters: {
         type: "object",
         properties: {
-          name: { type: "string", description: "The person's name." },
+          name: {
+            type: "string",
+            description: "The person, brand, or business name.",
+          },
           context: {
             type: "string",
             description:
-              "Optional context like 'football player' or 'Nigerian musician'.",
+              "Optional context like 'frontend developer' or 'Nigerian musician' or 'tech agency'.",
           },
         },
         required: ["name"],
@@ -636,7 +644,9 @@ export async function deepSearch(queries) {
   };
 }
 
-// researchPerson — public figure deep lookup + images + public archives
+// researchPerson — broad lookup, no celebrity filter. Handles
+// personal brands, indie devs, small studios, single-name creators,
+// agencies, portfolio sites, anyone with a web footprint.
 export async function researchPerson(name, context = "") {
   if (!name || typeof name !== "string") {
     throw new Error("research_person requires a name.");
@@ -645,11 +655,12 @@ export async function researchPerson(name, context = "") {
   const base = context ? `${name} ${context}` : name;
 
   const queries = [
-    `${base} biography career`,
+    `${base} who is`,
+    `${base} biography about`,
+    `${base} website portfolio`,
+    `${base} instagram twitter linkedin`,
     `${base} news`,
-    `${base} interview quotes`,
-    `${base} family parents wife children`,
-    `${base} instagram twitter verified`,
+    `${base} github dribbble behance`,
   ];
 
   const [textResults, imageResults] = await Promise.all([
@@ -672,9 +683,9 @@ export async function researchPerson(name, context = "") {
       if (!item.url || seen.has(item.url)) continue;
       seen.add(item.url);
       merged.push(item);
-      if (merged.length >= 15) break;
+      if (merged.length >= 18) break;
     }
-    if (merged.length >= 15) break;
+    if (merged.length >= 18) break;
   }
 
   return {
@@ -684,7 +695,7 @@ export async function researchPerson(name, context = "") {
       .map((r) => r.answer)
       .filter(Boolean)
       .join(" ")
-      .slice(0, 1200),
+      .slice(0, 1500),
     sources: merged,
     images: imageResults.images || [],
     imageSources: imageResults.sources || [],
