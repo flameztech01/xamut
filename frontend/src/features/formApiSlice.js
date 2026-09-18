@@ -84,13 +84,20 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     // ─────────────────────────────────────────────────────────
-    // COLLABORATORS (Xamut users only)
+    // COLLABORATORS
+    //
+    // Two kinds of people live here:
+    //   • Real collaborators — Xamut users with a userId.
+    //   • Pending collaborators — invited by email but not signed
+    //     up yet. They don't have a userId; they're keyed on email
+    //     and are promoted to real collaborators automatically
+    //     when they sign up.
     // ─────────────────────────────────────────────────────────
     addCollaborator: builder.mutation({
-      query: ({ id, email, role }) => ({
+      query: ({ id, email, role, name }) => ({
         url: `${FORM_URL}/${id}/collaborators`,
         method: "POST",
-        body: { email, role },
+        body: { email, role, name },
       }),
       invalidatesTags: (result, error, { id }) => [
         { type: "FormCollaborators", id },
@@ -120,13 +127,30 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     removeCollaborator: builder.mutation({
-      query: ({ id, userId }) => ({
-        url: `${FORM_URL}/${id}/collaborators/${userId}`,
+      // Pass `userId` for real collaborators, or `email` for pending
+      // invites. The URL ends up the same shape either way — the
+      // controller sniffs whether the segment is a Mongo ObjectId.
+      query: ({ id, userId, email }) => ({
+        url: `${FORM_URL}/${id}/collaborators/${encodeURIComponent(
+          userId ?? email
+        )}`,
         method: "DELETE",
       }),
       invalidatesTags: (result, error, { id }) => [
         { type: "FormCollaborators", id },
         { type: "Form", id },
+      ],
+    }),
+
+    resendCollaboratorInvite: builder.mutation({
+      query: ({ id, email }) => ({
+        url: `${FORM_URL}/${id}/collaborators/${encodeURIComponent(
+          email
+        )}/resend`,
+        method: "POST",
+      }),
+      invalidatesTags: (result, error, { id }) => [
+        { type: "FormCollaborators", id },
       ],
     }),
 
@@ -308,6 +332,7 @@ export const {
   useListCollaboratorsQuery,
   useUpdateCollaboratorRoleMutation,
   useRemoveCollaboratorMutation,
+  useResendCollaboratorInviteMutation,
 
   // Participants
   useAddParticipantsMutation,

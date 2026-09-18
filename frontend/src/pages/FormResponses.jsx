@@ -83,6 +83,106 @@ const downloadBlob = (content, filename, type = "text/csv;charset=utf-8") => {
   URL.revokeObjectURL(url);
 };
 
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+// Match a label that reads like a name field. Covers "Name",
+// "Full name", "First name", "Last name", "Your name", "Full Name",
+// "Name of student", etc. Deliberately broad — a text answer to a
+// field labeled anything name-ish is a reasonable fallback.
+const NAME_LABEL_RE = /\b(name|fullname|full-?name)\b/i;
+
+// Match a label that reads like an email field. Used as a secondary
+// path since we also have an explicit "email" field type.
+const EMAIL_LABEL_RE = /\b(e-?mail|mail\s*address)\b/i;
+
+// ─────────────────────────────────────────────────────────────
+// Respondent display resolver
+//
+// Order of preference:
+//   1. response.respondentName       — captured at submit time
+//   2. A name-like text field answer — "Full name", "Your name", etc.
+//   3. response.respondentEmail      — captured at submit time
+//   4. An email-type / email-labeled field answer
+//   5. Local part of any email we found (so we never say "Anonymous"
+//      when we at least have an address)
+//   6. "Anonymous"
+//
+// Returns { primary, secondary, initials } where secondary is the
+// email to show under the name (empty string if none).
+// ─────────────────────────────────────────────────────────────
+const getRespondentDisplay = (response, form) => {
+  const r = response || {};
+  const fields = form?.fields || [];
+  const answers = Array.isArray(r.answers) ? r.answers : [];
+
+  let foundName = String(r.respondentName || "").trim();
+  let foundEmail = String(r.respondentEmail || "").trim();
+
+  // Scan the answers for name-ish and email-ish fields when the
+  // explicit respondent fields didn't give us anything.
+  if ((!foundName || !foundEmail) && fields.length && answers.length) {
+    for (const field of fields) {
+      if (field.type === "section") continue;
+      const a = answers.find((x) => x.fieldId === field.id);
+      if (!a || a.value == null || a.value === "") continue;
+
+      const valueStr = Array.isArray(a.value)
+        ? a.value.map((v) => String(v)).join(", ").trim()
+        : String(a.value).trim();
+      if (!valueStr) continue;
+
+      // Name from a text field whose label looks name-ish
+      if (
+        !foundName &&
+        (field.type === "short_text" || field.type === "long_text") &&
+        NAME_LABEL_RE.test(field.label || "")
+      ) {
+        foundName = valueStr;
+      }
+
+      // Email from an email-type field, or a field whose label
+      // reads like an email. Only accept it if it looks valid.
+      if (
+        !foundEmail &&
+        (field.type === "email" || EMAIL_LABEL_RE.test(field.label || "")) &&
+        EMAIL_RE.test(valueStr)
+      ) {
+        foundEmail = valueStr.toLowerCase();
+      }
+
+      if (foundName && foundEmail) break;
+    }
+  }
+
+  // If we have an email but no name, try to derive a friendly name
+  // from the local part (jane.doe@x.com -> "Jane Doe"). Only do this
+  // when the local part is clean enough to make sense as a name.
+  if (!foundName && foundEmail) {
+    const local = foundEmail.split("@")[0];
+    const clean = local
+      .replace(/[._-]+/g, " ")
+      .replace(/\d+/g, " ")
+      .trim();
+    if (clean && clean.length <= 40 && !/^[^a-z]/i.test(clean) === false) {
+      // Only use the derived name if the local part starts with a
+      // letter — avoids weird stuff like "3jane" or "x_9".
+      if (/^[a-z]/i.test(local)) {
+        foundName = clean
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+          .join(" ");
+      }
+    }
+  }
+
+  const primary = foundName || foundEmail || "Anonymous";
+  const secondary = foundName && foundEmail ? foundEmail : "";
+  const initials = (primary || "?").charAt(0).toUpperCase();
+
+  return { primary, secondary, initials };
+};
+
 const STATUS_META = {
   draft: {
     label: "Draft",
@@ -266,7 +366,6 @@ const FieldStats = ({ field, stats }) => {
         </div>
       </div>
 
-      {/* Choice types */}
       {["radio", "checkbox", "dropdown", "multi_select"].includes(field.type) &&
       stats?.options?.length ? (
         <div className="space-y-2.5">
@@ -287,7 +386,6 @@ const FieldStats = ({ field, stats }) => {
         </div>
       ) : null}
 
-      {/* Yes / No */}
       {field.type === "yes_no" && stats ? (
         <div className="space-y-2.5">
           <StatBar
@@ -303,7 +401,6 @@ const FieldStats = ({ field, stats }) => {
         </div>
       ) : null}
 
-      {/* Numeric */}
       {["number", "rating", "scale"].includes(field.type) && stats ? (
         <div>
           <div className="mb-3 grid grid-cols-3 gap-2">
@@ -349,7 +446,6 @@ const FieldStats = ({ field, stats }) => {
         </div>
       ) : null}
 
-      {/* Date */}
       {field.type === "date" && stats ? (
         <div className="space-y-1.5 text-[12px] text-stone-600 dark:text-stone-300">
           {stats.earliest ? (
@@ -372,7 +468,6 @@ const FieldStats = ({ field, stats }) => {
         </div>
       ) : null}
 
-      {/* Text-ish samples */}
       {["short_text", "long_text", "email", "phone", "url", "time", "file"].includes(
         field.type
       ) && stats ? (
@@ -445,11 +540,12 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
 
   const isQuiz = form.type === "quiz" || (response.maxScore || 0) > 0;
 
+  const { primary, secondary } = getRespondentDisplay(response, form);
+
   return (
     <div className="fixed inset-0 z-[75] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
       <div className="absolute inset-0" onClick={onClose} aria-hidden />
       <div className="relative z-10 flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-xl bg-white shadow-2xl dark:bg-stone-900 sm:rounded-xl">
-        {/* Header */}
         <div
           className="flex items-start justify-between gap-3 border-b border-stone-100 px-4 pb-3 dark:border-stone-800 sm:px-5"
           style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}
@@ -459,13 +555,11 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
               Response
             </p>
             <h2 className="mt-0.5 truncate text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-              {response.respondentName ||
-                response.respondentEmail ||
-                "Anonymous"}
+              {primary}
             </h2>
-            {response.respondentName && response.respondentEmail ? (
+            {secondary ? (
               <p className="mt-0.5 truncate text-[11.5px] text-stone-400 dark:text-stone-500">
-                {response.respondentEmail}
+                {secondary}
               </p>
             ) : null}
             <p className="mt-1 text-[10.5px] text-stone-400 dark:text-stone-500">
@@ -485,7 +579,6 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
           </button>
         </div>
 
-        {/* Quiz score panel */}
         {isQuiz ? (
           <div className="border-b border-stone-100 bg-purple-50/40 px-4 py-3 dark:border-stone-800 dark:bg-purple-500/10 sm:px-5">
             <div className="flex items-center gap-3">
@@ -514,7 +607,6 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
           </div>
         ) : null}
 
-        {/* Body */}
         <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-4 sm:px-5">
           <div className="space-y-3">
             {(form.fields || []).map((field) => {
@@ -595,7 +687,6 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
           </div>
         </div>
 
-        {/* Footer */}
         <div
           className="flex items-center justify-between gap-2 border-t border-stone-100 px-4 py-3 dark:border-stone-800 sm:px-5"
           style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)" }}
@@ -627,6 +718,7 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
 // ─────────────────────────────────────────────────────────────
 const DesktopResponseRow = ({ response, form, onOpen }) => {
   const isQuiz = form?.type === "quiz" || (response.maxScore || 0) > 0;
+  const { primary, secondary, initials } = getRespondentDisplay(response, form);
 
   return (
     <button
@@ -635,24 +727,16 @@ const DesktopResponseRow = ({ response, form, onOpen }) => {
       className="group grid w-full grid-cols-[auto_1fr_auto_auto_auto_auto] items-center gap-4 border-b border-stone-100 px-4 py-3 text-left transition-colors hover:bg-stone-50/70 dark:border-stone-800/60 dark:hover:bg-stone-900/60"
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
-        {(
-          response.respondentName ||
-          response.respondentEmail ||
-          "?"
-        )
-          .charAt(0)
-          .toUpperCase()}
+        {initials}
       </span>
 
       <div className="min-w-0">
         <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
-          {response.respondentName ||
-            response.respondentEmail ||
-            "Anonymous"}
+          {primary}
         </p>
-        {response.respondentName && response.respondentEmail ? (
+        {secondary ? (
           <p className="truncate text-[11px] text-stone-400 dark:text-stone-500">
-            {response.respondentEmail}
+            {secondary}
           </p>
         ) : null}
       </div>
@@ -696,6 +780,7 @@ const DesktopResponseRow = ({ response, form, onOpen }) => {
 // ─────────────────────────────────────────────────────────────
 const MobileResponseRow = ({ response, form, onOpen }) => {
   const isQuiz = form?.type === "quiz" || (response.maxScore || 0) > 0;
+  const { primary, secondary, initials } = getRespondentDisplay(response, form);
 
   return (
     <button
@@ -704,33 +789,33 @@ const MobileResponseRow = ({ response, form, onOpen }) => {
       className="flex w-full items-center gap-3 border-b border-stone-100 bg-white px-4 py-3 text-left transition-colors active:bg-stone-50 dark:border-stone-800/60 dark:bg-stone-950 dark:active:bg-stone-900"
     >
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
-        {(
-          response.respondentName ||
-          response.respondentEmail ||
-          "?"
-        )
-          .charAt(0)
-          .toUpperCase()}
+        {initials}
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
-          {response.respondentName ||
-            response.respondentEmail ||
-            "Anonymous"}
+          {primary}
         </span>
         <span className="mt-0.5 flex items-center gap-1.5 text-[10.5px] text-stone-400 dark:text-stone-500">
-          <span>{formatRelative(response.submittedAt)}</span>
+          {secondary ? (
+            <>
+              <span className="truncate">{secondary}</span>
+              <span className="text-stone-300 dark:text-stone-600">·</span>
+            </>
+          ) : null}
+          <span className="shrink-0">{formatRelative(response.submittedAt)}</span>
           {response.durationSeconds ? (
             <>
-              <span className="text-stone-300 dark:text-stone-600">·</span>
-              <span>{formatDuration(response.durationSeconds)}</span>
+              <span className="shrink-0 text-stone-300 dark:text-stone-600">·</span>
+              <span className="shrink-0">
+                {formatDuration(response.durationSeconds)}
+              </span>
             </>
           ) : null}
           {isQuiz ? (
             <>
-              <span className="text-stone-300 dark:text-stone-600">·</span>
+              <span className="shrink-0 text-stone-300 dark:text-stone-600">·</span>
               <span
-                className={`font-semibold ${
+                className={`shrink-0 font-semibold ${
                   response.passed === true
                     ? "text-emerald-600 dark:text-emerald-400"
                     : response.passed === false
@@ -764,6 +849,14 @@ const LeaderboardRow = ({ entry }) => {
       ? "bg-gradient-to-br from-orange-300 to-orange-500 text-white"
       : "bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-300";
 
+  // Leaderboard entries come from the backend as { name, email }, so
+  // apply the same fallback logic here: name, else email, else derive
+  // from email, else Anonymous.
+  const name = String(entry.name || "").trim();
+  const email = String(entry.email || "").trim();
+  const primary = name || email || "Anonymous";
+  const secondary = name && email ? email : "";
+
   return (
     <div className="flex items-center gap-3 border-b border-stone-100 px-4 py-2.5 last:border-b-0 dark:border-stone-800/60">
       <span
@@ -773,11 +866,11 @@ const LeaderboardRow = ({ entry }) => {
       </span>
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
-          {entry.name || entry.email || "Anonymous"}
+          {primary}
         </p>
-        {entry.name && entry.email ? (
+        {secondary ? (
           <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
-            {entry.email}
+            {secondary}
           </p>
         ) : null}
       </div>
@@ -912,7 +1005,6 @@ const FormResponses = () => {
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-white text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
-      {/* ── Desktop sidebar ──────────────────────────────── */}
       <aside className="hidden shrink-0 flex-col border-r border-stone-200/70 bg-stone-50/50 dark:border-stone-800/70 dark:bg-stone-900/40 md:flex md:w-[280px]">
         <div className="flex h-14 items-center gap-2.5 border-b border-stone-200/70 px-4 dark:border-stone-800/70">
           <button
@@ -933,7 +1025,6 @@ const FormResponses = () => {
           </Link>
         </div>
 
-        {/* Form title card */}
         <div className="px-3 pt-4">
           <div className="rounded-lg border border-stone-200/70 bg-white p-3 dark:border-stone-800 dark:bg-stone-900">
             <h2 className="line-clamp-2 text-[13px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
@@ -953,7 +1044,6 @@ const FormResponses = () => {
           </div>
         </div>
 
-        {/* Tabs */}
         <div className="px-3 pt-4">
           <p className="px-2.5 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
             View
@@ -990,7 +1080,6 @@ const FormResponses = () => {
 
         <div className="flex-1" />
 
-        {/* Sidebar stat block */}
         <div className="border-t border-stone-200/70 p-3 dark:border-stone-800/70">
           <p className="mb-2 px-0.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
             At a glance
@@ -1030,14 +1119,11 @@ const FormResponses = () => {
         </div>
       </aside>
 
-      {/* ── Main ─────────────────────────────────────────── */}
       <main className="relative flex h-full min-w-0 flex-1 flex-col bg-white dark:bg-stone-950">
-        {/* Header */}
         <header
           className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/90 px-3 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/90 sm:px-4"
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
-          {/* Mobile back */}
           <button
             type="button"
             onClick={() => navigate("/forms")}
@@ -1059,7 +1145,6 @@ const FormResponses = () => {
             </p>
           </div>
 
-          {/* Desktop search */}
           {tab === "responses" ? (
             <div className="relative hidden md:block">
               <span className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-stone-400 dark:text-stone-500">
@@ -1075,7 +1160,6 @@ const FormResponses = () => {
             </div>
           ) : null}
 
-          {/* Export CSV (desktop) */}
           <button
             type="button"
             onClick={handleExportCSV}
@@ -1086,7 +1170,6 @@ const FormResponses = () => {
             CSV
           </button>
 
-          {/* Export (mobile) */}
           <button
             type="button"
             onClick={handleExportCSV}
@@ -1097,7 +1180,6 @@ const FormResponses = () => {
             {I.download("h-4 w-4")}
           </button>
 
-          {/* Edit form */}
           <button
             type="button"
             onClick={() => navigate(`/forms/${id}/edit`)}
@@ -1108,7 +1190,6 @@ const FormResponses = () => {
           </button>
         </header>
 
-        {/* Mobile tabs */}
         <div className="border-b border-stone-200/70 bg-white dark:border-stone-800/70 dark:bg-stone-950 md:hidden">
           <div className="scrollbar-none flex items-center gap-1 overflow-x-auto px-3 py-2.5">
             {TABS.map((t) => {
@@ -1131,7 +1212,6 @@ const FormResponses = () => {
             })}
           </div>
 
-          {/* Mobile search (only on responses tab) */}
           {tab === "responses" ? (
             <div className="px-3 pb-2.5">
               <div className="relative">
@@ -1150,9 +1230,7 @@ const FormResponses = () => {
           ) : null}
         </div>
 
-        {/* Scroll body */}
         <div className="scrollbar-thin flex-1 overflow-y-auto">
-          {/* ── SUMMARY ──────────────────────────────── */}
           {tab === "summary" ? (
             <div className="mx-auto max-w-5xl p-3 sm:p-5">
               {statsLoading ? (
@@ -1168,7 +1246,6 @@ const FormResponses = () => {
                 <EmptyResponses status={form.status} />
               ) : (
                 <>
-                  {/* Stats grid */}
                   <div className="mb-5 grid grid-cols-2 gap-2.5 md:grid-cols-4 md:gap-3">
                     <div className="rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900">
                       <p className="text-[9.5px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
@@ -1239,7 +1316,6 @@ const FormResponses = () => {
                     )}
                   </div>
 
-                  {/* Per-field stats in a responsive grid */}
                   <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
                     {(form.fields || []).map((field) => (
                       <FieldStats
@@ -1256,10 +1332,8 @@ const FormResponses = () => {
             </div>
           ) : null}
 
-          {/* ── RESPONSES ─────────────────────────────── */}
           {tab === "responses" ? (
             <div>
-              {/* Desktop table header */}
               <div className="hidden border-b border-stone-200/80 bg-stone-50/60 px-4 py-2 dark:border-stone-800/70 dark:bg-stone-900/40 md:grid md:grid-cols-[auto_1fr_auto_auto_auto_auto] md:items-center md:gap-4">
                 <span className="w-8" />
                 <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
@@ -1311,7 +1385,6 @@ const FormResponses = () => {
                 )
               ) : (
                 <>
-                  {/* Count strip */}
                   <div className="flex items-center justify-between border-b border-stone-100 px-4 py-2 dark:border-stone-800/60">
                     <p className="text-[11px] text-stone-400 dark:text-stone-500">
                       Showing{" "}
@@ -1327,7 +1400,6 @@ const FormResponses = () => {
                     ) : null}
                   </div>
 
-                  {/* Desktop rows */}
                   <div className="hidden md:block">
                     {responsesData.responses.map((r) => (
                       <DesktopResponseRow
@@ -1339,7 +1411,6 @@ const FormResponses = () => {
                     ))}
                   </div>
 
-                  {/* Mobile rows */}
                   <div className="md:hidden">
                     {responsesData.responses.map((r) => (
                       <MobileResponseRow
@@ -1351,7 +1422,6 @@ const FormResponses = () => {
                     ))}
                   </div>
 
-                  {/* Pagination */}
                   {responsesData.pages > 1 ? (
                     <div className="flex items-center justify-center gap-2 border-t border-stone-100 px-4 py-3 dark:border-stone-800/60">
                       <button
@@ -1382,7 +1452,6 @@ const FormResponses = () => {
             </div>
           ) : null}
 
-          {/* ── LEADERBOARD ───────────────────────────── */}
           {tab === "leaderboard" && isQuiz ? (
             <div className="mx-auto max-w-4xl p-3 sm:p-5">
               {leaderboardLoading ? (
@@ -1425,7 +1494,6 @@ const FormResponses = () => {
         </div>
       </main>
 
-      {/* ── Response detail modal ──────────────────────── */}
       <ResponseDetailModal
         response={openResponse}
         form={form}
@@ -1434,7 +1502,6 @@ const FormResponses = () => {
         deleting={deleting}
       />
 
-      {/* ── Confirm delete ───────────────────────────── */}
       {confirmDeleteId ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-stone-900/50 px-4 backdrop-blur-[3px] dark:bg-black/60">
           <div
@@ -1471,7 +1538,6 @@ const FormResponses = () => {
         </div>
       ) : null}
 
-      {/* ── Toast ─────────────────────────────────────── */}
       {toast ? (
         <div
           className="pointer-events-none fixed inset-x-0 z-[90] flex justify-center px-4"

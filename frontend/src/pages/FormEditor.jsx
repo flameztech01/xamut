@@ -11,6 +11,7 @@ import {
   useListCollaboratorsQuery,
   useRemoveCollaboratorMutation,
   useUpdateCollaboratorRoleMutation,
+  useResendCollaboratorInviteMutation,
   useAddParticipantsMutation,
   useListParticipantsQuery,
   useRemoveParticipantMutation,
@@ -148,6 +149,22 @@ const formatDate = (iso) => {
   });
 };
 
+const formatRelative = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso).getTime();
+  const now = Date.now();
+  const diff = Math.max(0, now - d);
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return "just now";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
 // ─────────────────────────────────────────────────────────────
 // Icons
 // ─────────────────────────────────────────────────────────────
@@ -260,6 +277,12 @@ const I = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M17 21v-8H7v8M7 3v5h8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  mail: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3 7l9 6 9-6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -1033,33 +1056,68 @@ const SettingsPanel = ({ form, onChange }) => {
 
 // ─────────────────────────────────────────────────────────────
 // Share modal
+//
+// Shows three groups:
+//   • Owner — locked, always at the top
+//   • Collaborators — real Xamut users with accounts
+//   • Pending — invited by email but not signed up yet. These
+//     rows show "Invited" instead of a role dropdown in the sense
+//     they still have a role, but the badge tells you it's a
+//     pending invite. Resend re-fires the invite email.
 // ─────────────────────────────────────────────────────────────
 const ShareModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListCollaboratorsQuery(formId, { skip: !open });
   const [addCollaborator, { isLoading: adding }] = useAddCollaboratorMutation();
   const [removeCollaborator] = useRemoveCollaboratorMutation();
   const [updateRole] = useUpdateCollaboratorRoleMutation();
+  const [resendInvite, { isLoading: resending }] =
+    useResendCollaboratorInviteMutation();
 
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("editor");
   const [error, setError] = useState("");
+  const [lastResult, setLastResult] = useState(null); // { invited, added, email }
+  const [resendingFor, setResendingFor] = useState(null);
 
   if (!open) return null;
 
   const handleAdd = async (e) => {
     e.preventDefault();
     setError("");
+    setLastResult(null);
     if (!email.trim()) return;
     try {
-      await addCollaborator({ id: formId, email: email.trim(), role }).unwrap();
+      const res = await addCollaborator({
+        id: formId,
+        email: email.trim(),
+        role,
+      }).unwrap();
+      setLastResult({
+        invited: !!res.invited,
+        added: !!res.added,
+        email: email.trim().toLowerCase(),
+      });
       setEmail("");
     } catch (err) {
       setError(err?.data?.message || "Couldn't add collaborator.");
     }
   };
 
+  const handleResend = async (pendingEmail) => {
+    setError("");
+    setResendingFor(pendingEmail);
+    try {
+      await resendInvite({ id: formId, email: pendingEmail }).unwrap();
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't resend invite.");
+    } finally {
+      setResendingFor(null);
+    }
+  };
+
   const owner = data?.owner;
   const collabs = data?.collaborators || [];
+  const pending = data?.pendingCollaborators || [];
 
   return (
     <div className="fixed inset-0 z-[75] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
@@ -1074,7 +1132,8 @@ const ShareModal = ({ open, onClose, formId }) => {
               Share form
             </h2>
             <p className="mt-0.5 text-[11.5px] text-stone-400 dark:text-stone-500">
-              Invite Xamut users to help edit or view responses.
+              Invite people to help edit or view responses. No account
+              needed — we'll email them a link.
             </p>
           </div>
           <button
@@ -1096,6 +1155,7 @@ const ShareModal = ({ open, onClose, formId }) => {
                 onChange={(e) => {
                   setEmail(e.target.value);
                   if (error) setError("");
+                  if (lastResult) setLastResult(null);
                 }}
                 placeholder="name@example.com"
                 className="min-w-0 flex-1 rounded-md border border-stone-200 bg-white px-3 py-2 text-[13px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
@@ -1112,13 +1172,41 @@ const ShareModal = ({ open, onClose, formId }) => {
                 disabled={adding || !email.trim()}
                 className="shrink-0 rounded-md bg-teal-600 px-3.5 py-2 text-[12px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-95 disabled:opacity-50 dark:bg-teal-500 dark:hover:bg-teal-400"
               >
-                {adding ? "…" : "Add"}
+                {adding ? "…" : "Invite"}
               </button>
             </div>
+
             {error ? (
               <p className="text-[11.5px] text-red-600 dark:text-red-400">
                 {error}
               </p>
+            ) : null}
+
+            {lastResult ? (
+              <div className="flex items-start gap-2 rounded-md bg-teal-50 px-2.5 py-2 text-[11.5px] leading-snug text-teal-700 dark:bg-teal-500/10 dark:text-teal-300">
+                <span className="mt-0.5 shrink-0">
+                  {I.mail("h-3.5 w-3.5")}
+                </span>
+                <span>
+                  {lastResult.invited ? (
+                    <>
+                      Invite sent to{" "}
+                      <span className="font-semibold">
+                        {lastResult.email}
+                      </span>
+                      . They'll get access as soon as they sign up.
+                    </>
+                  ) : (
+                    <>
+                      Added{" "}
+                      <span className="font-semibold">
+                        {lastResult.email}
+                      </span>{" "}
+                      as a collaborator.
+                    </>
+                  )}
+                </span>
+              </div>
             ) : null}
           </form>
 
@@ -1132,65 +1220,141 @@ const ShareModal = ({ open, onClose, formId }) => {
               ))}
             </div>
           ) : (
-            <div className="space-y-1.5">
+            <div className="space-y-3">
+              {/* Owner */}
               {owner ? (
-                <div className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-stone-50/70 px-3 py-2.5 dark:border-stone-800 dark:bg-stone-800/40">
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-900 text-[11px] font-semibold text-white dark:bg-stone-100 dark:text-stone-900">
-                    {(owner.name || owner.email || "?").charAt(0).toUpperCase()}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
-                      {owner.name || owner.email}
-                    </p>
-                    <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
-                      {owner.email}
-                    </p>
-                  </div>
-                  <span className="shrink-0 rounded bg-stone-200/80 px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-600 dark:bg-stone-700 dark:text-stone-300">
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
                     Owner
-                  </span>
+                  </p>
+                  <div className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-stone-50/70 px-3 py-2.5 dark:border-stone-800 dark:bg-stone-800/40">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-900 text-[11px] font-semibold text-white dark:bg-stone-100 dark:text-stone-900">
+                      {(owner.name || owner.email || "?")
+                        .charAt(0)
+                        .toUpperCase()}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
+                        {owner.name || owner.email}
+                      </p>
+                      <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
+                        {owner.email}
+                      </p>
+                    </div>
+                  </div>
                 </div>
               ) : null}
 
-              {collabs.map((c) => (
-                <div
-                  key={c.user}
-                  className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-white px-3 py-2.5 dark:border-stone-800 dark:bg-stone-900"
-                >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
-                    {(c.name || c.email || "?").charAt(0).toUpperCase()}
-                  </span>
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
-                      {c.name || c.email}
-                    </p>
-                    <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
-                      {c.email}
-                    </p>
+              {/* Collaborators */}
+              {collabs.length ? (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+                    Collaborators · {collabs.length}
+                  </p>
+                  <div className="space-y-1.5">
+                    {collabs.map((c) => (
+                      <div
+                        key={c.user}
+                        className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-white px-3 py-2.5 dark:border-stone-800 dark:bg-stone-900"
+                      >
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
+                          {(c.name || c.email || "?")
+                            .charAt(0)
+                            .toUpperCase()}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
+                            {c.name || c.email}
+                          </p>
+                          <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
+                            {c.email}
+                          </p>
+                        </div>
+                        <Dropdown
+                          value={c.role}
+                          onChange={(next) =>
+                            updateRole({
+                              id: formId,
+                              userId: c.user,
+                              role: next,
+                            })
+                          }
+                          options={ROLE_OPTIONS}
+                          className="w-24 shrink-0"
+                          menuAlign="right"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            removeCollaborator({ id: formId, userId: c.user })
+                          }
+                          className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                          aria-label="Remove"
+                        >
+                          {I.trash("h-3.5 w-3.5")}
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                  <Dropdown
-                    value={c.role}
-                    onChange={(next) =>
-                      updateRole({ id: formId, userId: c.user, role: next })
-                    }
-                    options={ROLE_OPTIONS}
-                    className="w-24 shrink-0"
-                    menuAlign="right"
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      removeCollaborator({ id: formId, userId: c.user })
-                    }
-                    className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-                    aria-label="Remove"
-                  >
-                    {I.trash("h-3.5 w-3.5")}
-                  </button>
                 </div>
-              ))}
+              ) : null}
 
-              {!owner && collabs.length === 0 ? (
+              {/* Pending invites */}
+              {pending.length ? (
+                <div>
+                  <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+                    Pending invites · {pending.length}
+                  </p>
+                  <div className="space-y-1.5">
+                    {pending.map((p) => (
+                      <div
+                        key={p.email}
+                        className="flex items-center gap-2.5 rounded-md border border-dashed border-stone-300 bg-stone-50/60 px-3 py-2.5 dark:border-stone-700 dark:bg-stone-900/60"
+                      >
+                        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-200 text-[11px] font-semibold text-stone-600 dark:bg-stone-700 dark:text-stone-300">
+                          {(p.name || p.email || "?")
+                            .charAt(0)
+                            .toUpperCase()}
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
+                            {p.name || p.email}
+                          </p>
+                          <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
+                            {p.role === "editor" ? "Editor" : "Viewer"} ·
+                            invited {formatRelative(p.lastInvitedAt || p.invitedAt)}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleResend(p.email)}
+                          disabled={resendingFor === p.email || resending}
+                          className="shrink-0 rounded-md px-2 py-1 text-[10.5px] font-semibold text-teal-600 transition-colors hover:bg-teal-50 disabled:opacity-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
+                          title="Resend invite email"
+                        >
+                          {resendingFor === p.email ? "Sending…" : "Resend"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            removeCollaborator({
+                              id: formId,
+                              email: p.email,
+                            })
+                          }
+                          className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                          aria-label="Cancel invite"
+                        >
+                          {I.trash("h-3.5 w-3.5")}
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {/* Empty state */}
+              {!owner && !collabs.length && !pending.length ? (
                 <p className="py-6 text-center text-[12px] text-stone-400 dark:text-stone-500">
                   No collaborators yet.
                 </p>

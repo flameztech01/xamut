@@ -88,6 +88,36 @@ const collaboratorSchema = new mongoose.Schema(
 );
 
 // ─────────────────────────────────────────────────────────────────────
+// Pending collaborator — someone invited by email who does not have a
+// Xamut account yet. When they sign up with this email, the invite is
+// claimed and moved into `collaborators`.
+// ─────────────────────────────────────────────────────────────────────
+const pendingCollaboratorSchema = new mongoose.Schema(
+  {
+    email: {
+      type: String,
+      required: true,
+      lowercase: true,
+      trim: true,
+    },
+    name: { type: String, default: "", maxlength: 120 },
+    role: {
+      type: String,
+      enum: ["editor", "viewer"],
+      default: "editor",
+    },
+    invitedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
+    invitedAt: { type: Date, default: Date.now },
+    lastInvitedAt: { type: Date, default: Date.now },
+  },
+  { _id: false }
+);
+
+// ─────────────────────────────────────────────────────────────────────
 // Participant — someone invited to fill a *private* form. Does NOT need
 // a Xamut account. Each one gets a unique password sent by email. Not
 // to be confused with collaborators.
@@ -180,6 +210,7 @@ const formSchema = new mongoose.Schema(
     settings: { type: settingsSchema, default: () => ({}) },
 
     collaborators: { type: [collaboratorSchema], default: [] },
+    pendingCollaborators: { type: [pendingCollaboratorSchema], default: [] },
     participants: { type: [participantSchema], default: [] },
 
     responseCount: { type: Number, default: 0 },
@@ -202,6 +233,7 @@ const formSchema = new mongoose.Schema(
 
 formSchema.index({ owner: 1, updatedAt: -1 });
 formSchema.index({ "collaborators.user": 1, updatedAt: -1 });
+formSchema.index({ "pendingCollaborators.email": 1 });
 
 const Form = mongoose.model("Form", formSchema);
 export default Form;

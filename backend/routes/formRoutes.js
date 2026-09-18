@@ -14,6 +14,7 @@ import {
   listCollaborators,
   removeCollaborator,
   updateCollaboratorRole,
+  resendCollaboratorInvite,
 
   addParticipants,
   listParticipants,
@@ -66,6 +67,13 @@ router
   .route("/:id/collaborators")
   .post(addCollaborator)
   .get(listCollaborators);
+
+// Resend invite to a pending collaborator (keyed on email so it
+// works before they've signed up)
+router.post(
+  "/:id/collaborators/:email/resend",
+  resendCollaboratorInvite
+);
 
 router
   .route("/:id/collaborators/:userId")
