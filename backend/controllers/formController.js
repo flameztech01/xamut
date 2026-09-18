@@ -21,7 +21,6 @@ const genFieldId = () => `f_${crypto.randomBytes(4).toString("hex")}`;
 const genOptionId = () => `o_${crypto.randomBytes(3).toString("hex")}`;
 
 const genPassword = () => {
-  // Human-friendly password, no ambiguous characters (0/O, 1/I/l).
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let out = "";
   for (let i = 0; i < 10; i++) out += chars[crypto.randomInt(0, chars.length)];
@@ -68,10 +67,7 @@ const assertCanView = (form, userId) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Participant tokens — NOT Xamut auth. A scoped short-lived token
-// that proves "this browser is authenticated as this participant for
-// this specific form". Lets private forms be filled without requiring
-// a Xamut account.
+// Participant tokens — scoped short-lived token for private forms
 // ─────────────────────────────────────────────────────────────────────
 const PARTICIPANT_PURPOSE = "form-participant";
 
@@ -386,6 +382,8 @@ const scoreAnswer = (field, value) => {
 // ─────────────────────────────────────────────────────────────────────
 // Invite emails
 // ─────────────────────────────────────────────────────────────────────
+
+// Participant invite (private form filler, no Xamut account)
 const sendParticipantInviteEmail = async ({ form, participant, password }) => {
   const link = `${frontendUrl()}/forms/${form.slug}`;
   const subject = `You've been invited to fill "${form.title}"`;
@@ -428,6 +426,7 @@ const sendParticipantInviteEmail = async ({ form, participant, password }) => {
   await sendEmailSafe({ to: participant.email, subject, text, html });
 };
 
+// Collaborator invite (no Xamut account yet — they need to sign up)
 const sendCollaboratorInviteEmail = async ({
   form,
   email,
@@ -444,7 +443,6 @@ const sendCollaboratorInviteEmail = async ({
   const signupUrl = `${frontendUrl()}/signup?invited=${encodeURIComponent(
     email
   )}&form=${form._id}`;
-  const formUrl = `${frontendUrl()}/forms/${form._id}/edit`;
 
   const inviteName = name || email.split("@")[0];
   const inviterName = invitedBy?.name || "Someone";
@@ -463,9 +461,6 @@ const sendCollaboratorInviteEmail = async ({
     "Sign up (or sign in) with this email and the invite will be waiting:",
     signupUrl,
     "",
-    "Already have a Xamut account? Open the form directly:",
-    formUrl,
-    "",
     "— Xamut",
   ].join("\n");
 
@@ -480,12 +475,66 @@ const sendCollaboratorInviteEmail = async ({
       <p style="margin:0 0 20px;">
         <a href="${signupUrl}" style="display:inline-block;background:#0d9488;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;">Sign up to claim access</a>
       </p>
-      <p style="margin:0 0 8px;color:#78716c;font-size:13px;">
-        Already have a Xamut account?
-        <a href="${formUrl}" style="color:#0d9488;font-weight:600;">Open the form</a>.
-      </p>
       <p style="margin:16px 0 0;color:#a8a29e;font-size:12px;">
         Sign up with the email this was sent to. The invite will attach itself to your account automatically.
+      </p>
+    </div>
+  `;
+
+  await sendEmailSafe({ to: email, subject, text, html });
+};
+
+// Collaborator added (they already have a Xamut account)
+const sendCollaboratorAddedEmail = async ({
+  form,
+  email,
+  name,
+  role,
+  invitedBy,
+}) => {
+  const roleLabel = role === "editor" ? "an editor" : "a viewer";
+  const roleBlurb =
+    role === "editor"
+      ? "You can update the form, manage settings, and see all responses."
+      : "You can look at the form and its responses, but you can't edit it.";
+
+  const formUrl = `${frontendUrl()}/forms/${form._id}/edit`;
+
+  const inviteName = name || email.split("@")[0];
+  const inviterName = invitedBy?.name || "Someone";
+
+  const subject = `You've been added to "${form.title}" as ${
+    role === "editor" ? "an editor" : "a viewer"
+  }`;
+
+  const text = [
+    `Hi ${inviteName},`,
+    "",
+    `${inviterName} added you as ${roleLabel} on "${form.title}".`,
+    "",
+    roleBlurb,
+    "",
+    "Open it here:",
+    formUrl,
+    "",
+    "You'll see it in your Forms dashboard under Shared.",
+    "",
+    "— Xamut",
+  ].join("\n");
+
+  const html = `
+    <div style="font-family:Raleway,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1c1917;">
+      <h2 style="margin:0 0 12px;font-size:20px;">You've been added to a form</h2>
+      <p style="margin:0 0 16px;color:#44403c;">
+        Hi ${inviteName}, ${inviterName} added you as
+        <strong>${roleLabel}</strong> on <strong>${form.title}</strong>.
+      </p>
+      <p style="margin:0 0 20px;color:#44403c;">${roleBlurb}</p>
+      <p style="margin:0 0 20px;">
+        <a href="${formUrl}" style="display:inline-block;background:#0d9488;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;">Open the form</a>
+      </p>
+      <p style="margin:16px 0 0;color:#a8a29e;font-size:12px;">
+        You'll also see it in your Xamut Forms dashboard under Shared.
       </p>
     </div>
   `;
@@ -723,13 +772,15 @@ export const closeForm = asyncHandler(async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// COLLABORATORS (Xamut users, edit/view access)
+// COLLABORATORS
 //
-// Two paths:
-//   1. Email belongs to an existing Xamut user → attach them now.
-//   2. No account yet → record a pending invite and email them a link.
-//      The invite is claimed automatically when they sign up with that
-//      email (see claimPendingCollaborations in the auth flow).
+// Both paths send an email now:
+//   • No account yet → invite email with a signup link.
+//   • Has an account → "you've been added" email with a direct link.
+//
+// The email send is awaited so the response tells the client whether
+// it actually went out. The collaborator record is committed BEFORE
+// the email attempt so a SMTP failure never rolls back the add.
 // ─────────────────────────────────────────────────────────────────────
 
 // POST /api/forms/:id/collaborators
@@ -776,17 +827,43 @@ export const addCollaborator = asyncHandler(async (req, res) => {
       });
     }
 
-    // If they had a pending invite, drop it — they're real now.
+    // Clear any stale pending invite for this email.
     form.pendingCollaborators = (form.pendingCollaborators || []).filter(
       (p) => p.email !== cleanEmail
     );
 
     await form.save();
 
+    console.log(
+      `📧 Collaborator added → ${cleanEmail} on "${form.title}" (${form._id}) [role: ${role}]`
+    );
+
+    let emailSent = false;
+    let emailError = null;
+    try {
+      await sendCollaboratorAddedEmail({
+        form,
+        email: cleanEmail,
+        name: existingUser.name || name || "",
+        role,
+        invitedBy: req.user,
+      });
+      emailSent = true;
+      console.log(`✅ Added-collaborator email sent to ${cleanEmail}`);
+    } catch (err) {
+      emailError = err?.message || String(err);
+      console.error(
+        `❌ Added-collaborator email failed for ${cleanEmail}:`,
+        emailError
+      );
+    }
+
     return res.status(200).json({
       success: true,
       invited: false,
       added: true,
+      emailSent,
+      emailError,
       collaborator: {
         user: existingUser._id,
         email: existingUser.email,
@@ -820,21 +897,36 @@ export const addCollaborator = asyncHandler(async (req, res) => {
 
   await form.save();
 
-  // Fire and forget. Response goes back whether or not SMTP works.
-  sendCollaboratorInviteEmail({
-    form,
-    email: cleanEmail,
-    name: name || "",
-    role,
-    invitedBy: req.user,
-  }).catch((err) => {
-    console.warn("⚠️ Collaborator invite email failed:", err.message);
-  });
+  console.log(
+    `📧 Collaborator invite → ${cleanEmail} on "${form.title}" (${form._id}) [role: ${role}]`
+  );
+
+  let emailSent = false;
+  let emailError = null;
+  try {
+    await sendCollaboratorInviteEmail({
+      form,
+      email: cleanEmail,
+      name: name || "",
+      role,
+      invitedBy: req.user,
+    });
+    emailSent = true;
+    console.log(`✅ Collaborator invite sent to ${cleanEmail}`);
+  } catch (err) {
+    emailError = err?.message || String(err);
+    console.error(
+      `❌ Collaborator invite failed for ${cleanEmail}:`,
+      emailError
+    );
+  }
 
   return res.status(200).json({
     success: true,
     invited: true,
     added: false,
+    emailSent,
+    emailError,
     pending: {
       email: cleanEmail,
       name: name || "",
@@ -894,17 +986,12 @@ export const listCollaborators = asyncHandler(async (req, res) => {
 });
 
 // DELETE /api/forms/:id/collaborators/:userIdOrEmail
-//
-// Accepts either a Mongo userId (removing an actual collaborator) or a
-// URL-encoded email (removing a pending invite). The owner can cancel
-// either kind from the share modal.
 export const removeCollaborator = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
 
   const { userId } = req.params;
 
-  // ── Pending invite removal (email key) ─────────────────────
   if (!isObjectId(userId)) {
     const email = decodeURIComponent(String(userId)).trim().toLowerCase();
     const before = form.pendingCollaborators?.length || 0;
@@ -921,7 +1008,6 @@ export const removeCollaborator = asyncHandler(async (req, res) => {
       .json({ success: true, message: "Pending invite removed." });
   }
 
-  // ── Real collaborator removal (user id) ────────────────────
   form.collaborators = form.collaborators.filter(
     (c) => String(c.user) !== String(userId)
   );
@@ -956,8 +1042,6 @@ export const updateCollaboratorRole = asyncHandler(async (req, res) => {
 });
 
 // POST /api/forms/:id/collaborators/:email/resend
-//
-// Re-send the invite email to a pending collaborator.
 export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
@@ -970,7 +1054,7 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
     (p) => p.email === email
   );
 
-  // If they somehow signed up in the meantime, promote them instead.
+  // Not pending? Check if they signed up in the meantime.
   if (!pending) {
     const user = await User.findOne({ email });
     if (user) {
@@ -988,9 +1072,35 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
         addedAt: new Date(),
       });
       await form.save();
+
+      let emailSent = false;
+      let emailError = null;
+      try {
+        await sendCollaboratorAddedEmail({
+          form,
+          email,
+          name: user.name || "",
+          role: "editor",
+          invitedBy: req.user,
+        });
+        emailSent = true;
+      } catch (err) {
+        emailError = err?.message || String(err);
+        console.error(
+          `❌ Added-collaborator email failed for ${email}:`,
+          emailError
+        );
+      }
+
       return res
         .status(200)
-        .json({ success: true, message: "Added as editor.", added: true });
+        .json({
+          success: true,
+          message: "Added as editor.",
+          added: true,
+          emailSent,
+          emailError,
+        });
     }
 
     res.status(404);
@@ -1000,25 +1110,38 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
   pending.lastInvitedAt = new Date();
   await form.save();
 
-  sendCollaboratorInviteEmail({
-    form,
-    email: pending.email,
-    name: pending.name,
-    role: pending.role,
-    invitedBy: req.user,
-  }).catch((err) => {
-    console.warn("⚠️ Resend invite failed:", err.message);
-  });
+  console.log(`📧 Resending collaborator invite → ${pending.email}`);
 
-  res.status(200).json({ success: true, message: "Invite resent." });
+  let emailSent = false;
+  let emailError = null;
+  try {
+    await sendCollaboratorInviteEmail({
+      form,
+      email: pending.email,
+      name: pending.name,
+      role: pending.role,
+      invitedBy: req.user,
+    });
+    emailSent = true;
+    console.log(`✅ Collaborator invite resent to ${pending.email}`);
+  } catch (err) {
+    emailError = err?.message || String(err);
+    console.error(
+      `❌ Collaborator invite resend failed for ${pending.email}:`,
+      emailError
+    );
+  }
+
+  res
+    .status(200)
+    .json({ success: true, message: "Invite resent.", emailSent, emailError });
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// PARTICIPANTS (private form fillers, no account needed)
+// PARTICIPANTS
 // ─────────────────────────────────────────────────────────────────────
 
 // POST /api/forms/:id/participants
-// Body: { participants: [{ email, name? }] }
 export const addParticipants = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
@@ -1078,8 +1201,6 @@ export const addParticipants = asyncHandler(async (req, res) => {
 
   await form.save();
 
-  // Fire and forget emails. The controller still returns the plaintext
-  // passwords so the owner can hand them out manually if SMTP fails.
   (async () => {
     for (const c of created) {
       await sendParticipantInviteEmail({
@@ -1209,8 +1330,6 @@ const buildPublicForm = (form) => {
       value: o.value,
     })),
     validation: f.validation,
-    // NOTE: scoring is deliberately omitted so correct answers
-    // never leak to the respondent.
   }));
 
   return {
