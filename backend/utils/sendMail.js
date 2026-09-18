@@ -32,7 +32,7 @@ const getClient = () => {
 };
 
 const getFrom = () =>
-  process.env.EMAIL_FROM || "Xamut <no-reply@curriumx.com>";
+  process.env.EMAIL_FROM || "Xamut <no-reply@curriumx.online>";
 
 // ─────────────────────────────────────────────────────────────────────
 // Core send
