@@ -10,14 +10,50 @@ import {
 } from "../features/userApiSlice";
 import { setCredentials } from "../features/auth/authSlice";
 
+// ─────────────────────────────────────────────────────────────
+// Brand mark
+// ─────────────────────────────────────────────────────────────
+const XamutMark = ({ className = "h-10 w-10" }) => (
+  <div
+    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 text-lg font-bold text-white shadow-md shadow-teal-500/40`}
+  >
+    X
+  </div>
+);
+
+// ─────────────────────────────────────────────────────────────
+// Icons
+// ─────────────────────────────────────────────────────────────
+const IconEye = ({ className = "h-5 w-5" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className}>
+    <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
+    <circle cx="12" cy="12" r="3" />
+  </svg>
+);
+
+const IconEyeOff = ({ className = "h-5 w-5" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" className={className}>
+    <path d="M3 3l18 18" />
+    <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
+    <path d="M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4.5 9 7a11.8 11.8 0 0 1-2.2 3.6" />
+    <path d="M6.6 6.6C4 8.2 3 11 3 12c0 1.5 4 7 9 7 1.2 0 2.3-.3 3.3-.7" />
+  </svg>
+);
+
+const IconAlert = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 8v5M12 16h.01" strokeLinecap="round" />
+  </svg>
+);
+
 const Signin = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
 
   const [login, { isLoading }] = useLoginMutation();
   const [googleAuth, { isLoading: isGoogleLoading }] = useGoogleAuthMutation();
-  const [forgotPassword, { isLoading: isSendingOtp }] =
-    useForgotPasswordMutation();
+  const [forgotPassword, { isLoading: isSendingOtp }] = useForgotPasswordMutation();
   const [resetPassword, { isLoading: isResetting }] = useResetPasswordMutation();
 
   // "signin" | "forgot" | "reset"
@@ -25,7 +61,7 @@ const Signin = () => {
   const [error, setError] = useState("");
   const [info, setInfo] = useState("");
 
-  // ─── Signin form ─────────────────────────────────────────────────
+  // ─── Signin form ─────────────────────────────────────────────
   const [form, setForm] = useState({ email: "", password: "" });
   const [showPassword, setShowPassword] = useState(false);
 
@@ -57,7 +93,6 @@ const Signin = () => {
     }
   };
 
-  // ─── Google (still a placeholder) ────────────────────────────────
   const handleGoogle = async () => {
     setError("");
     try {
@@ -69,7 +104,7 @@ const Signin = () => {
     }
   };
 
-  // ─── Forgot password: send OTP ───────────────────────────────────
+  // ─── Forgot password ─────────────────────────────────────────
   const [forgotEmail, setForgotEmail] = useState("");
 
   const handleForgot = async (e) => {
@@ -83,25 +118,20 @@ const Signin = () => {
     }
 
     try {
-      await forgotPassword({
-        email: forgotEmail.trim().toLowerCase(),
-      }).unwrap();
-      // Controller always returns a 200 with a generic message
-      setInfo("If that email exists, we've sent a 6-digit code.");
+      await forgotPassword({ email: forgotEmail.trim().toLowerCase() }).unwrap();
       setStep("reset");
     } catch (err) {
       setError(err?.data?.message || "Could not send reset code.");
     }
   };
 
-  // ─── Reset: OTP + new password ───────────────────────────────────
+  // ─── Reset ───────────────────────────────────────────────────
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const inputsRef = useRef([]);
   const [newPassword, setNewPassword] = useState("");
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [cooldown, setCooldown] = useState(0);
 
-  // Focus + cooldown when entering reset step
   useEffect(() => {
     if (step === "reset") {
       inputsRef.current[0]?.focus();
@@ -109,7 +139,6 @@ const Signin = () => {
     }
   }, [step]);
 
-  // Cooldown tick
   useEffect(() => {
     if (cooldown <= 0) return;
     const t = setTimeout(() => setCooldown((c) => c - 1), 1000);
@@ -132,8 +161,7 @@ const Signin = () => {
       inputsRef.current[index - 1]?.focus();
     }
     if (e.key === "ArrowLeft" && index > 0) inputsRef.current[index - 1]?.focus();
-    if (e.key === "ArrowRight" && index < 5)
-      inputsRef.current[index + 1]?.focus();
+    if (e.key === "ArrowRight" && index < 5) inputsRef.current[index + 1]?.focus();
   };
 
   const handleOtpPaste = (e) => {
@@ -171,7 +199,6 @@ const Signin = () => {
         newPassword,
       }).unwrap();
 
-      // Clean up & send them back to signin with a success note
       setOtp(["", "", "", "", "", ""]);
       setNewPassword("");
       setForm((prev) => ({ ...prev, email: forgotEmail.trim().toLowerCase() }));
@@ -198,13 +225,13 @@ const Signin = () => {
     }
   };
 
-  // ─── Navigate between steps ──────────────────────────────────────
   const goToForgot = () => {
     setStep("forgot");
     setError("");
     setInfo("");
     setForgotEmail(form.email || "");
   };
+
   const goBackToSignin = () => {
     setStep("signin");
     setError("");
@@ -213,7 +240,6 @@ const Signin = () => {
     setNewPassword("");
   };
 
-  // ─── Per-step copy for the glass card on the image side ──────────
   const GLASS_COPY = {
     signin: {
       title: "Welcome back. Pick up right where you left off.",
@@ -224,13 +250,16 @@ const Signin = () => {
       chips: ["Reset", "Secure", "Fast"],
     },
     reset: {
-      title: "Almost there — enter the code and set a new password.",
+      title: "Almost there. Enter the code and set a new password.",
       chips: ["Verify", "New password", "Done"],
     },
   }[step];
 
+  const inputClass =
+    "w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60";
+
   return (
-    <div className="h-screen w-screen overflow-hidden bg-white md:grid md:grid-cols-[45%_55%]">
+    <div className="h-dvh w-full overflow-hidden bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100 md:grid md:grid-cols-[45%_55%]">
       {/* ─── Image side (desktop only) ───────────────────── */}
       <div className="relative hidden md:block">
         <img
@@ -238,27 +267,25 @@ const Signin = () => {
           alt="Students learning together"
           className="h-full w-full object-cover"
         />
-        <div className="absolute inset-0 bg-gradient-to-t from-black/75 via-black/30 to-black/20" />
+        <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-black/25" />
 
         <Link to="/" className="absolute left-8 top-8 flex items-center gap-2.5">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange-500 text-lg font-bold text-white shadow-lg shadow-orange-500/40">
-            X
-          </div>
+          <XamutMark className="h-10 w-10" />
           <span className="text-xl font-bold tracking-tight text-white">
             Xamut
           </span>
         </Link>
 
         <div className="absolute inset-x-8 bottom-8">
-          <div className="rounded-2xl border border-white/20 bg-white/10 p-6 backdrop-blur-xl shadow-2xl shadow-black/30">
-            <p className="text-lg font-medium leading-snug text-white">
+          <div className="rounded-xl border border-white/20 bg-white/10 p-6 shadow-2xl shadow-black/40 backdrop-blur-xl">
+            <p className="text-[17px] font-medium leading-snug text-white">
               {GLASS_COPY.title}
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               {GLASS_COPY.chips.map((t) => (
                 <span
                   key={t}
-                  className="rounded-full border border-white/20 bg-white/10 px-3 py-1 text-xs font-medium text-white/90 backdrop-blur"
+                  className="rounded-md border border-white/20 bg-white/10 px-2.5 py-1 text-[11.5px] font-medium text-white/90 backdrop-blur"
                 >
                   {t}
                 </span>
@@ -269,80 +296,76 @@ const Signin = () => {
       </div>
 
       {/* ─── Content side ─────────────────────────────────── */}
-      <div className="relative h-full overflow-y-auto bg-gradient-to-br from-white via-orange-50/50 to-orange-100/70">
-        <div className="pointer-events-none absolute -top-24 -right-24 hidden h-80 w-80 rounded-full bg-orange-300/40 blur-3xl md:block" />
-        <div className="pointer-events-none absolute -bottom-32 -left-16 hidden h-80 w-80 rounded-full bg-orange-400/25 blur-3xl md:block" />
+      <div className="relative h-full w-full overflow-y-auto scrollbar-thin bg-stone-50 dark:bg-stone-950">
+        <div className="pointer-events-none absolute -top-24 -right-24 hidden h-80 w-80 rounded-full bg-teal-300/30 blur-3xl dark:bg-teal-500/10 md:block" />
+        <div className="pointer-events-none absolute -bottom-32 -left-16 hidden h-80 w-80 rounded-full bg-teal-400/20 blur-3xl dark:bg-teal-500/10 md:block" />
 
-        <div className="relative flex min-h-full items-center justify-center px-5 py-10 sm:px-8">
+        <div className="relative flex min-h-full items-center justify-center px-4 py-8 sm:px-8">
           <div className="w-full max-w-md">
-            {/* Mobile brand */}
-            <Link to="/" className="mb-8 flex items-center gap-2.5 md:hidden">
-              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-orange-500 text-lg font-bold text-white shadow-lg shadow-orange-500/40">
-                X
-              </div>
-              <span className="text-xl font-bold tracking-tight text-slate-900">
+            <Link to="/" className="mb-7 flex items-center gap-2.5 md:hidden">
+              <XamutMark className="h-10 w-10" />
+              <span className="text-xl font-bold tracking-tight text-stone-900 dark:text-stone-100">
                 Xamut
               </span>
             </Link>
 
-            {/* Heading — varies by step */}
             <div className="mb-7">
-              {step === "signin" && (
+              {step === "signin" ? (
                 <>
-                  <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+                  <h1 className="text-[26px] font-bold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[30px]">
                     Welcome back
                   </h1>
-                  <p className="mt-2 text-sm text-slate-600">
+                  <p className="mt-2 text-[13.5px] text-stone-500 dark:text-stone-400">
                     Sign in to continue to your workspace.
                   </p>
                 </>
-              )}
-              {step === "forgot" && (
+              ) : null}
+              {step === "forgot" ? (
                 <>
-                  <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+                  <h1 className="text-[26px] font-bold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[30px]">
                     Forgot password?
                   </h1>
-                  <p className="mt-2 text-sm text-slate-600">
+                  <p className="mt-2 text-[13.5px] text-stone-500 dark:text-stone-400">
                     Enter your email and we'll send a reset code.
                   </p>
                 </>
-              )}
-              {step === "reset" && (
+              ) : null}
+              {step === "reset" ? (
                 <>
-                  <h1 className="text-3xl font-bold tracking-tight text-slate-900 sm:text-4xl">
+                  <h1 className="text-[26px] font-bold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[30px]">
                     Set a new password
                   </h1>
-                  <p className="mt-2 text-sm text-slate-600">
-                    Enter the code sent to{" "}
-                    <span className="font-medium text-slate-800">
+                  <p className="mt-2 text-[13.5px] text-stone-500 dark:text-stone-400">
+                    We sent a 6-digit code to{" "}
+                    <span className="font-medium text-stone-800 dark:text-stone-200">
                       {forgotEmail}
                     </span>
                   </p>
                 </>
-              )}
+              ) : null}
             </div>
 
-            {/* Error banner */}
-            {error && (
-              <div className="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                {error}
+            {error ? (
+              <div className="mb-5 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3.5 py-3 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
+                <IconAlert className="mt-0.5 shrink-0" />
+                <span>{error}</span>
               </div>
-            )}
+            ) : null}
 
-            {/* Info banner */}
-            {info && (
-              <div className="mb-5 rounded-xl border border-orange-200 bg-orange-50 px-4 py-3 text-sm text-orange-700">
-                {info}
+            {info ? (
+              <div className="mb-4 flex items-center gap-2 text-[12.5px] text-teal-700 dark:text-teal-300">
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-teal-500 dark:bg-teal-400" />
+                <span>{info}</span>
               </div>
-            )}
+            ) : null}
 
             {/* ─── Signin step ───────────────────────────── */}
-            {step === "signin" && (
+            {step === "signin" ? (
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div>
                   <label
                     htmlFor="email"
-                    className="mb-1.5 block text-sm font-medium text-slate-700"
+                    className="mb-1.5 block text-[12.5px] font-medium text-stone-700 dark:text-stone-300"
                   >
                     Email
                   </label>
@@ -354,7 +377,7 @@ const Signin = () => {
                     value={form.email}
                     onChange={handleChange}
                     placeholder="you@example.com"
-                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-orange-500 focus:ring-4 focus:ring-orange-500/15"
+                    className={inputClass}
                   />
                 </div>
 
@@ -362,14 +385,14 @@ const Signin = () => {
                   <div className="mb-1.5 flex items-center justify-between">
                     <label
                       htmlFor="password"
-                      className="block text-sm font-medium text-slate-700"
+                      className="block text-[12.5px] font-medium text-stone-700 dark:text-stone-300"
                     >
                       Password
                     </label>
                     <button
                       type="button"
                       onClick={goToForgot}
-                      className="text-xs font-semibold text-orange-600 hover:text-orange-700"
+                      className="text-[11.5px] font-semibold text-teal-600 hover:text-teal-700 dark:text-teal-400 dark:hover:text-teal-300"
                     >
                       Forgot password?
                     </button>
@@ -383,43 +406,15 @@ const Signin = () => {
                       value={form.password}
                       onChange={handleChange}
                       placeholder="Your password"
-                      className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 pr-12 text-sm text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-orange-500 focus:ring-4 focus:ring-orange-500/15"
+                      className={`${inputClass} pr-12`}
                     />
                     <button
                       type="button"
                       onClick={() => setShowPassword((s) => !s)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 transition-colors hover:text-slate-700"
-                      aria-label={
-                        showPassword ? "Hide password" : "Show password"
-                      }
+                      className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+                      aria-label={showPassword ? "Hide password" : "Show password"}
                     >
-                      {showPassword ? (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          className="h-5 w-5"
-                        >
-                          <path d="M3 3l18 18" />
-                          <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
-                          <path d="M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4.5 9 7a11.8 11.8 0 0 1-2.2 3.6" />
-                          <path d="M6.6 6.6C4 8.2 3 11 3 12c0 1.5 4 7 9 7 1.2 0 2.3-.3 3.3-.7" />
-                        </svg>
-                      ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          className="h-5 w-5"
-                        >
-                          <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
-                          <circle cx="12" cy="12" r="3" />
-                        </svg>
-                      )}
+                      {showPassword ? <IconEyeOff /> : <IconEye />}
                     </button>
                   </div>
                 </div>
@@ -427,25 +422,24 @@ const Signin = () => {
                 <button
                   type="submit"
                   disabled={isLoading}
-                  className="mt-2 w-full rounded-full bg-orange-500 px-6 py-3.5 text-sm font-semibold text-white shadow-lg shadow-orange-500/30 transition-all hover:bg-orange-600 hover:shadow-orange-500/50 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="mt-2 flex w-full items-center justify-center gap-2 rounded-md bg-teal-600 px-6 py-3 text-[13.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
                 >
                   {isLoading ? (
-                    <span className="inline-flex items-center gap-2">
-                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    <>
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                       Signing in…
-                    </span>
+                    </>
                   ) : (
                     "Sign in"
                   )}
                 </button>
 
-                {/* Divider */}
                 <div className="relative py-2">
                   <div className="absolute inset-0 flex items-center">
-                    <div className="w-full border-t border-slate-200" />
+                    <div className="w-full border-t border-stone-200 dark:border-stone-800" />
                   </div>
                   <div className="relative flex justify-center">
-                    <span className="bg-gradient-to-br from-white via-orange-50/50 to-orange-100/70 px-3 text-xs font-medium uppercase tracking-wider text-slate-400">
+                    <span className="bg-stone-50 px-3 text-[10.5px] font-medium uppercase tracking-wider text-stone-400 dark:bg-stone-950 dark:text-stone-500">
                       or
                     </span>
                   </div>
@@ -455,7 +449,7 @@ const Signin = () => {
                   type="button"
                   onClick={handleGoogle}
                   disabled={isGoogleLoading}
-                  className="flex w-full items-center justify-center gap-3 rounded-full border border-slate-200 bg-white px-6 py-3.5 text-sm font-semibold text-slate-700 shadow-sm transition-all hover:border-slate-300 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="flex w-full items-center justify-center gap-3 rounded-md border border-stone-200 bg-white px-6 py-3 text-[13.5px] font-semibold text-stone-700 shadow-sm transition-all hover:border-stone-300 hover:bg-stone-50 disabled:cursor-not-allowed disabled:opacity-70 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:hover:border-stone-600 dark:hover:bg-stone-800"
                 >
                   <svg viewBox="0 0 24 24" className="h-5 w-5">
                     <path
@@ -478,29 +472,29 @@ const Signin = () => {
                   {isGoogleLoading ? "Connecting…" : "Continue with Google"}
                 </button>
 
-                <p className="mt-6 text-center text-sm text-slate-600">
+                <p className="mt-6 text-center text-[13px] text-stone-500 dark:text-stone-400">
                   Don't have an account?{" "}
                   <Link
                     to="/signup"
-                    className="font-semibold text-orange-600 hover:text-orange-700"
+                    className="font-semibold text-teal-600 hover:text-teal-700 dark:text-teal-400 dark:hover:text-teal-300"
                   >
                     Create one
                   </Link>
                 </p>
 
-                <p className="mt-6 text-center text-xs text-slate-400">
+                <p className="mt-6 text-center text-[11px] text-stone-400 dark:text-stone-500">
                   By continuing, you agree to our Terms &amp; Privacy Policy.
                 </p>
               </form>
-            )}
+            ) : null}
 
             {/* ─── Forgot step ───────────────────────────── */}
-            {step === "forgot" && (
+            {step === "forgot" ? (
               <form onSubmit={handleForgot} className="space-y-4">
                 <div>
                   <label
                     htmlFor="forgot-email"
-                    className="mb-1.5 block text-sm font-medium text-slate-700"
+                    className="mb-1.5 block text-[12.5px] font-medium text-stone-700 dark:text-stone-300"
                   >
                     Email
                   </label>
@@ -514,71 +508,97 @@ const Signin = () => {
                       if (error) setError("");
                     }}
                     placeholder="you@example.com"
-                    className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-orange-500 focus:ring-4 focus:ring-orange-500/15"
+                    className={inputClass}
                   />
                 </div>
 
                 <button
                   type="submit"
                   disabled={isSendingOtp}
-                  className="w-full rounded-full bg-orange-500 px-6 py-3.5 text-sm font-semibold text-white shadow-lg shadow-orange-500/30 transition-all hover:bg-orange-600 hover:shadow-orange-500/50 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-teal-600 px-6 py-3 text-[13.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
                 >
                   {isSendingOtp ? (
-                    <span className="inline-flex items-center gap-2">
-                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    <>
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                       Sending code…
-                    </span>
+                    </>
                   ) : (
                     "Send reset code"
                   )}
                 </button>
 
-                <div className="flex items-center justify-between text-sm">
+                <div className="flex items-center justify-between text-[13px]">
                   <button
                     type="button"
                     onClick={goBackToSignin}
-                    className="font-medium text-slate-500 hover:text-slate-700"
+                    className="font-medium text-stone-500 hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200"
                   >
                     ← Back to sign in
                   </button>
                 </div>
 
-                <p className="text-center text-xs text-slate-400">
+                <p className="text-center text-[11.5px] text-stone-400 dark:text-stone-500">
                   We'll never share your email. If an account exists, a code
                   will be sent.
                 </p>
               </form>
-            )}
+            ) : null}
 
             {/* ─── Reset step ────────────────────────────── */}
-            {step === "reset" && (
+            {step === "reset" ? (
               <form onSubmit={handleReset} className="space-y-6">
-                {/* 6 boxes */}
-                <div
-                  className="flex items-center justify-between gap-2 sm:gap-3"
-                  onPaste={handleOtpPaste}
-                >
-                  {otp.map((digit, i) => (
-                    <input
-                      key={i}
-                      ref={(el) => (inputsRef.current[i] = el)}
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      maxLength={1}
-                      value={digit}
-                      onChange={(e) => handleOtpChange(i, e.target.value)}
-                      onKeyDown={(e) => handleOtpKeyDown(i, e)}
-                      className="h-14 w-full max-w-[3.25rem] rounded-xl border border-slate-200 bg-white text-center text-xl font-semibold text-slate-900 outline-none transition-all focus:border-orange-500 focus:ring-4 focus:ring-orange-500/15"
-                    />
-                  ))}
+                <div>
+                  <div
+                    className="flex items-center justify-center gap-2"
+                    onPaste={handleOtpPaste}
+                  >
+                    {otp.map((digit, i) => (
+                      <input
+                        key={i}
+                        ref={(el) => (inputsRef.current[i] = el)}
+                        type="text"
+                        inputMode="numeric"
+                        autoComplete="one-time-code"
+                        maxLength={1}
+                        value={digit}
+                        onChange={(e) => handleOtpChange(i, e.target.value)}
+                        onKeyDown={(e) => handleOtpKeyDown(i, e)}
+                        className={`h-12 w-10 rounded-md border bg-white text-center text-[18px] font-semibold text-stone-900 outline-none transition-all focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:bg-stone-900 dark:text-stone-100 dark:focus:border-teal-500/60 sm:h-14 sm:w-12 sm:text-[20px] ${
+                          digit
+                            ? "border-teal-300 bg-teal-50/40 dark:border-teal-500/40 dark:bg-teal-500/5"
+                            : "border-stone-200 dark:border-stone-700"
+                        }`}
+                      />
+                    ))}
+                  </div>
+                  <p className="mt-4 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
+                    {cooldown > 0 ? (
+                      <>
+                        Didn't get it? Resend in{" "}
+                        <span className="font-semibold text-stone-500 dark:text-stone-400">
+                          {cooldown}s
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        Didn't get it?{" "}
+                        <button
+                          type="button"
+                          onClick={handleResendReset}
+                          disabled={isSendingOtp}
+                          className="font-semibold text-teal-600 hover:text-teal-700 disabled:opacity-50 dark:text-teal-400 dark:hover:text-teal-300"
+                        >
+                          {isSendingOtp ? "Sending…" : "Resend code"}
+                        </button>
+                      </>
+                    )}
+                  </p>
                 </div>
 
-                {/* New password */}
                 <div>
                   <label
                     htmlFor="new-password"
-                    className="mb-1.5 block text-sm font-medium text-slate-700"
+                    className="mb-1.5 block text-[12.5px] font-medium text-stone-700 dark:text-stone-300"
                   >
                     New password
                   </label>
@@ -593,43 +613,17 @@ const Signin = () => {
                         if (error) setError("");
                       }}
                       placeholder="At least 8 characters"
-                      className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 pr-12 text-sm text-slate-900 outline-none transition-all placeholder:text-slate-400 focus:border-orange-500 focus:ring-4 focus:ring-orange-500/15"
+                      className={`${inputClass} pr-12`}
                     />
                     <button
                       type="button"
                       onClick={() => setShowNewPassword((s) => !s)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-400 transition-colors hover:text-slate-700"
+                      className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
                       aria-label={
                         showNewPassword ? "Hide password" : "Show password"
                       }
                     >
-                      {showNewPassword ? (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          className="h-5 w-5"
-                        >
-                          <path d="M3 3l18 18" />
-                          <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
-                          <path d="M9.9 5.1A10.9 10.9 0 0 1 12 5c5 0 9 4.5 9 7a11.8 11.8 0 0 1-2.2 3.6" />
-                          <path d="M6.6 6.6C4 8.2 3 11 3 12c0 1.5 4 7 9 7 1.2 0 2.3-.3 3.3-.7" />
-                        </svg>
-                      ) : (
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          viewBox="0 0 24 24"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="1.8"
-                          className="h-5 w-5"
-                        >
-                          <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
-                          <circle cx="12" cy="12" r="3" />
-                        </svg>
-                      )}
+                      {showNewPassword ? <IconEyeOff /> : <IconEye />}
                     </button>
                   </div>
                 </div>
@@ -637,46 +631,29 @@ const Signin = () => {
                 <button
                   type="submit"
                   disabled={isResetting}
-                  className="w-full rounded-full bg-orange-500 px-6 py-3.5 text-sm font-semibold text-white shadow-lg shadow-orange-500/30 transition-all hover:bg-orange-600 hover:shadow-orange-500/50 disabled:cursor-not-allowed disabled:opacity-70"
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-teal-600 px-6 py-3 text-[13.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
                 >
                   {isResetting ? (
-                    <span className="inline-flex items-center gap-2">
-                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                    <>
+                      <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
                       Resetting…
-                    </span>
+                    </>
                   ) : (
                     "Reset password"
                   )}
                 </button>
 
-                <div className="flex items-center justify-between text-sm">
+                <div className="text-center">
                   <button
                     type="button"
                     onClick={goBackToSignin}
-                    className="font-medium text-slate-500 hover:text-slate-700"
+                    className="text-[12.5px] font-medium text-stone-500 hover:text-stone-700 dark:text-stone-400 dark:hover:text-stone-200"
                   >
                     ← Back to sign in
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={handleResendReset}
-                    disabled={cooldown > 0 || isSendingOtp}
-                    className="font-semibold text-orange-600 transition-colors hover:text-orange-700 disabled:cursor-not-allowed disabled:text-slate-400"
-                  >
-                    {isSendingOtp
-                      ? "Sending…"
-                      : cooldown > 0
-                        ? `Resend in ${cooldown}s`
-                        : "Resend code"}
-                  </button>
                 </div>
-
-                <p className="text-center text-xs text-slate-400">
-                  Didn't get it? Check spam, or use the resend button.
-                </p>
               </form>
-            )}
+            ) : null}
           </div>
         </div>
       </div>
