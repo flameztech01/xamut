@@ -6,6 +6,7 @@ import {
   useParticipantLoginMutation,
   useSubmitResponseMutation,
 } from "../features/formApiSlice";
+import { useDocumentMeta } from "../hooks/useDocumentMeta";
 
 // ─────────────────────────────────────────────────────────────
 // Token storage helpers
@@ -768,6 +769,15 @@ const PublicForm = () => {
 
   const [submit, { isLoading: submitting }] = useSubmitResponseMutation();
 
+  const form = formData?.form;
+
+  // Dynamic tab title + description for this form page.
+  // Runs before any early return, no-ops until form data loads.
+  useDocumentMeta({
+    title: form?.title ? `${form.title} — Xamut` : undefined,
+    description: form?.description || undefined,
+  });
+
   useEffect(() => {
     if (error?.status === 401) {
       setNeedLogin(true);
@@ -782,8 +792,6 @@ const PublicForm = () => {
       setNeedLogin(false);
     }
   }, [formData]);
-
-  const form = formData?.form;
 
   const [answers, setAnswers] = useState({});
   const [errors, setErrors] = useState({});
@@ -1001,9 +1009,7 @@ const PublicForm = () => {
           ) : null}
         </div>
 
-        {/* Mobile progress bar — real block element, so no stacking/clipping issues.
-            Sits right at the bottom edge of the sticky header and stays pinned
-            to the top of the viewport as the user scrolls. */}
+        {/* Mobile progress bar — real block element, so no stacking/clipping issues. */}
         {showMobileProgress ? (
           <div className="h-1 w-full bg-stone-200 dark:bg-stone-800 lg:hidden">
             <div
@@ -1013,8 +1019,6 @@ const PublicForm = () => {
           </div>
         ) : null}
 
-        {/* Header bottom border — mobile keeps it under the progress bar
-            when the bar is showing, otherwise sits flush at the header edge */}
         <div className="border-b border-stone-200/70 dark:border-stone-800/70" />
       </header>
 
