@@ -88,6 +88,11 @@ const TEXT_INPUT_TYPES = new Set([
   "number",
 ]);
 
+const ROLE_OPTIONS = [
+  { value: "editor", label: "Editor" },
+  { value: "viewer", label: "Viewer" },
+];
+
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -190,6 +195,11 @@ const I = {
       <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
     </svg>
   ),
+  check: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" className={c}>
+      <path d="M20 6L9 17l-5-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
   eye: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12Z" />
@@ -252,6 +262,98 @@ const I = {
       <path d="M17 21v-8H7v8M7 3v5h8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+};
+
+// ─────────────────────────────────────────────────────────────
+// Custom Dropdown — replaces native <select> everywhere
+// ─────────────────────────────────────────────────────────────
+const Dropdown = ({
+  value,
+  onChange,
+  options,
+  disabled = false,
+  className = "",
+  menuAlign = "left",
+}) => {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDocClick = (e) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDocClick);
+    document.addEventListener("touchstart", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("touchstart", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div ref={wrapRef} className={`relative ${className}`}>
+      <button
+        type="button"
+        onClick={() => !disabled && setOpen((v) => !v)}
+        disabled={disabled}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-md border border-stone-200 bg-white px-2.5 py-2 text-[12px] font-medium text-stone-700 transition-colors hover:border-stone-300 focus:border-teal-400 focus:outline-none focus:ring-2 focus:ring-teal-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:border-stone-600 dark:focus:border-teal-500/60"
+      >
+        <span className="truncate">{selected?.label ?? "Select"}</span>
+        <span className="shrink-0 text-stone-400 dark:text-stone-500">
+          {I.chevDown("h-3.5 w-3.5")}
+        </span>
+      </button>
+
+      {open ? (
+        <div
+          role="listbox"
+          className={`absolute top-full z-50 mt-1 min-w-full overflow-hidden rounded-md border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10 dark:border-stone-700/80 dark:bg-stone-900 dark:shadow-black/40 ${
+            menuAlign === "right" ? "right-0" : "left-0"
+          }`}
+        >
+          {options.map((opt) => {
+            const active = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                role="option"
+                aria-selected={active}
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={`flex w-full items-center justify-between gap-3 whitespace-nowrap px-3 py-1.5 text-left text-[12px] transition-colors ${
+                  active
+                    ? "bg-teal-50 font-semibold text-teal-700 dark:bg-teal-500/10 dark:text-teal-300"
+                    : "text-stone-700 hover:bg-stone-50 dark:text-stone-200 dark:hover:bg-stone-800"
+                }`}
+              >
+                <span className="truncate">{opt.label}</span>
+                {active ? (
+                  <span className="shrink-0 text-teal-600 dark:text-teal-400">
+                    {I.check("h-3 w-3")}
+                  </span>
+                ) : null}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -550,7 +652,6 @@ const FieldCard = ({
           : "border-stone-200/80 hover:border-teal-300 dark:border-stone-800 dark:hover:border-teal-500/40"
       }`}
     >
-      {/* Left rail: index + drag affordance */}
       <div className="flex items-start gap-2 p-3.5 sm:p-4">
         <div className="hidden shrink-0 flex-col items-center pt-0.5 sm:flex">
           <span
@@ -565,7 +666,6 @@ const FieldCard = ({
         </div>
 
         <div className="min-w-0 flex-1">
-          {/* Header: type badge + actions */}
           <div className="mb-2 flex items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-1.5">
               <span className="rounded bg-stone-100 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
@@ -642,7 +742,6 @@ const FieldCard = ({
             </div>
           </div>
 
-          {/* Label */}
           <input
             type="text"
             value={field.label}
@@ -655,7 +754,6 @@ const FieldCard = ({
             }`}
           />
 
-          {/* Description */}
           <input
             type="text"
             value={field.description}
@@ -785,7 +883,6 @@ const SettingsPanel = ({ form, onChange }) => {
 
   return (
     <div className="space-y-5">
-      {/* Form type */}
       <section>
         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           Form type
@@ -814,7 +911,6 @@ const SettingsPanel = ({ form, onChange }) => {
         </div>
       </section>
 
-      {/* Visibility */}
       <section>
         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           Who can fill it
@@ -845,7 +941,6 @@ const SettingsPanel = ({ form, onChange }) => {
         ) : null}
       </section>
 
-      {/* Behaviour */}
       <section className="space-y-3">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           Behaviour
@@ -876,7 +971,6 @@ const SettingsPanel = ({ form, onChange }) => {
         />
       </section>
 
-      {/* Quiz */}
       {isQuiz ? (
         <section className="space-y-3 rounded-lg border border-purple-200/70 bg-purple-50/40 p-3 dark:border-purple-500/30 dark:bg-purple-500/10">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-purple-700 dark:text-purple-400">
@@ -914,7 +1008,6 @@ const SettingsPanel = ({ form, onChange }) => {
         </section>
       ) : null}
 
-      {/* Confirmation */}
       <section className="space-y-2">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           After submitting
@@ -1007,14 +1100,13 @@ const ShareModal = ({ open, onClose, formId }) => {
                 placeholder="name@example.com"
                 className="min-w-0 flex-1 rounded-md border border-stone-200 bg-white px-3 py-2 text-[13px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
               />
-              <select
+              <Dropdown
                 value={role}
-                onChange={(e) => setRole(e.target.value)}
-                className="shrink-0 rounded-md border border-stone-200 bg-white px-2.5 py-2 text-[12px] font-medium text-stone-700 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200"
-              >
-                <option value="editor">Editor</option>
-                <option value="viewer">Viewer</option>
-              </select>
+                onChange={setRole}
+                options={ROLE_OPTIONS}
+                className="w-24 shrink-0"
+                menuAlign="right"
+              />
               <button
                 type="submit"
                 disabled={adding || !email.trim()}
@@ -1076,20 +1168,15 @@ const ShareModal = ({ open, onClose, formId }) => {
                       {c.email}
                     </p>
                   </div>
-                  <select
+                  <Dropdown
                     value={c.role}
-                    onChange={(e) =>
-                      updateRole({
-                        id: formId,
-                        userId: c.user,
-                        role: e.target.value,
-                      })
+                    onChange={(next) =>
+                      updateRole({ id: formId, userId: c.user, role: next })
                     }
-                    className="shrink-0 rounded-md border border-stone-200 bg-white px-2 py-1 text-[11px] font-medium text-stone-700 outline-none focus:border-teal-300 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200"
-                  >
-                    <option value="editor">Editor</option>
-                    <option value="viewer">Viewer</option>
-                  </select>
+                    options={ROLE_OPTIONS}
+                    className="w-24 shrink-0"
+                    menuAlign="right"
+                  />
                   <button
                     type="button"
                     onClick={() =>
@@ -1685,7 +1772,6 @@ const FormEditor = () => {
 
   return (
     <div className="flex h-dvh w-full flex-col overflow-hidden bg-white text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
-      {/* ─── Header ──────────────────────────────────────── */}
       <header
         className="z-30 shrink-0 border-b border-stone-200/70 bg-white/85 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/85"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
@@ -1723,7 +1809,6 @@ const FormEditor = () => {
             </div>
           </div>
 
-          {/* Mobile settings */}
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
@@ -1733,7 +1818,6 @@ const FormEditor = () => {
             {I.settings("h-4 w-4")}
           </button>
 
-          {/* Save (desktop) */}
           <button
             type="button"
             onClick={handleSave}
@@ -1766,13 +1850,10 @@ const FormEditor = () => {
         </div>
       </header>
 
-      {/* ─── Main ────────────────────────────────────────── */}
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin">
         <div className="mx-auto w-full max-w-6xl px-2.5 pb-32 pt-3 sm:px-4 sm:pb-8 sm:pt-5">
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_320px]">
-            {/* Fields column */}
             <div className="min-w-0">
-              {/* Form title & description */}
               <div className="mb-4 rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900 sm:p-4">
                 <input
                   type="text"
@@ -1790,7 +1871,6 @@ const FormEditor = () => {
                 />
               </div>
 
-              {/* Fields */}
               <div className="space-y-3">
                 {(form.fields || []).map((field, idx) => (
                   <FieldCard
@@ -1808,7 +1888,6 @@ const FormEditor = () => {
                 ))}
               </div>
 
-              {/* Add field */}
               <button
                 type="button"
                 onClick={() => setPickerOpen(true)}
@@ -1825,7 +1904,6 @@ const FormEditor = () => {
               ) : null}
             </div>
 
-            {/* Desktop settings sidebar */}
             <aside className="hidden lg:block">
               <div className="sticky top-24 rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
                 <div className="mb-4 flex items-center gap-2">
@@ -1843,7 +1921,6 @@ const FormEditor = () => {
         </div>
       </div>
 
-      {/* ─── Mobile save button (sticky) ─────────────────── */}
       {dirty ? (
         <div
           className="fixed inset-x-0 z-40 flex justify-center px-4 lg:hidden"
@@ -1860,14 +1937,12 @@ const FormEditor = () => {
         </div>
       ) : null}
 
-      {/* ─── Modals ──────────────────────────────────────── */}
       <FieldTypePicker
         open={pickerOpen}
         onClose={() => setPickerOpen(false)}
         onPick={addField}
       />
 
-      {/* Mobile settings sheet */}
       {settingsOpen ? (
         <div className="fixed inset-0 z-[70] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 lg:hidden">
           <div
@@ -1922,7 +1997,6 @@ const FormEditor = () => {
         formId={id}
       />
 
-      {/* Confirm close */}
       {confirmClose ? (
         <div className="fixed inset-0 z-[80] flex items-center justify-center bg-stone-900/50 px-4 backdrop-blur-[3px] dark:bg-black/60">
           <div
@@ -1958,7 +2032,6 @@ const FormEditor = () => {
         </div>
       ) : null}
 
-      {/* Toast */}
       {toast ? (
         <div
           className="pointer-events-none fixed inset-x-0 z-[90] flex justify-center px-4"
