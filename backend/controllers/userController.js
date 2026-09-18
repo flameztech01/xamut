@@ -4,6 +4,7 @@ import { OAuth2Client } from "google-auth-library";
 import User from "../models/userModel.js";
 import generateToken from "../utils/generateToken.js";
 import { sendOtpEmail } from "../utils/resendOTP.js";
+import { claimPendingCollaborations } from "../utils/claimInvites.js";
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
@@ -20,7 +21,10 @@ const normalizeSchool = (value = "") => value.trim().toLowerCase();
 // Every auth entry point returns the same fields so the frontend
 // can render role-aware UI (student vs cyber cafe vs admin)
 // without an extra profile fetch.
-const buildAuthResponse = (user, token) => ({
+//
+// `extra` carries anything that only some endpoints return — e.g.
+// `claimedInvites` from the collaborator claim pass.
+const buildAuthResponse = (user, token, extra = {}) => ({
   _id: user._id,
   name: user.name,
   username: user.username,
@@ -33,6 +37,7 @@ const buildAuthResponse = (user, token) => ({
   school: user.school || "",
   cyberCafeStatus: user.cyberCafeStatus || "none",
   token,
+  ...extra,
 });
 
 // ─── Google Auth ──────────────────────────────────────────────
@@ -111,9 +116,15 @@ const googleAuth = asyncHandler(async (req, res) => {
     await user.save();
   }
 
+  // Any pending collaborator invites for this email get promoted to
+  // real collaborators now, before we hand back the session.
+  const claimed = await claimPendingCollaborations(user);
+
   const token = generateToken(res, user._id);
 
-  res.status(200).json(buildAuthResponse(user, token));
+  res.status(200).json(
+    buildAuthResponse(user, token, { claimedInvites: claimed.forms })
+  );
 });
 
 // ─── Register ─────────────────────────────────────────────────
@@ -231,9 +242,16 @@ const verifyOtp = asyncHandler(async (req, res) => {
   user.deleteAfter = null;
   await user.save();
 
+  // This is the moment an invited-but-unregistered person officially
+  // exists in Xamut. Any pending collaborator invites aimed at this
+  // email become real collaborations now.
+  const claimed = await claimPendingCollaborations(user);
+
   const token = generateToken(res, user._id);
 
-  res.status(200).json(buildAuthResponse(user, token));
+  res.status(200).json(
+    buildAuthResponse(user, token, { claimedInvites: claimed.forms })
+  );
 });
 
 // ─── Resend OTP ───────────────────────────────────────────────
@@ -304,9 +322,17 @@ const loginUser = asyncHandler(async (req, res) => {
     );
   }
 
+  // Catch invites that arrived while this person was away. This
+  // handles the case where they signed up before the invite was
+  // sent — the row is still sitting in pendingCollaborators, and
+  // their next login is what promotes it.
+  const claimed = await claimPendingCollaborations(user);
+
   const token = generateToken(res, user._id);
 
-  res.status(200).json(buildAuthResponse(user, token));
+  res.status(200).json(
+    buildAuthResponse(user, token, { claimedInvites: claimed.forms })
+  );
 });
 
 // ─── Forgot Password ──────────────────────────────────────────
