@@ -17,6 +17,13 @@ import {
   useRemoveParticipantMutation,
   useResendParticipantCredentialsMutation,
 } from "../features/formApiSlice";
+import {
+  useStartFormAiSessionMutation,
+  useAnswerFormAiQuestionMutation,
+  useRegenerateFormAiDraftMutation,
+  useConfirmFormAiSessionMutation,
+  useCancelFormAiSessionMutation,
+} from "../features/formAiApiSlice";
 
 // ─────────────────────────────────────────────────────────────
 // Field type metadata
@@ -283,6 +290,15 @@ const I = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <rect x="3" y="5" width="18" height="14" rx="2" />
       <path d="M3 7l9 6 9-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  sparkle: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path
+        d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3zM19 17l.9 2.1L22 20l-2.1.9L19 23l-.9-2.1L16 20l2.1-.9L19 17z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </svg>
   ),
 };
@@ -1055,15 +1071,450 @@ const SettingsPanel = ({ form, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Share modal
+// AI edit panel
 //
-// Shows three groups:
-//   • Owner — locked, always at the top
-//   • Collaborators — real Xamut users with accounts
-//   • Pending — invited by email but not signed up yet. These
-//     rows show "Invited" instead of a role dropdown in the sense
-//     they still have a role, but the badge tells you it's a
-//     pending invite. Resend re-fires the invite email.
+// Inline bar above the fields list. User types a natural-language
+// request, the AI returns either a clarifying question or a full
+// draft, and the user confirms or discards.
+// ─────────────────────────────────────────────────────────────
+const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
+  const [prompt, setPrompt] = useState("");
+  const [session, setSession] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [picked, setPicked] = useState([]);
+  const [otherText, setOtherText] = useState("");
+  const [tweak, setTweak] = useState("");
+  const [showTweak, setShowTweak] = useState(false);
+
+  const [startSession] = useStartFormAiSessionMutation();
+  const [answerQuestion] = useAnswerFormAiQuestionMutation();
+  const [regenerate] = useRegenerateFormAiDraftMutation();
+  const [confirmSession] = useConfirmFormAiSessionMutation();
+  const [cancelSession] = useCancelFormAiSessionMutation();
+
+  const resetLocalInputs = () => {
+    setPicked([]);
+    setOtherText("");
+    setTweak("");
+    setShowTweak(false);
+    setError("");
+  };
+
+  const handleStart = async (e) => {
+    e?.preventDefault?.();
+    const text = prompt.trim();
+    if (!text || busy) return;
+
+    // The AI edit path reads the form from the DB, so any unsaved
+    // local edits would be invisible to it. Save first if dirty.
+    if (dirty) {
+      const ok = await onSaveFirst?.();
+      if (!ok) return;
+    }
+
+    setBusy(true);
+    setError("");
+    try {
+      const res = await startSession({
+        prompt: text,
+        mode: "edit",
+        formId,
+      }).unwrap();
+      setSession(res.session);
+      resetLocalInputs();
+      setPrompt("");
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't reach the AI.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleAnswer = async () => {
+    if (!session?.pendingQuestion) return;
+    const other = otherText.trim();
+    if (!picked.length && !other) {
+      setError("Pick an option or type your own.");
+      return;
+    }
+    setBusy(true);
+    setError("");
+    try {
+      const res = await answerQuestion({
+        sessionId: session._id,
+        answer: { optionIds: picked, otherText: other || undefined },
+      }).unwrap();
+      setSession(res.session);
+      resetLocalInputs();
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't send that.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleTweak = async () => {
+    if (!session || !tweak.trim()) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await regenerate({
+        sessionId: session._id,
+        feedback: tweak.trim(),
+      }).unwrap();
+      setSession(res.session);
+      setTweak("");
+      setShowTweak(false);
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't rework the draft.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConfirm = async () => {
+    if (!session) return;
+    setBusy(true);
+    setError("");
+    try {
+      const res = await confirmSession({ sessionId: session._id }).unwrap();
+      setSession(null);
+      resetLocalInputs();
+      await onApplied?.(res.result);
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't apply changes.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCancel = async () => {
+    if (!session) return;
+    setBusy(true);
+    try {
+      await cancelSession({ sessionId: session._id }).unwrap();
+    } catch {
+      /* swallow, we're clearing anyway */
+    } finally {
+      setSession(null);
+      resetLocalInputs();
+      setBusy(false);
+    }
+  };
+
+  const toggleOption = (opt) => {
+    if (!session?.pendingQuestion) return;
+    if (!session.pendingQuestion.multiSelect) {
+      setPicked([opt.id]);
+      return;
+    }
+    setPicked((prev) =>
+      prev.includes(opt.id)
+        ? prev.filter((x) => x !== opt.id)
+        : [...prev, opt.id]
+    );
+  };
+
+  // ── Idle state ─────────────────────────────────────────────
+  if (!session) {
+    return (
+      <form
+        onSubmit={handleStart}
+        className="mb-4 overflow-hidden rounded-lg border border-teal-200/80 bg-gradient-to-br from-teal-50/60 to-white dark:border-teal-500/30 dark:from-teal-500/10 dark:to-stone-900"
+      >
+        <div className="flex items-center gap-2 px-3 py-2 sm:px-3.5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-teal-500 to-teal-600 text-white shadow-sm shadow-teal-500/30">
+            {I.sparkle("h-3.5 w-3.5")}
+          </span>
+          <input
+            type="text"
+            value={prompt}
+            onChange={(e) => {
+              setPrompt(e.target.value);
+              if (error) setError("");
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                handleStart(e);
+              }
+            }}
+            placeholder="Ask AI to edit this form — add a field, rename something, reorganize…"
+            disabled={busy}
+            className="min-w-0 flex-1 bg-transparent px-1 py-1.5 text-[13px] text-stone-900 outline-none placeholder:text-stone-400 disabled:opacity-60 dark:text-stone-100 dark:placeholder:text-stone-500"
+          />
+          <button
+            type="submit"
+            disabled={busy || !prompt.trim()}
+            className="shrink-0 rounded-md bg-teal-600 px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-95 disabled:opacity-50 dark:bg-teal-500 dark:hover:bg-teal-400"
+          >
+            {busy ? "…" : "Ask"}
+          </button>
+        </div>
+        {error ? (
+          <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400 sm:px-3.5">
+            {error}
+          </p>
+        ) : null}
+      </form>
+    );
+  }
+
+  // ── Question state ────────────────────────────────────────
+  if (session.pendingQuestion) {
+    const q = session.pendingQuestion;
+    return (
+      <div className="mb-4 overflow-hidden rounded-lg border border-teal-200/80 bg-gradient-to-br from-teal-50/60 to-white dark:border-teal-500/30 dark:from-teal-500/10 dark:to-stone-900">
+        <div className="flex items-center justify-between gap-2 border-b border-teal-100/80 px-3 py-2 dark:border-teal-500/20 sm:px-3.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-teal-500 to-teal-600 text-white shadow-sm shadow-teal-500/30">
+              {I.sparkle("h-3 w-3")}
+            </span>
+            <span className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-teal-600 dark:text-teal-400">
+              AI needs one thing
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={busy}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40 dark:text-stone-500 dark:hover:bg-stone-800/70 dark:hover:text-stone-200"
+            aria-label="Cancel AI edit"
+          >
+            {I.close("h-3.5 w-3.5")}
+          </button>
+        </div>
+
+        <div className="px-3 py-2.5 sm:px-3.5">
+          <p className="mb-2 text-[13px] font-medium leading-snug text-stone-800 dark:text-stone-100">
+            {q.text}
+          </p>
+          {q.helper ? (
+            <p className="mb-2 text-[11.5px] leading-snug text-stone-500 dark:text-stone-400">
+              {q.helper}
+            </p>
+          ) : null}
+
+          {q.options?.length ? (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {q.options.map((opt) => {
+                const active = picked.includes(opt.id);
+                return (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => toggleOption(opt)}
+                    disabled={busy}
+                    className={`rounded-md border px-2.5 py-1 text-[11.5px] font-medium transition-all active:scale-[0.97] disabled:opacity-60 ${
+                      active
+                        ? "border-teal-400 bg-teal-500 text-white shadow-sm shadow-teal-500/25 dark:border-teal-400 dark:bg-teal-500"
+                        : "border-stone-200 bg-white text-stone-700 hover:border-teal-300 hover:bg-teal-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10"
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {q.allowOther ? (
+            <input
+              type="text"
+              value={otherText}
+              onChange={(e) => {
+                setOtherText(e.target.value);
+                if (error) setError("");
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleAnswer();
+                }
+              }}
+              placeholder={q.otherPlaceholder || "Or type your own…"}
+              disabled={busy}
+              className="mb-2 w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 disabled:opacity-60 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
+            />
+          ) : null}
+
+          <div className="flex items-center justify-end gap-2">
+            <button
+              type="button"
+              onClick={handleAnswer}
+              disabled={busy || (!picked.length && !otherText.trim())}
+              className="rounded-md bg-gradient-to-br from-teal-500 to-teal-600 px-4 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:shadow-md active:scale-95 disabled:opacity-50"
+            >
+              {busy ? "Sending…" : "Next"}
+            </button>
+          </div>
+        </div>
+
+        {error ? (
+          <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400 sm:px-3.5">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  // ── Preview state ─────────────────────────────────────────
+  if (session.awaitingConfirm && session.draft) {
+    const draft = session.draft;
+    const realFields = (draft.fields || []).filter((f) => f.type !== "section");
+    const newCount = realFields.length;
+
+    return (
+      <div className="mb-4 overflow-hidden rounded-lg border border-teal-200/80 bg-gradient-to-br from-teal-50/60 to-white dark:border-teal-500/30 dark:from-teal-500/10 dark:to-stone-900">
+        <div className="flex items-center justify-between gap-2 border-b border-teal-100/80 px-3 py-2 dark:border-teal-500/20 sm:px-3.5">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-teal-500 to-teal-600 text-white shadow-sm shadow-teal-500/30">
+              {I.check("h-3 w-3")}
+            </span>
+            <span className="truncate text-[10px] font-semibold uppercase tracking-[0.12em] text-teal-600 dark:text-teal-400">
+              AI proposal
+            </span>
+            <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-teal-600 ring-1 ring-teal-100 dark:bg-stone-800/80 dark:text-teal-400 dark:ring-teal-500/20">
+              {newCount} field{newCount === 1 ? "" : "s"}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={handleCancel}
+            disabled={busy}
+            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40 dark:text-stone-500 dark:hover:bg-stone-800/70 dark:hover:text-stone-200"
+            aria-label="Discard AI proposal"
+          >
+            {I.close("h-3.5 w-3.5")}
+          </button>
+        </div>
+
+        <div
+          className="scrollbar-thin overflow-y-auto px-3 py-2.5 sm:px-3.5"
+          style={{ maxHeight: "min(44dvh, 320px)" }}
+        >
+          {session.messages?.length ? (
+            <p className="mb-2 text-[12px] leading-snug text-stone-600 dark:text-stone-300">
+              {session.messages[session.messages.length - 1]?.content ||
+                "Here's the updated form."}
+            </p>
+          ) : null}
+
+          <div className="space-y-1">
+            {realFields.length === 0 ? (
+              <p className="py-2 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
+                The proposal has no fields. Something went wrong.
+              </p>
+            ) : (
+              realFields.map((f, i) => (
+                <div
+                  key={f.id || i}
+                  className="rounded-md border border-stone-200/80 bg-white px-2.5 py-2 dark:border-stone-700/80 dark:bg-stone-900"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 flex-1 break-words text-[12.5px] font-medium leading-snug text-stone-800 dark:text-stone-100">
+                      <span className="mr-1.5 text-stone-400 dark:text-stone-500">
+                        {i + 1}.
+                      </span>
+                      {f.label || `Question ${i + 1}`}
+                      {f.required ? (
+                        <span className="ml-1 text-teal-500 dark:text-teal-400">
+                          *
+                        </span>
+                      ) : null}
+                    </p>
+                    <span className="shrink-0 rounded-full bg-stone-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
+                      {FIELD_LABEL[f.type] || f.type}
+                    </span>
+                  </div>
+                  {f.options?.length ? (
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {f.options.slice(0, 8).map((o) => (
+                        <span
+                          key={o.id}
+                          className="rounded-md border border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300"
+                        >
+                          {o.label}
+                        </span>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        {showTweak ? (
+          <div className="border-t border-teal-100/80 px-3 py-2.5 dark:border-teal-500/20 sm:px-3.5">
+            <textarea
+              rows={2}
+              value={tweak}
+              onChange={(e) => setTweak(e.target.value)}
+              placeholder="What should change? e.g. 'make Q3 required' or 'add a phone field'"
+              autoFocus
+              disabled={busy}
+              className="w-full resize-none rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 disabled:opacity-60 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
+            />
+            <div className="mt-2 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowTweak(false);
+                  setTweak("");
+                }}
+                disabled={busy}
+                className="rounded-md px-3 py-1.5 text-[11.5px] font-semibold text-stone-500 hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleTweak}
+                disabled={busy || !tweak.trim()}
+                className="rounded-md border border-stone-200 bg-white px-3.5 py-1.5 text-[11.5px] font-semibold text-stone-700 transition-colors hover:border-teal-300 hover:bg-teal-50 hover:text-teal-700 disabled:opacity-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10 dark:hover:text-teal-300"
+              >
+                {busy ? "Reworking…" : "Apply change"}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="flex items-center justify-end gap-2 border-t border-teal-100/80 px-3 py-2 dark:border-teal-500/20 sm:px-3.5">
+            <button
+              type="button"
+              onClick={() => setShowTweak(true)}
+              disabled={busy}
+              className="rounded-md px-3 py-1.5 text-[11.5px] font-semibold text-stone-500 hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+            >
+              Keep tweaking
+            </button>
+            <button
+              type="button"
+              onClick={handleConfirm}
+              disabled={busy || realFields.length === 0}
+              className="rounded-md bg-gradient-to-br from-teal-500 to-teal-600 px-4 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:shadow-md active:scale-95 disabled:opacity-50"
+            >
+              {busy ? "Applying…" : "Apply to form"}
+            </button>
+          </div>
+        )}
+
+        {error ? (
+          <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400 sm:px-3.5">
+            {error}
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+
+  return null;
+};
+
+// ─────────────────────────────────────────────────────────────
+// Share modal
 // ─────────────────────────────────────────────────────────────
 const ShareModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListCollaboratorsQuery(formId, { skip: !open });
@@ -1076,7 +1527,7 @@ const ShareModal = ({ open, onClose, formId }) => {
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("editor");
   const [error, setError] = useState("");
-  const [lastResult, setLastResult] = useState(null); // { invited, added, email }
+  const [lastResult, setLastResult] = useState(null);
   const [resendingFor, setResendingFor] = useState(null);
 
   if (!open) return null;
@@ -1221,7 +1672,6 @@ const ShareModal = ({ open, onClose, formId }) => {
             </div>
           ) : (
             <div className="space-y-3">
-              {/* Owner */}
               {owner ? (
                 <div>
                   <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
@@ -1245,7 +1695,6 @@ const ShareModal = ({ open, onClose, formId }) => {
                 </div>
               ) : null}
 
-              {/* Collaborators */}
               {collabs.length ? (
                 <div>
                   <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
@@ -1299,7 +1748,6 @@ const ShareModal = ({ open, onClose, formId }) => {
                 </div>
               ) : null}
 
-              {/* Pending invites */}
               {pending.length ? (
                 <div>
                   <p className="mb-1.5 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
@@ -1353,7 +1801,6 @@ const ShareModal = ({ open, onClose, formId }) => {
                 </div>
               ) : null}
 
-              {/* Empty state */}
               {!owner && !collabs.length && !pending.length ? (
                 <p className="py-6 text-center text-[12px] text-stone-400 dark:text-stone-500">
                   No collaborators yet.
@@ -1716,7 +2163,7 @@ const FormEditor = () => {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const { data, isLoading, error } = useGetFormQuery(id, { skip: !id });
+  const { data, isLoading, error, refetch } = useGetFormQuery(id, { skip: !id });
 
   const [updateForm, { isLoading: saving }] = useUpdateFormMutation();
   const [publishForm, { isLoading: publishing }] = usePublishFormMutation();
@@ -1798,7 +2245,7 @@ const FormEditor = () => {
   };
 
   const handleSave = async () => {
-    if (!form) return;
+    if (!form) return false;
     try {
       const payload = {
         title: form.title,
@@ -1813,18 +2260,17 @@ const FormEditor = () => {
       setForm(res.form);
       setDirty(false);
       showToast("Saved.");
+      return true;
     } catch (err) {
       showToast(err?.data?.message || "Couldn't save.");
+      return false;
     }
   };
 
   const handlePublish = async () => {
     if (dirty) {
-      try {
-        await handleSave();
-      } catch {
-        return;
-      }
+      const ok = await handleSave();
+      if (!ok) return;
     }
     try {
       const res = await publishForm(id).unwrap();
@@ -1870,6 +2316,20 @@ const FormEditor = () => {
       showToast("Link copied.");
     } catch {
       showToast(url);
+    }
+  };
+
+  const handleAiApplied = async () => {
+    try {
+      const fresh = await refetch();
+      if (fresh.data?.form) {
+        setForm(fresh.data.form);
+        setDirty(false);
+        loadedRef.current = true;
+      }
+      showToast("AI changes applied.");
+    } catch {
+      showToast("Applied, but couldn't refresh. Reload the page.");
     }
   };
 
@@ -2034,6 +2494,13 @@ const FormEditor = () => {
                   className="mt-0.5 w-full rounded-md border border-transparent bg-transparent px-1 py-1 text-[12.5px] text-stone-500 outline-none transition-all placeholder:text-stone-300 focus:border-teal-200 focus:bg-teal-50/30 dark:text-stone-400 dark:placeholder:text-stone-600 dark:focus:border-teal-500/40 dark:focus:bg-teal-500/5"
                 />
               </div>
+
+              <AiEditPanel
+                formId={id}
+                dirty={dirty}
+                onSaveFirst={handleSave}
+                onApplied={handleAiApplied}
+              />
 
               <div className="space-y-3">
                 {(form.fields || []).map((field, idx) => (
