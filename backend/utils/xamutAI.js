@@ -15,6 +15,33 @@
 // background work to a smaller model keeps the big model's budget
 // free for actual replies, which roughly triples how far one day
 // of free-tier usage goes.
+//
+// Rate-limit note: 429 backoff is silent. The user's last status
+// ("Thinking", "Searching for X") stays on screen while we sleep
+// and retry. We never surface "waiting N seconds on the rate limit"
+// — that's infrastructure plumbing, not something a user should see.
+//
+// Tool-choice note: GPT-OSS models (openai/gpt-oss-*) have a native,
+// baked-in impulse to call tools even when none are declared. If we
+// send a request with no tools and no explicit tool_choice, Groq
+// treats that as tool_choice:"none" and rejects the whole thing with
+// a 400 the moment the model reaches for a tool. The fix is to always
+// declare tool_choice:"auto" for models that support tool calling,
+// and to add disable_tool_validation for GPT-OSS so a hallucinated
+// call doesn't blow up the request.
+//
+// Form lookup note: the four tools at the bottom of the TOOLS array
+// (list_user_forms, get_form_stats, get_form_responses,
+// get_form_details) query the user's OWN forms in Mongo. They exist
+// because the model kept trying to web-search for "my attendance form"
+// and hallucinating general-knowledge answers. runAgentTurn passes
+// the userId down through ctx so these tools know whose forms to load.
+//
+// Fuzzy-match note: list_user_forms used to regex-match the ENTIRE
+// raw user phrase against the title ("application form for obong fc"
+// as one literal substring), which almost never matches a real title
+// like "Obong FC Membership Sign-Up". It now strips filler words and
+// matches on the remaining keywords, ranked by how many hit.
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_URL = `${GROQ_BASE}/chat/completions`;
@@ -78,6 +105,48 @@ const dedupeByUrl = (list = []) => {
   }
   return out;
 };
+
+const escapeRegex = (s) =>
+  String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+// ─────────────────────────────────────────────────────────────────────
+// Form constants (shared between the tools and the executors)
+// ─────────────────────────────────────────────────────────────────────
+const FORM_TYPES = ["form", "quiz", "survey", "feedback", "attendance"];
+
+const CHOICE_TYPES = new Set([
+  "radio",
+  "checkbox",
+  "dropdown",
+  "multi_select",
+]);
+
+// Words that carry no identifying signal for a form title. Stripped
+// out before fuzzy-matching a free-text query like "what's the
+// current stats on the application form for obong fc" down to the
+// words that actually distinguish one form from another ("obong",
+// "fc").
+const FORM_QUERY_STOPWORDS = new Set([
+  "the", "a", "an", "of", "for", "on", "in", "to", "my", "is", "are",
+  "was", "were", "be", "been", "what", "whats", "what's", "which",
+  "who", "whom", "how", "when", "where", "why", "current", "latest",
+  "recent", "stat", "stats", "statistic", "statistics", "status",
+  "form", "forms", "quiz", "quizzes", "survey", "surveys", "feedback",
+  "attendance", "application", "please", "show", "tell", "me", "about",
+  "many", "much", "response", "responses", "submission", "submissions",
+  "result", "results", "data", "info", "information", "get", "give",
+  "list", "your", "you", "do", "does", "did", "have", "has", "had",
+  "this", "that", "these", "those", "and", "or", "with", "from",
+  "i", "it", "can", "could", "would", "check", "look", "up",
+]);
+
+const extractFormKeywords = (text) =>
+  String(text || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .split(/\s+/)
+    .filter((w) => w.length > 1 && !FORM_QUERY_STOPWORDS.has(w));
 
 // ─────────────────────────────────────────────────────────────────────
 // Daily budget tracking
@@ -304,6 +373,13 @@ const parseLimitError = (detail = "") => {
   };
 };
 
+// Detect the specific GPT-OSS 400 where the model hallucinated a tool
+// call with no tools declared. This is a model-behaviour issue, not a
+// request issue, and the right recovery is a same-model retry.
+const isToolChoiceMismatchError = (detail = "") =>
+  typeof detail === "string" &&
+  /tool choice is none,? but model called a tool/i.test(detail);
+
 export async function groqChat({
   messages,
   model,
@@ -337,11 +413,38 @@ export async function groqChat({
     temperature,
     max_completion_tokens: maxTokens,
   };
+
   if (jsonMode) body.response_format = { type: "json_object" };
-  if (tools?.length) {
+
+  // ── Tool wiring ────────────────────────────────────────────────
+  // GPT-OSS models reach for tools even when none are declared, and
+  // Groq rejects that with a 400 ("Tool choice is none, but model
+  // called a tool"). The fix is to make the tool contract explicit:
+  //
+  //   • If we have tools to declare, pass them with tool_choice:auto.
+  //   • If we don't, but the model is one that has native tool-calling
+  //     impulses (GPT-OSS), still pass tool_choice:auto + an empty
+  //     tools array + disable_tool_validation. That way if the model
+  //     hallucinates a call, Groq returns it instead of 400-ing, and
+  //     our loop just ignores unknown tools.
+  //   • Never leave tool_choice unset on a model that supports tool
+  //     calling, because "unset" is treated as "none" by the validator.
+  //
+  const hasTools = Array.isArray(tools) && tools.length > 0;
+  const isBuiltInToolModel = supportsBuiltIns(chosenModel);
+
+  if (hasTools) {
     body.tools = tools;
     body.tool_choice = toolChoice || "auto";
+  } else if (isBuiltInToolModel) {
+    body.tools = [];
+    body.tool_choice = "auto";
+    body.disable_tool_validation = true;
   }
+  // For non-GPT-OSS models (llama, qwen, compound), leave tools and
+  // tool_choice off entirely. They don't spontaneously call tools, so
+  // omitting the parameters is safe and keeps the request minimal.
+
   if (/gpt-oss|qwen/i.test(chosenModel)) {
     body.reasoning_format = "hidden";
     body.reasoning_effort = reasoningEffort || (jsonMode ? "low" : undefined);
@@ -373,6 +476,7 @@ export async function groqChat({
     if (res.status === 404) _modelCache = null;
 
     const daily = isDailyLimitError(detail);
+    const toolMismatch = isToolChoiceMismatchError(detail);
 
     if (res.status === 429 && daily) {
       const { retrySeconds, namedModel } = parseLimitError(detail);
@@ -400,6 +504,7 @@ export async function groqChat({
     err.model = chosenModel;
     err.detail = detail || "";
     err.isDailyLimit = daily;
+    err.isToolChoiceMismatch = toolMismatch;
     err.failedGeneration = parsedBody?.error?.failed_generation || null;
     throw err;
   }
@@ -447,6 +552,20 @@ export async function groqJSON(args) {
     const isValidationFailure =
       err.status === 400 && /validate json/i.test(err.detail || "");
     const isParseFailure = !err.status;
+
+    // A GPT-OSS tool-choice mismatch on a JSON call is recoverable:
+    // just retry the same request. The model's urge to call a tool is
+    // probabilistic, not deterministic, so the second attempt usually
+    // comes back clean.
+    if (err.isToolChoiceMismatch) {
+      const raw = await groqText({
+        ...args,
+        jsonMode: true,
+        tools: undefined,
+      });
+      return extractJson(raw);
+    }
+
     if (!isValidationFailure && !isParseFailure) throw err;
 
     const retryMessages = [
@@ -569,6 +688,82 @@ export const TOOLS = [
           },
         },
         required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_user_forms",
+      description:
+        "List the current user's own forms. Use this ANY time the user asks about their own forms: 'my forms', 'my quiz', 'my attendance form', 'the survey I made', 'how many forms have I made', 'do I have a feedback form', 'list my surveys', 'show me my forms'. Supports fuzzy title matching and type filtering. Returns an array of forms with id, title, type, status, response count, and field count. If the user's reference is ambiguous (they have three attendance forms), this returns ALL matches so you can ask which one they mean. NEVER web search for the user's own forms — this is the tool for that.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description:
+              "Fuzzy text to match against form titles, or a type name like 'attendance' or 'quiz'. Omit to list every form the user has access to.",
+          },
+          type: {
+            type: "string",
+            enum: ["form", "quiz", "survey", "feedback", "attendance"],
+            description: "Optional form type filter.",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_form_stats",
+      description:
+        "Get detailed stats on ONE specific form the user owns: total responses, average completion time, per-field answer breakdowns, quiz scores, pass rate, response rate for private forms. Use this after list_user_forms, when the user's question is about a specific form: 'stats on my attendance form', 'how many responses', 'average score on my quiz', 'pass rate', 'leaderboard', 'who answered what', 'how did people answer question 3'. Requires a formId from list_user_forms.",
+      parameters: {
+        type: "object",
+        properties: {
+          formId: {
+            type: "string",
+            description: "The form _id returned by list_user_forms.",
+          },
+        },
+        required: ["formId"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_form_responses",
+      description:
+        "List recent submissions to one of the user's forms, with each respondent's answers. Use for 'show me the responses', 'who filled it out', 'recent submissions', 'list the answers', 'what did people say'. Requires a formId from list_user_forms.",
+      parameters: {
+        type: "object",
+        properties: {
+          formId: { type: "string" },
+          limit: {
+            type: "number",
+            description:
+              "How many recent responses to return. Defaults to 20, max 100.",
+          },
+        },
+        required: ["formId"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_form_details",
+      description:
+        "Fetch the full definition of a form the user owns: title, description, type, visibility, and every field with its options, validation, and scoring. Use for 'what's on my form', 'show me the questions', 'list the fields', 'what does my quiz ask'. Requires a formId from list_user_forms.",
+      parameters: {
+        type: "object",
+        properties: {
+          formId: { type: "string" },
+        },
+        required: ["formId"],
       },
     },
   },
@@ -793,7 +988,345 @@ export async function researchPerson(name, context = "") {
   };
 }
 
-export async function runTool(name, args) {
+// ─────────────────────────────────────────────────────────────────────
+// Form lookup executors
+//
+// These query the user's OWN forms in Mongo. They're wired through
+// runTool so the agentic loop can chain them: list → stats, or
+// list → responses. The userId is passed down from runAgentTurn via
+// the ctx argument.
+//
+// Models are imported lazily to avoid a circular import at module load
+// (models/formModel.js imports nothing from here, but keeping the lazy
+// boundary clean makes the dependency direction obvious).
+// ─────────────────────────────────────────────────────────────────────
+let _formModelsPromise = null;
+const loadFormModels = () => {
+  if (!_formModelsPromise) {
+    _formModelsPromise = Promise.all([
+      import("../models/formModel.js"),
+      import("../models/formResponseModel.js"),
+    ]).then(([formMod, respMod]) => ({
+      Form: formMod.default,
+      FormResponse: respMod.default,
+    }));
+  }
+  return _formModelsPromise;
+};
+
+const assertFormAccess = (form, userId) => {
+  const uid = String(userId);
+  if (String(form.owner) === uid) return "owner";
+  const collab = (form.collaborators || []).find((c) => String(c.user) === uid);
+  if (collab) return collab.role || "collaborator";
+  throw new Error("You don't have access to that form.");
+};
+
+// Fuzzy-matches a free-text query ("application form for obong fc")
+// against the user's forms by keyword overlap rather than requiring
+// the whole phrase to appear verbatim in the title. Falls back to a
+// plain substring match if the query is nothing but filler words.
+async function listUserForms({ query, type } = {}, userId) {
+  if (!userId) throw new Error("No user context for form lookup.");
+  const { Form } = await loadFormModels();
+
+  const and = [
+    { $or: [{ owner: userId }, { "collaborators.user": userId }] },
+  ];
+  if (type && FORM_TYPES.includes(type)) and.push({ type });
+
+  const trimmed = String(query || "").trim();
+  const keywords = extractFormKeywords(trimmed);
+
+  if (trimmed) {
+    const ors = [];
+    if (keywords.length) {
+      for (const kw of keywords) {
+        ors.push({ title: { $regex: escapeRegex(kw), $options: "i" } });
+      }
+    } else {
+      // Query was nothing but filler words ("the form", "my forms") —
+      // fall back to matching the raw phrase so we don't accidentally
+      // return every form the user has.
+      ors.push({ title: { $regex: escapeRegex(trimmed), $options: "i" } });
+    }
+
+    const lower = trimmed.toLowerCase();
+    const typeMatches = FORM_TYPES.filter(
+      (t) => lower.includes(t) || t.includes(lower)
+    );
+    if (typeMatches.length) ors.push({ type: { $in: typeMatches } });
+
+    and.push({ $or: ors });
+  }
+
+  let forms = await Form.find({ $and: and })
+    .select(
+      "owner title type status visibility responseCount fields collaborators createdAt updatedAt"
+    )
+    .sort({ updatedAt: -1 })
+    .limit(50)
+    .lean();
+
+  // Rank by how many keywords actually appear in the title, so a
+  // close match ("Obong FC Membership Sign-Up" for "obong fc") floats
+  // above a coincidental type-only match, instead of just sorting by
+  // most-recently-updated.
+  if (trimmed && keywords.length && forms.length > 1) {
+    const lowerTrimmed = trimmed.toLowerCase();
+    forms = forms
+      .map((f) => {
+        const titleLower = (f.title || "").toLowerCase();
+        let score = 0;
+        for (const kw of keywords) if (titleLower.includes(kw)) score++;
+        if (titleLower.includes(lowerTrimmed)) score += 5;
+        return { f, score };
+      })
+      .sort((a, b) => b.score - a.score)
+      .map((s) => s.f);
+  }
+
+  const uid = String(userId);
+
+  return {
+    count: forms.length,
+    ambiguous: forms.length > 1,
+    filter: { query: trimmed || null, type: type || null },
+    forms: forms.map((f) => ({
+      id: String(f._id),
+      title: f.title,
+      type: f.type,
+      status: f.status,
+      visibility: f.visibility,
+      responseCount: f.responseCount || 0,
+      fieldCount: (f.fields || []).filter((x) => x.type !== "section").length,
+      owned: String(f.owner) === uid,
+      updatedAt: f.updatedAt,
+    })),
+    hint:
+      forms.length === 0
+        ? "No forms matched. Offer to list all the user's forms instead."
+        : forms.length === 1
+        ? "Exactly one match. Use this form's id for follow-up tool calls."
+        : "Multiple matches. Ask the user which one they mean before calling any form-specific tool. Show the titles.",
+  };
+}
+
+async function getFormStatsTool({ formId } = {}, userId) {
+  if (!formId) throw new Error("formId is required.");
+  const { Form, FormResponse } = await loadFormModels();
+
+  const form = await Form.findById(formId).lean();
+  if (!form) throw new Error("Form not found.");
+  assertFormAccess(form, userId);
+
+  const responses = await FormResponse.find({ form: form._id }).lean();
+  const total = responses.length;
+
+  const durations = responses
+    .map((r) => r.durationSeconds || 0)
+    .filter((d) => d > 0);
+  const avgDuration = durations.length
+    ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
+    : 0;
+
+  const isQuiz =
+    form.type === "quiz" ||
+    (form.fields || []).some((f) => (f.scoring?.points || 0) > 0);
+  const maxScore = (form.fields || []).reduce(
+    (sum, f) => sum + (f.scoring?.points || 0),
+    0
+  );
+
+  const scores = responses.map((r) => r.totalScore || 0);
+  const percentages = responses.map((r) => r.percentage || 0);
+  const avgScore = scores.length
+    ? scores.reduce((a, b) => a + b, 0) / scores.length
+    : 0;
+  const avgPct = percentages.length
+    ? percentages.reduce((a, b) => a + b, 0) / percentages.length
+    : 0;
+  const passedCount = responses.filter((r) => r.passed === true).length;
+
+  const fields = (form.fields || [])
+    .filter((f) => f.type !== "section")
+    .map((f) => {
+      const values = responses
+        .map((r) => (r.answers || []).find((a) => a.fieldId === f.id))
+        .filter((a) => a && a.value !== null && a.value !== undefined);
+
+      const base = {
+        id: f.id,
+        label: f.label,
+        type: f.type,
+        answered: values.length,
+        skipped: total - values.length,
+      };
+
+      if (CHOICE_TYPES.has(f.type)) {
+        const counts = {};
+        for (const o of f.options || []) counts[o.value] = 0;
+        for (const a of values) {
+          const arr = Array.isArray(a.value) ? a.value : [a.value];
+          for (const v of arr) counts[String(v)] = (counts[String(v)] || 0) + 1;
+        }
+        base.options = (f.options || []).map((o) => ({
+          label: o.label,
+          value: o.value,
+          count: counts[o.value] || 0,
+        }));
+        base.mostChosen =
+          base.options.slice().sort((a, b) => b.count - a.count)[0]?.label ||
+          null;
+      } else if (["number", "rating", "scale"].includes(f.type)) {
+        const nums = values.map((a) => Number(a.value)).filter(Number.isFinite);
+        if (nums.length) {
+          base.min = Math.min(...nums);
+          base.max = Math.max(...nums);
+          base.avg = Number(
+            (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2)
+          );
+        }
+      } else if (f.type === "yes_no") {
+        let yes = 0;
+        let no = 0;
+        for (const a of values) {
+          if (a.value === true) yes++;
+          else if (a.value === false) no++;
+        }
+        base.yes = yes;
+        base.no = no;
+      } else {
+        base.samples = values
+          .slice(-10)
+          .reverse()
+          .map((a) => String(a.value).slice(0, 200));
+      }
+      return base;
+    });
+
+  const responseRate =
+    form.visibility === "private" && (form.participants || []).length
+      ? (() => {
+          const invited = form.participants.length;
+          const submitted = form.participants.filter((p) => p.completed).length;
+          return {
+            invited,
+            submitted,
+            percentage: Math.round((submitted / invited) * 100),
+          };
+        })()
+      : null;
+
+  return {
+    formId: String(form._id),
+    title: form.title,
+    type: form.type,
+    status: form.status,
+    visibility: form.visibility,
+    slug: form.slug,
+    createdAt: form.createdAt,
+    updatedAt: form.updatedAt,
+    totalResponses: total,
+    averageDurationSeconds: avgDuration,
+    isQuiz,
+    quiz: isQuiz
+      ? {
+          maxScore,
+          averageScore: Number(avgScore.toFixed(2)),
+          averagePercentage: Number(avgPct.toFixed(2)),
+          passedCount,
+          passPercentage: form.settings?.passPercentage || 0,
+        }
+      : null,
+    responseRate,
+    fields,
+  };
+}
+
+async function getFormResponsesTool({ formId, limit = 20 } = {}, userId) {
+  if (!formId) throw new Error("formId is required.");
+  const { Form, FormResponse } = await loadFormModels();
+
+  const form = await Form.findById(formId).lean();
+  if (!form) throw new Error("Form not found.");
+  assertFormAccess(form, userId);
+
+  const cap = Math.max(1, Math.min(Number(limit) || 20, 100));
+
+  const responses = await FormResponse.find({ form: form._id })
+    .sort({ submittedAt: -1 })
+    .limit(cap)
+    .lean();
+
+  const labelByFieldId = new Map(
+    (form.fields || []).map((f) => [f.id, f.label])
+  );
+
+  return {
+    formId: String(form._id),
+    title: form.title,
+    returned: responses.length,
+    totalResponses: form.responseCount || 0,
+    responses: responses.map((r) => ({
+      id: String(r._id),
+      email: r.respondentEmail || "",
+      name: r.respondentName || "",
+      submittedAt: r.submittedAt,
+      durationSeconds: r.durationSeconds,
+      totalScore: r.totalScore,
+      maxScore: r.maxScore,
+      percentage: r.percentage,
+      passed: r.passed,
+      answers: (r.answers || []).map((a) => ({
+        label: labelByFieldId.get(a.fieldId) || a.fieldId,
+        value: a.value,
+      })),
+    })),
+  };
+}
+
+async function getFormDetailsTool({ formId } = {}, userId) {
+  if (!formId) throw new Error("formId is required.");
+  const { Form } = await loadFormModels();
+
+  const form = await Form.findById(formId).lean();
+  if (!form) throw new Error("Form not found.");
+  assertFormAccess(form, userId);
+
+  return {
+    formId: String(form._id),
+    title: form.title,
+    description: form.description,
+    type: form.type,
+    status: form.status,
+    visibility: form.visibility,
+    slug: form.slug,
+    isMultipage: form.isMultipage,
+    settings: form.settings,
+    fields: (form.fields || []).map((f) => ({
+      id: f.id,
+      type: f.type,
+      label: f.label,
+      description: f.description,
+      required: f.required,
+      options: (f.options || []).map((o) => ({
+        label: o.label,
+        value: o.value,
+      })),
+      validation: f.validation,
+      scoring: f.scoring,
+    })),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Tool dispatcher
+//
+// ctx carries per-turn context (currently just userId) so tools that
+// need to scope queries to the current user can do so.
+// ─────────────────────────────────────────────────────────────────────
+export async function runTool(name, args, ctx = {}) {
   switch (name) {
     case "web_search":
       return await webSearch(args.query);
@@ -805,6 +1338,14 @@ export async function runTool(name, args) {
       return await deepSearch(args.queries);
     case "research_person":
       return await researchPerson(args.name, args.context);
+    case "list_user_forms":
+      return await listUserForms(args, ctx.userId);
+    case "get_form_stats":
+      return await getFormStatsTool(args, ctx.userId);
+    case "get_form_responses":
+      return await getFormResponsesTool(args, ctx.userId);
+    case "get_form_details":
+      return await getFormDetailsTool(args, ctx.userId);
     default:
       throw new Error(`Unknown tool: ${name}`);
   }
@@ -837,6 +1378,15 @@ const statusForToolCall = (call) => {
     return args.name
       ? `Looking up ${truncate(String(args.name), 40)}`
       : "Looking someone up";
+  if (name === "list_user_forms") {
+    const q = args.query || args.type;
+    return q
+      ? `Finding your ${truncate(String(q), 40)} forms`
+      : "Looking through your forms";
+  }
+  if (name === "get_form_stats") return "Reading the form stats";
+  if (name === "get_form_responses") return "Pulling recent responses";
+  if (name === "get_form_details") return "Reading the form";
   return null;
 };
 
@@ -853,10 +1403,12 @@ export async function runAgentTurn({
   maxTokens = 2048,
   reasoningEffort,
   onStatus,
+  userId,
 }) {
   const SAFETY_MARGIN = 250;
   const MAX_SHRINK_ATTEMPTS = 3;
   const MAX_429_WAIT_MS = 15000;
+  const MAX_TOOL_CHOICE_RETRIES = 2;
   const executed = [];
   const collectedImages = [];
   const collectedImageSources = [];
@@ -919,6 +1471,7 @@ export async function runAgentTurn({
     let messages = buildMessages();
     let shrinkAttempts = 0;
     let totalWaitedMs = 0;
+    let toolChoiceRetries = 0;
 
     for (let i = 0; i < maxIterations; i++) {
       const tools = toolsFor(attemptModel);
@@ -932,6 +1485,9 @@ export async function runAgentTurn({
           maxTokens: outputBudget,
           reasoningEffort,
           tools: tools.length ? tools : undefined,
+          // Always pass "auto" when we have tools. Never pass "none".
+          // GPT-OSS will reach for tools regardless, and "none" turns
+          // that into a hard 400.
           toolChoice: tools.length ? "auto" : undefined,
         });
       } catch (err) {
@@ -941,6 +1497,18 @@ export async function runAgentTurn({
         // in the chain.
         if (err.isDailyLimit) {
           break;
+        }
+
+        // GPT-OSS hallucinated a tool call on a request where we
+        // couldn't declare tools. Retry the same model — the impulse
+        // is probabilistic, so a second pass usually comes back clean.
+        if (
+          err.isToolChoiceMismatch &&
+          toolChoiceRetries < MAX_TOOL_CHOICE_RETRIES
+        ) {
+          toolChoiceRetries++;
+          i--;
+          continue;
         }
 
         if (err.status === 413 && shrinkAttempts < MAX_SHRINK_ATTEMPTS) {
@@ -963,10 +1531,10 @@ export async function runAgentTurn({
             MAX_429_WAIT_MS - totalWaitedMs
           );
           if (waitMs > 0 && totalWaitedMs < MAX_429_WAIT_MS) {
-            emitStatus(
-              onStatus,
-              `Waiting ${Math.round(waitMs / 1000)}s on the rate limit`
-            );
+            // Silent backoff. We deliberately do NOT emit a status
+            // here — the user shouldn't see rate-limit plumbing. The
+            // last status text stays on screen while we sleep and
+            // retry, which reads as normal AI latency.
             await sleep(waitMs);
             totalWaitedMs += waitMs;
             i--;
@@ -1003,6 +1571,10 @@ export async function runAgentTurn({
       for (const t of data?.executed_tools || choice?.executed_tools || [])
         executed.push(t.type || t.name);
 
+      // Only act on tool calls we actually know how to run. GPT-OSS
+      // sometimes invents tool names (or returns built-in ones like
+      // browser_search) — those just pass through to the next turn
+      // without us trying to execute them.
       const toolCalls = (choice.tool_calls || []).filter((c) =>
         LOCAL_TOOL_NAMES.has(c.function?.name)
       );
@@ -1030,9 +1602,24 @@ export async function runAgentTurn({
         const statusText = statusForToolCall(call);
         if (statusText) emitStatus(onStatus, statusText);
 
+        // Skip execution for tools we don't recognise — but still
+        // hand back a valid tool message so the conversation can
+        // continue without Groq complaining about a missing reply.
+        if (!LOCAL_TOOL_NAMES.has(call.function?.name)) {
+          messages.push({
+            role: "tool",
+            tool_call_id: call.id,
+            name: call.function?.name,
+            content: JSON.stringify({
+              error: `Unknown tool: ${call.function?.name}`,
+            }),
+          });
+          continue;
+        }
+
         try {
           const args = JSON.parse(call.function?.arguments || "{}");
-          result = await runTool(call.function.name, args);
+          result = await runTool(call.function.name, args, { userId });
 
           if (call.function.name === "image_search") {
             for (const img of result?.images || []) collectedImages.push(img);

@@ -8,6 +8,15 @@
 // API) AND the core helpers (startFormSessionCore, answerQuestionCore,
 // publicSession) so aiController can drive the same flow from inside
 // chat without duplicating any logic.
+//
+// Behaviour notes (v2):
+//   • The AI drafts by default. It only asks questions when the prompt
+//     is genuinely under-specified, and it may ask at most MAX_QUESTIONS
+//     across a whole session.
+//   • Questions are dynamic. Their options reference the user's actual
+//     request, never a generic menu of "survey / quiz / form" defaults.
+//   • The AI fills in EVERYTHING when drafting: validation, options,
+//     scoring, required flags, placeholders. Drafts come out publish-ready.
 
 import asyncHandler from "express-async-handler";
 import mongoose from "mongoose";
@@ -38,7 +47,7 @@ const httpError = (msg, statusCode = 400) => {
 const frontendUrl = () => (process.env.FRONTEND_URL || "").replace(/\/$/, "");
 
 // ─────────────────────────────────────────────────────────────────────
-// Field / settings sanitizers — same as before
+// Field / settings sanitizers
 // ─────────────────────────────────────────────────────────────────────
 const FIELD_TYPES = new Set([
   "short_text", "long_text", "email", "number", "date", "time",
@@ -179,10 +188,23 @@ A Settings is:
 }
 
 Rules for fields:
-- A "section" is a divider. It has a label and description but no options, no required flag, no validation, no scoring.
-- Every radio/checkbox/dropdown/multi_select must have at least two options with stable ids and non-empty values.
-- For quizzes, populate scoring.correct with the correct option.value(s) and set points.
-- Keep labels short and human. Avoid duplicating the description into the label.
+- A "section" is a divider. It has a label and description but no
+  options, no required flag, no validation, no scoring.
+- Every choice field (radio / checkbox / dropdown / multi_select) must
+  have at least two options, with stable ids and non-empty, lowercase,
+  space-free values (use snake_case or kebab-case).
+- For quizzes, populate scoring.correct with the correct option.value(s)
+  and set points per question (default 1 per question).
+- Text fields MUST have sensible minLength and maxLength. Never leave
+  both null.
+- Number, rating, and scale fields MUST have min and max set. Rating
+  defaults 1-5, scale defaults 1-10, plain numbers are context-specific.
+- Email, URL, and phone fields do not need min/max.
+- Labels must be short and human. Never duplicate the label text into
+  the description. Never use placeholders like "Question 1" or
+  "Option A" unless the user explicitly asked for filler.
+- Every field in a draft must be publish-ready. Real content, real
+  validation, real options.
 `;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -197,45 +219,81 @@ export async function askFormAi({
   questionCount = 0,
   forceReady = false,
 }) {
-  const MAX_QUESTIONS = 5;
+  // Hard cap on how many clarifying questions the AI may ask across a
+  // whole session. After this, it MUST draft with what it has.
+  const MAX_QUESTIONS = 3;
+  const questionsLeft = Math.max(0, MAX_QUESTIONS - questionCount);
 
   const modeBlocks = {
     create: `
 MODE: CREATE A NEW FORM
 
-You help users design a form from scratch. Your job is to either:
-  (a) ask ONE clarifying question with tappable options, if you still
-      need information to build a good form, or
-  (b) produce the full draft form, if you already know enough.
+You build forms. You are not running an interview. The user's first
+message is almost always enough to build something good.
 
-Ask at most ${MAX_QUESTIONS} questions total. The user has already been
-asked ${questionCount}. If you have any doubt at all about what kind of
-form they want, ask. Better to ask than to guess wrong.
+DEFAULT BEHAVIOUR:
+- If the message gives you ANY signal about the form's purpose, topic,
+  type, audience, or content, produce the full draft IMMEDIATELY.
+- Fill in every detail yourself: title, description, field labels,
+  placeholders, required flags, validation (min, max, minLength,
+  maxLength), options for choice fields, scoring for quizzes,
+  confirmation message, settings. Everything.
+- Drafts must be publish-ready. No placeholder text. No "TBD". No
+  "Question 1" labels.
 
-If the user's message already gives you enough information to build a
-solid form (topic, what info to collect, who it's for), produce the
-draft immediately. Don't ask questions you can answer yourself.
+WHEN TO ASK (the escape hatch, not the default):
+- Only when the request is so vague you'd be inventing the entire
+  form from nothing (e.g. "make me a form" with literally nothing
+  else, or "set up something for the thing").
+- You may ask up to ${MAX_QUESTIONS} questions total across this
+  session. You have already asked ${questionCount}. You have
+  ${questionsLeft} left.
+- Never ask more than one question per turn.
+- Once ${questionsLeft} reaches 0, you MUST produce the draft. No
+  more questions.
 
-Good questions when you genuinely need info:
-- What type of form is this? (survey, quiz, feedback, attendance, general)
-- Who is filling it? (general public, invited people, students, employees)
-- How long should it be? (short, medium, long)
-- Should answers be scored? (yes quiz / no plain form)
+WHAT NOT TO ASK ABOUT (already known or inferable):
+- Type — infer from context. "Exam" → quiz. "RSVP" → form. "Feedback
+  on the workshop" → feedback. Do not ask "what type of form is this?"
+  when the answer is sitting in the sentence.
+- Audience — infer from context. "My students" → students. "The team"
+  → team members. Do not ask.
+- Topic — it's in the message. Do not ask for it back.
+- Anything you were already told in a previous turn of this session.
 
-Only ask about things that MATTER for the shape of the form. Never ask
-for something you can infer. Never ask more than one question at a time.
+QUESTION QUALITY (when you do ask):
+- Questions must be specific to THIS request. If the user said "sign-up
+  sheet for the team BBQ", a good question is "What info should each
+  person provide? (name only / name + dietary / name + dietary +
+  guests / all of that plus phone)". A bad question is "What type of
+  form is this?".
+- Options must be concrete and tailored, 3-5 of them, with a real
+  "other" escape.
+- Never re-ask for information already given.
 
-When you're ready to draft, return kind="draft".
+Tone: a competent colleague who hears "sign-up sheet for the BBQ" and
+just makes one. Not a wizard asking what a sign-up sheet is.
 `,
     edit: `
 MODE: EDIT AN EXISTING FORM
 
 The user has an existing form (see the JSON below). They've described a
-change. Apply the change to fields, settings, title, description, or
-type, and return the FULL updated form as a draft. Do NOT return just a
-diff. Do NOT drop fields the user didn't ask to remove. Preserve
-existing field ids when editing in place so prior responses stay
-attached to the right question.
+change. Apply it and return the FULL updated form as a draft.
+
+RULES:
+- Return the full form, not a diff.
+- Preserve existing field ids when editing in place so prior responses
+  stay attached to the right question.
+- Do not drop fields the user didn't ask to remove.
+- Any new field must be fully specified the same way a create draft is
+  (validation, options, required flag, placeholder, etc).
+- Ask a clarifying question ONLY if the request is genuinely ambiguous
+  and you cannot pick a sensible default (e.g. "change the colors" with
+  no colors named). At most one question, and only if you have
+  questions left this session.
+- You have ${questionsLeft} clarifying question(s) left this session.
+- Once ${questionsLeft} reaches 0, you MUST draft with your best
+  interpretation. Pick a sensible default and note it in changeSummary.
 `,
     collaborators: `
 MODE: ADD COLLABORATORS
@@ -260,54 +318,79 @@ Return kind="emails".
 
   const schemaHints = {
     create: `
-Return STRICT JSON, one of:
+Return STRICT JSON. Two possible shapes.
+
+DRAFT (this is what you return ~90% of the time):
+
+{
+  "kind": "draft",
+  "draft": { ...full form per schema above... },
+  "reasoning": "one short sentence on what you built"
+}
+
+QUESTION (only when the request is genuinely too vague to draft, and
+only while you still have questions left):
 
 {
   "kind": "question",
   "question": {
     "id": "q_xxx",
-    "text": "What kind of form is this?",
-    "helper": "optional short explanation",
+    "text": "specific question referencing their actual request",
+    "helper": "optional one-line explanation",
     "options": [
-      { "id": "o_1", "label": "Survey", "value": "survey" },
-      { "id": "o_2", "label": "Quiz", "value": "quiz" }
+      { "id": "o_1", "label": "Concrete option A", "value": "a" },
+      { "id": "o_2", "label": "Concrete option B", "value": "b" }
     ],
     "allowOther": true,
     "otherLabel": "Something else",
-    "otherPlaceholder": "Describe the form type",
+    "otherPlaceholder": "Describe it",
     "multiSelect": false
   }
 }
 
-or
+Draft rules — apply to every single draft:
+- Title: short, real, taken from the user's request.
+- Description: one sentence on what the form is for.
+- Fields: usually 4-10 depending on complexity. Do not pad. Do not
+  under-build either — a real exam has real questions.
+- Every field MUST have: label, description (optional), placeholder
+  (for text inputs), required flag, and full validation.
+- Text fields: set minLength and maxLength (names 1-80, paragraphs
+  10-2000, etc). Never leave both null.
+- Number / rating / scale: set min and max. Rating 1-5. Scale 1-10.
+  Number is context-specific (e.g. age 0-120).
+- Choice fields: 3-6 options with clean lowercase values
+  (snake_case or kebab-case, no spaces).
+- Quiz scoring: populate scoring.correct with the correct
+  option.value(s) and set points (default 1 per question).
+- Required: true for essential fields, false for clearly optional ones.
+- Settings: set sensible defaults — collectEmail if the form collects
+  contact info, allowMultipleSubmissions false for exams, true for
+  feedback, showProgressBar true for forms with 5+ fields,
+  showScoreImmediately true for quizzes, passPercentage 60 for quizzes
+  unless the user specified one.
 
-{
-  "kind": "draft",
-  "draft": { ... full form per schema above ... },
-  "reasoning": "one short sentence on what you built"
-}
-
-Rules for questions:
+Question rules — apply to every question:
 - Exactly one question.
-- 3 to 5 concrete options, each with a clear short label.
+- 3-5 concrete options, each referencing the user's actual request.
 - Set allowOther=true unless the options are exhaustive beyond doubt.
-- For binary choices, allowOther=false.
-- For "pick any that apply", multiSelect=true.
+- Never ask about type, audience, or topic — infer them.
 `,
     edit: `
 Return STRICT JSON, one of:
 
 {
-  "kind": "question",
-  "question": { ... same shape as create ... }
+  "kind": "draft",
+  "draft": { ...the FULL updated form... },
+  "changeSummary": "one short sentence on what changed"
 }
 
-or
+or, ONLY if the change is genuinely ambiguous AND you still have
+questions left:
 
 {
-  "kind": "draft",
-  "draft": { ... the FULL updated form ... },
-  "changeSummary": "one short sentence on what changed"
+  "kind": "question",
+  "question": { ...same shape as create... }
 }
 `,
     collaborators: `
@@ -399,6 +482,9 @@ Return STRICT JSON:
 You are the AI engine behind a form builder. You help users design,
 edit, and use forms. You speak in short, direct sentences.
 
+You are biased toward action. Your default is to BUILD, not to ask.
+Users who wanted an interview would say so. When in doubt, draft.
+
 ${modeBlocks[mode] || modeBlocks.create}
 
 ${FORM_SCHEMA_SPEC}
@@ -410,8 +496,10 @@ Hard rules:
 - Question ids and option ids must be unique.
 - Use the exact "kind" values spelled above.
 - Never invent form fields the user didn't ask about unless they're
-  universally expected (title, description). Do not pad.
-- Never include scoring unless the user's context is clearly a quiz.
+  universally expected (title, description) or clearly implied by the
+  form's purpose (a "name" field on an RSVP, a "score" on a quiz).
+- Never include scoring unless the context is clearly a quiz or exam.
+- Never ask a question when questionsLeft is 0. Draft instead.
 `.trim();
 
   const historyMessages = history
@@ -421,7 +509,7 @@ Hard rules:
 
   const userBlock = [
     targetBlocks.join("\n\n"),
-    forceReady
+    forceReady || questionsLeft === 0
       ? "USER SAYS: stop asking, use your judgement, produce the draft now."
       : "",
     `User message:\n${userPrompt}`,
@@ -436,8 +524,36 @@ Hard rules:
       { role: "user", content: userBlock },
     ],
     temperature: 0.4,
-    maxTokens: 3000,
+    maxTokens: 4000,
   });
+
+  // Safety net — if the model asks a question anyway but we've hit the
+  // cap, force one more turn with an explicit draft demand.
+  if (
+    (questionsLeft === 0 || forceReady) &&
+    result &&
+    result.kind === "question"
+  ) {
+    const retry = await groqJSONFast({
+      messages: [
+        { role: "system", content: system },
+        ...historyMessages,
+        { role: "user", content: userBlock },
+        {
+          role: "assistant",
+          content: JSON.stringify(result),
+        },
+        {
+          role: "user",
+          content:
+            "You've used all your clarifying questions. Produce the draft now with your best judgement. Return only the JSON draft object.",
+        },
+      ],
+      temperature: 0.4,
+      maxTokens: 4000,
+    });
+    if (retry && retry.kind === "draft") return retry;
+  }
 
   return result;
 }
@@ -640,9 +756,6 @@ async function applyAiResult({ session, ai, targetResponses = [] }) {
 
 // ─────────────────────────────────────────────────────────────────────
 // CORE: start a session and get the first AI response
-//
-// Used by both the HTTP handler and aiController. Returns the public
-// session snapshot. Throws on validation errors.
 // ─────────────────────────────────────────────────────────────────────
 export async function startFormSessionCore({
   userId,

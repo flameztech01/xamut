@@ -14,6 +14,7 @@ import {
   groqJSONFast,
   groqVision,
   runAgentTurn,
+  runTool,
   webSearch,
   fetchWebsite,
   getTextModel,
@@ -30,6 +31,23 @@ import {
 let mammoth, pdfParse;
 try { mammoth = (await import("mammoth")).default; } catch { mammoth = null; }
 try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null; }
+
+// ─────────────────────────────────────────────────────────────────────
+// Heuristic guard: does the user's message look like a lookup against
+// their OWN forms rather than a request to create a new one?
+//
+// The intent classifier gets this wrong sometimes ("what's the stats
+// on my attendance form" contains "attendance" and "form" so it reads
+// like a form request). This regex is a belt-and-braces backstop.
+// ─────────────────────────────────────────────────────────────────────
+const FORM_LOOKUP_RE =
+  /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded)\b|\bhow many (people )?(filled|finished|completed|submitted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bapplication form\b|\b(my|the)\s+application\b/i;
+
+// Signals that a form-lookup message is asking for stats/response data
+// specifically, so we know whether to chain into get_form_stats after
+// resolving which form is meant.
+const FORM_STATS_INTENT_RE =
+  /\b(stats?|statistics|responses?|submissions?|leaderboard|scores?|results?|analytics?|average|pass rate|how many|who (submitted|filled|answered|responded))\b/i;
 
 // ─────────────────────────────────────────────────────────────────────
 // Persona
@@ -170,13 +188,69 @@ Tools (use them, don't just sit there):
   it. If it clearly doesn't match what's being asked, say so instead
   of guessing.
 
-Forms:
-- When the user asks for a form, questionnaire, survey, quiz, RSVP,
-  sign-up sheet, registration, or anything else people fill in and
-  send back, the backend handles it automatically. You don't need to
-  do anything special. A form-building session starts behind the
-  scenes and the user will see the interactive UI. If you're asked
-  to reply about a form step, keep it short and warm.
+Forms — building a NEW one:
+- When the user asks for a form, questionnaire, survey, quiz, exam,
+  test, assessment, poll, RSVP, sign-up sheet, registration, or
+  anything else people fill in and send back, the backend handles it
+  automatically. You don't need to do anything special. A form-building
+  session starts behind the scenes and the user will see the interactive
+  UI. If you're asked to reply about a form step, keep it short and warm.
+
+Forms — looking up THEIR EXISTING ones (this matters):
+- The user has real forms stored in Xamut. You can query them.
+- Whenever the user asks about their own forms — stats, responses,
+  count, leaderboard, submissions, "how many", "my form", "my
+  attendance form", "my quiz", "the survey I made", "list my forms",
+  "what's on my form", "who submitted", "how did people answer",
+  "average score", "pass rate", "top scores", "how many people
+  finished", "show me the responses" — you MUST use the form tools.
+- NEVER web search for the user's own forms. NEVER answer form
+  questions from memory. NEVER say "I don't have access to your
+  forms" — you do, via the tools. NEVER invent a stats answer.
+- If a "FORM LOOKUP RESULT" block appears in the user's message, that
+  is real, already-fetched data from the user's own forms. Trust it
+  completely and answer from it, or ask the disambiguating question
+  it tells you to ask. Do NOT call list_user_forms again yourself,
+  and do NOT web search — the lookup already happened.
+
+  The form tools:
+    • list_user_forms — find the user's forms by fuzzy title, by
+      type, or just list everything. Call this FIRST for any question
+      that mentions "my form", "my quiz", "my attendance form", "my
+      survey", "the form I made", "how many forms".
+    • get_form_stats — full stats on ONE specific form: total
+      responses, per-field breakdowns, quiz scores, pass rate,
+      response rate. Requires a formId from list_user_forms.
+    • get_form_responses — recent submissions with each respondent's
+      answers. Requires a formId from list_user_forms.
+    • get_form_details — the full field list for a form. Requires a
+      formId from list_user_forms.
+
+  Chaining:
+    • If the question is about "my forms" generically (how many, list
+      them), just call list_user_forms and answer from the result.
+    • If the question is about "my [something] form" (attendance,
+      quiz, survey, etc.), call list_user_forms with a query or type
+      filter first.
+    • If list_user_forms returns EXACTLY ONE match, chain immediately
+      into get_form_stats / get_form_responses / get_form_details with
+      that formId. Do not ask the user anything.
+    • If it returns MULTIPLE matches, STOP. Do not guess. Do not
+      pick the most recent one. Ask the user which one they mean.
+      Show the titles so they can pick. Something like:
+        "You've got three forms that match — which one?
+        • Teens Connect picnic attendance
+        • Sunday service attendance
+        • Staff meeting attendance"
+      Then wait for the answer.
+    • If it returns ZERO matches, say so plainly and offer to list
+      all their forms.
+
+  Tone for form lookups: same friend voice. If the user asks "what's
+  the stats on my attendance form", answer like a friend reading off
+  the numbers. Don't dump JSON. Don't say "here are the statistics".
+  Just tell them: "**42 people** have filled it out so far..." and
+  then the interesting bits.
 
 Memory:
 - You may get a USER MEMORY block. That's stuff you know about this
@@ -647,9 +721,84 @@ async function detectGenerationIntent({ message, history, forceType = null }) {
           content: `You classify whether a user wants an AI-generated deliverable file RIGHT NOW.
 
 Three deliverables:
-1. "document" — an essay, report, chapter, thesis, paper, assignment, letter, article, proposal, memo, brief, notes, summary, study guide, review, analysis, write-up. Any prose deliverable that reads as pages.
+1. "document" — an essay, report, chapter, thesis, paper, assignment,
+   letter, article, proposal, memo, brief, notes, summary, study guide,
+   review, analysis, write-up. Any prose deliverable that reads as pages.
 2. "presentation" — slide deck, slides, slideshow, pitch deck, keynote, PPT.
-3. "form" — a form, questionnaire, survey, quiz, RSVP, sign-up sheet, intake sheet, registration form, attendance form, or anything else where the user wants to send a link to people to fill in.
+3. "form" — anything people fill in and send back. Forms, questionnaires,
+   surveys, quizzes, exams, tests, assessments, polls, ballots, RSVPs,
+   sign-up sheets, registrations, attendance sheets, intake sheets,
+   feedback forms, worksheets, homework sheets, practice tests,
+   response sheets, anything used to collect answers or information
+   from a group of people.
+
+=== FORM DETECTION (read this carefully) ===
+
+"form" is broader than the word "form". Trigger on ANY request where
+the user wants a way to collect information from people, including:
+
+Signal words:
+  form, questionnaire, survey, quiz, exam, test, assessment, poll,
+  ballot, RSVP, sign-up, signup, registration, attendance, intake,
+  worksheet, homework, practice test, feedback sheet, response sheet,
+  "collect responses", "collect info", "collect data", "gather info",
+  "gather responses", "ask people", "ask attendees", "ask students",
+  "ask the team", "collect emails", "collect phone numbers"
+
+Sentences that ARE form requests even without a keyword:
+  - "I want you to set an exam for my students" → form (quiz)
+  - "I want to collect data about X" → form (survey)
+  - "I need something people can fill in for X" → form
+  - "make me something to ask my team about X" → form
+  - "I want to gather feedback on X" → form
+  - "help me set up a sign-up for X" → form
+  - "I want a sheet to track X" → form
+  - "make a multiple choice test on X" → form (quiz)
+  - "I want to ask people about X" → form
+  - "set questions for my class on X" → form (quiz)
+  - "build me a quiz" → form
+  - "I need to survey my users" → form
+
+Decide from the MEANING of the sentence, not from a keyword match.
+If the request is "I want a way to collect X from Y", it's a form.
+
+=== LOOKUPS ARE NOT GENERATION (read this too) ===
+
+Do NOT set "form" when the user is asking about a form that ALREADY
+EXISTS. Any of these phrasings means the user wants you to look
+something up, not create something new:
+
+  - "what's the stats on my attendance form" → NOT a form request
+  - "how many responses on my quiz" → NOT a form request
+  - "show me my forms" → NOT a form request
+  - "how many forms have I made" → NOT a form request
+  - "list my surveys" → NOT a form request
+  - "who submitted to my feedback form" → NOT a form request
+  - "what's on my form" → NOT a form request
+  - "how did people answer my quiz" → NOT a form request
+  - "average score on my exam" → NOT a form request
+  - "leaderboard for my test" → NOT a form request
+  - "pass rate on my quiz" → NOT a form request
+  - "top scores in my survey" → NOT a form request
+  - "how many people filled out my form" → NOT a form request
+
+Possessive markers that mean lookup, not create:
+  "my form", "my forms", "my quiz", "my attendance form", "my survey",
+  "the form I made", "the quiz I created", "the survey I set up"
+
+Retrieval markers that mean lookup, not create:
+  "stats", "statistics", "how many", "list", "show me", "responses",
+  "submissions", "leaderboard", "scores", "results", "analytics",
+  "average score", "pass rate", "who answered", "who submitted",
+  "how did people answer", "what did people answer", "how many people"
+
+If a form word AND a possessive/retrieval marker both appear, the
+request is a lookup. Set wantsGeneration = false.
+
+Only set wantsGeneration = true for "form" when the user is asking
+you to CREATE a new form for them to send out.
+
+=== DOCUMENT / PRESENTATION DETECTION ===
 
 Signal words for "document":
   chapter, chapters, essay, report, thesis, dissertation, paper, assignment,
@@ -660,28 +809,21 @@ Signal words for "presentation":
   slide, slides, slideshow, deck, pitch deck, keynote, PPT, powerpoint,
   "presentation", "present to", "presentation on", "make slides"
 
-Signal words for "form":
-  form, questionnaire, survey, quiz, RSVP, "sign up", "sign-up",
-  registration, attendance, intake, feedback form, "collect responses",
-  "collect info", "collect details", "ask people", "ask attendees",
-  "I need a form", "make a form", "create a form", "a form for",
-  "send a form", "an attendance sheet"
+=== RULES ===
 
-Rules:
 - NEVER set "presentation" unless one of the presentation words appears.
-- NEVER set "form" unless one of the form words appears, or the user is
-  clearly asking for something people need to fill in.
-- If NEITHER signal words appear:
+- Check the LOOKUP rules before defaulting to "form". If the user
+  is asking about something they already have, wantsGeneration = false.
+- If no signal words appear and none of the FORM sentences match:
     - academic or school topic → "document"
     - business pitch or talk → "presentation"
     - anything else → "document"
-
-If no clear topic, wantsGeneration = false.
-If the user is just chatting (not asking for a deliverable), wantsGeneration = false.
-Personal, intimate, or advice questions are NEVER generation requests.
-"Who is X" and "tell me about X" are NEVER generation requests, they
-are research questions and should be answered in chat with the web
-search tools.
+- If no clear topic, wantsGeneration = false.
+- If the user is just chatting, wantsGeneration = false.
+- Personal, intimate, or advice questions are NEVER generation requests.
+- "Who is X" and "tell me about X" are NEVER generation requests, they
+  are research questions and should be answered in chat with the web
+  search tools.
 
 Return STRICT JSON only.`,
         },
@@ -748,10 +890,15 @@ Especially trigger this for names that sound unfamiliar, niche, or
 like a small creator, freelancer, or personal brand, since those are
 exactly the ones a model is likely to get wrong from memory alone.
 
-This does NOT include: general knowledge questions with no specific
-name attached, opinions, advice, casual chat, requests to write or
-generate something, or a follow-up message that doesn't introduce a
-new name.
+This does NOT include:
+  - general knowledge questions with no specific name attached
+  - opinions, advice, casual chat
+  - requests to write or generate something (essays, forms, quizzes,
+    exams, documents, slides)
+  - questions about the user's OWN forms, responses, stats, or
+    submissions ("my attendance form", "how many responses", "my
+    quiz stats") — those are database lookups, not web research
+  - a follow-up message that doesn't introduce a new name
 
 Return STRICT JSON only:
 {
@@ -880,10 +1027,15 @@ async function executeChatTurn({
   const replyAttachments = [];
 
   try {
-    // Only classify if the message is worth classifying. Short greetings,
-    // emoji, and one-word replies skip both classifiers and save tokens.
-    const worthClassifying =
-      trimmed.length > 12 && trimmed.split(/\s+/).length >= 3;
+    // Only classify if the message is worth classifying. Two words is
+    // enough — "make exam" and "new survey" are real form requests.
+    const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    const worthClassifying = trimmed.length >= 6 && wordCount >= 2;
+
+    // Heuristic: does this look like a lookup against the user's own
+    // forms? If so, force the intent classifier's answer to "not a
+    // generation request" regardless of what it says. Belt and braces.
+    const looksLikeFormLookup = FORM_LOOKUP_RE.test(trimmed);
 
     let intent = { wantsGeneration: false };
     if (!images.length && !docs.length && trimmed && worthClassifying) {
@@ -893,6 +1045,92 @@ async function executeChatTurn({
         history,
         forceType: forceType || null,
       });
+
+      if (looksLikeFormLookup && intent.type === "form") {
+        intent = { ...intent, wantsGeneration: false, type: null };
+      }
+    }
+
+    // ── Forced, deterministic form lookup ──────────────────────
+    // Don't leave this to the model's judgement — it kept guessing
+    // instead of calling list_user_forms (e.g. treating "the
+    // application form for Obong FC" as a question about a real
+    // football club instead of the user's own "Obong FC Membership
+    // Sign-Up" form). If the message pattern-matches a form lookup,
+    // run list_user_forms ourselves right now and hand the model the
+    // real result as grounding it MUST use, instead of letting it
+    // decide whether to bother calling the tool at all.
+    if (
+      looksLikeFormLookup &&
+      !images.length &&
+      !docs.length &&
+      trimmed
+    ) {
+      report("Checking your forms");
+      try {
+        const lookup = await runTool(
+          "list_user_forms",
+          { query: trimmed },
+          { userId: user._id }
+        );
+
+        let groundingBlock = "";
+
+        if (lookup.count === 0) {
+          groundingBlock = `
+
+---
+FORM LOOKUP RESULT (already fetched — do not call list_user_forms again, do not web search):
+No form matching "${trimmed}" was found among the user's own forms. Tell them plainly you couldn't find a matching form of theirs, ask them to double check the title, and offer to list all their forms. Do NOT treat this as a question about anything else (a real business, club, etc.) — this is specifically about a form Xamut form the user owns.`;
+        } else if (lookup.count === 1) {
+          const only = lookup.forms[0];
+          let statsLine = "";
+
+          if (FORM_STATS_INTENT_RE.test(trimmed)) {
+            try {
+              const stats = await runTool(
+                "get_form_stats",
+                { formId: only.id },
+                { userId: user._id }
+              );
+              statsLine = `\n\nFull stats: ${JSON.stringify(stats).slice(0, 4000)}`;
+            } catch (statsErr) {
+              console.warn("⚠️ get_form_stats chain failed:", statsErr.message);
+            }
+          }
+
+          groundingBlock = `
+
+---
+FORM LOOKUP RESULT (already fetched — do not call list_user_forms again, do not web search):
+Exactly one form of the user's matched "${trimmed}":
+- Title: "${only.title}"
+- Type: ${only.type}
+- Status: ${only.status}
+- Total responses: ${only.responseCount}
+- Field count: ${only.fieldCount}${statsLine}
+
+Answer the user's actual question directly using this real data, in your normal voice. Do not say you can't find it. Do not web search.`;
+        } else {
+          const titles = lookup.forms
+            .slice(0, 8)
+            .map((f) => `- ${f.title} (${f.type}, ${f.responseCount} responses)`)
+            .join("\n");
+
+          groundingBlock = `
+
+---
+FORM LOOKUP RESULT (already fetched — do not call list_user_forms again, do not web search):
+Multiple forms of the user's matched "${trimmed}":
+${titles}
+
+Do not guess which one they mean and do not pick the most recent one. Ask the user which form they mean, listing the titles above, then wait for their answer.`;
+        }
+
+        effectiveText = `${effectiveText}${groundingBlock}`;
+      } catch (err) {
+        console.warn("⚠️ Forced form lookup failed:", err.message);
+      }
     }
 
     // Force a real lookup for "who/what is X" style messages instead of
@@ -900,6 +1138,7 @@ async function executeChatTurn({
     if (
       !intent.wantsGeneration &&
       intent.type !== "form" &&
+      !looksLikeFormLookup &&
       !images.length &&
       !docs.length &&
       trimmed &&
@@ -943,10 +1182,6 @@ ${sourceLines || "(none found)"}`;
 
     if (intent.wantsGeneration && intent.readyToGenerate && intent.topic) {
       // ── FORM ────────────────────────────────────────────────
-      // The chat auto-starts a form-building session. The reply is
-      // the current step of that session (a question, or a draft, or
-      // done), and the interactive UI is carried on a form-session
-      // attachment for the frontend to render above the composer.
       if (intent.type === "form") {
         report("Building your form");
 
@@ -1074,6 +1309,7 @@ ${sourceLines || "(none found)"}`;
             history,
             userContent: `User question: ${trimmed}\n\nWhat you saw in the image(s):\n${reply}\n\nGive the final answer.`,
             onStatus: report,
+            userId: user._id,   // ← pass user context so form tools work
           });
           reply = refine.content || reply;
           usedModel = refine.model;
@@ -1087,6 +1323,7 @@ ${sourceLines || "(none found)"}`;
           history,
           userContent: effectiveText || "(no message)",
           onStatus: report,
+          userId: user._id,     // ← pass user context so form tools work
         });
         reply = turn.content;
         usedModel = turn.model;
@@ -1162,11 +1399,8 @@ ${sourceLines || "(none found)"}`;
 
   const saved = convo.messages[convo.messages.length - 1];
 
-  // Memory extraction — only when there's likely something worth saving.
-  // Short exchanges rarely carry durable facts and the call burns tokens.
   const shouldExtractMemory =
-    trimmed.split(/\s+/).length >= 5 &&
-    (reply || "").length > 80;
+    trimmed.split(/\s+/).length >= 5 && (reply || "").length > 80;
 
   if (shouldExtractMemory) {
     (async () => {

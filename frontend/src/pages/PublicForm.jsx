@@ -9,9 +9,6 @@ import {
 
 // ─────────────────────────────────────────────────────────────
 // Token storage helpers
-//
-// Participant tokens are scoped per form and only need to live for
-// the length of the browsing session. sessionStorage is fine.
 // ─────────────────────────────────────────────────────────────
 const tokenKey = (slug) => `participant_token_${slug}`;
 
@@ -37,7 +34,7 @@ const writeToken = (slug, token) => {
 // ─────────────────────────────────────────────────────────────
 const XamutMark = ({ className = "h-9 w-9" }) => (
   <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[11px] bg-gradient-to-br from-orange-400 via-orange-500 to-orange-600 shadow-sm shadow-orange-500/30`}
+    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 shadow-sm shadow-teal-500/30`}
   >
     <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-white">
       <path
@@ -100,6 +97,84 @@ const I = {
       <path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4zM17 5h3v3a3 3 0 0 1-3 3M7 5H4v3a3 3 0 0 0 3 3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  spinner: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={`animate-spin ${c}`}>
+      <path d="M21 12a9 9 0 1 1-6.2-8.5" strokeLinecap="round" />
+    </svg>
+  ),
+};
+
+// ─────────────────────────────────────────────────────────────
+// Rating input
+// ─────────────────────────────────────────────────────────────
+const RatingInput = ({ value, min, max, onChange }) => {
+  const items = [];
+  for (let i = min; i <= max; i++) items.push(i);
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {items.map((n) => {
+        const active = value >= n;
+        return (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={`flex h-10 w-10 items-center justify-center rounded-md border transition-all active:scale-95 ${
+              active
+                ? "border-amber-300 bg-amber-50 text-amber-500 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-400"
+                : "border-stone-200 bg-white text-stone-300 hover:border-stone-300 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-600 dark:hover:border-stone-600"
+            }`}
+            aria-label={`Rate ${n}`}
+          >
+            {active ? I.star("h-4 w-4") : I.starOutline("h-4 w-4")}
+          </button>
+        );
+      })}
+      {value ? (
+        <button
+          type="button"
+          onClick={() => onChange(0)}
+          className="ml-1 text-[11.5px] font-semibold text-stone-400 hover:text-stone-700 dark:text-stone-500 dark:hover:text-stone-200"
+        >
+          Clear
+        </button>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Linear scale input
+// ─────────────────────────────────────────────────────────────
+const ScaleInput = ({ value, min, max, onChange }) => {
+  const items = [];
+  for (let i = min; i <= max; i++) items.push(i);
+  const compact = items.length > 7;
+
+  return (
+    <div className="scrollbar-none -mx-3.5 flex gap-1.5 overflow-x-auto px-3.5 pb-1 sm:mx-0 sm:px-0">
+      {items.map((n) => {
+        const active = value === n;
+        return (
+          <button
+            key={n}
+            type="button"
+            onClick={() => onChange(n)}
+            className={`flex h-10 shrink-0 items-center justify-center rounded-md border font-semibold transition-all active:scale-95 ${
+              compact ? "w-10 text-[12.5px]" : "flex-1 text-[13px]"
+            } ${
+              active
+                ? "border-teal-500 bg-teal-600 text-white shadow-sm shadow-teal-500/25 dark:border-teal-500 dark:bg-teal-500"
+                : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:hover:border-stone-600 dark:hover:bg-stone-800"
+            }`}
+          >
+            {n}
+          </button>
+        );
+      })}
+    </div>
+  );
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -107,23 +182,30 @@ const I = {
 // ─────────────────────────────────────────────────────────────
 const FieldRenderer = ({ field, value, error, onChange }) => {
   const hasError = !!error;
+
   const baseInput =
-    "w-full rounded-xl border bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:ring-4";
+    "w-full rounded-md border bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:ring-4 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500";
   const inputClass = `${baseInput} ${
     hasError
-      ? "border-red-300 focus:border-red-400 focus:ring-red-500/10"
-      : "border-stone-200 focus:border-orange-400 focus:ring-orange-500/10"
+      ? "border-red-300 focus:border-red-400 focus:ring-red-500/10 dark:border-red-500/50"
+      : "border-stone-200 focus:border-teal-400 focus:ring-teal-500/10 dark:border-stone-700 dark:focus:border-teal-500/60"
   }`;
 
-  // ── Section header ────────────────────────────────────────
+  const choiceRowClass = (checked) =>
+    `flex w-full items-center gap-3 rounded-md border px-3.5 py-2.5 text-left transition-all ${
+      checked
+        ? "border-teal-400 bg-teal-50/70 ring-2 ring-teal-500/10 dark:border-teal-500/60 dark:bg-teal-500/10 dark:ring-teal-500/20"
+        : "border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:bg-stone-900 dark:hover:border-stone-600 dark:hover:bg-stone-800"
+    }`;
+
   if (field.type === "section") {
     return (
-      <div className="border-b border-stone-200 pb-2 pt-4 first:pt-0">
-        <h2 className="text-[16px] font-semibold tracking-tight text-stone-900">
+      <div className="pt-1">
+        <h2 className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
           {field.label}
         </h2>
         {field.description ? (
-          <p className="mt-1 text-[12.5px] leading-relaxed text-stone-500">
+          <p className="mt-1 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
             {field.description}
           </p>
         ) : null}
@@ -132,30 +214,26 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
   }
 
   const setValue = (v) => onChange(field.id, v);
-
-  // ── Choice value helpers ──────────────────────────────────
   const valueStr = value ?? "";
   const arrayValue = Array.isArray(value) ? value : [];
 
   return (
     <div>
-      {/* Label */}
-      <label className="mb-1.5 block">
-        <span className="text-[13.5px] font-medium leading-snug text-stone-800">
+      <label className="mb-2 block">
+        <span className="text-[13.5px] font-medium leading-snug text-stone-800 dark:text-stone-100">
           {field.label}
           {field.required ? (
-            <span className="ml-1 text-orange-500">*</span>
+            <span className="ml-1 text-teal-500 dark:text-teal-400">*</span>
           ) : null}
         </span>
         {field.description ? (
-          <span className="mt-0.5 block text-[12px] leading-snug text-stone-500">
+          <span className="mt-0.5 block text-[12px] leading-snug text-stone-500 dark:text-stone-400">
             {field.description}
           </span>
         ) : null}
       </label>
 
-      {/* Input by type */}
-      <div className="mt-2">
+      <div>
         {field.type === "short_text" ? (
           <input
             type="text"
@@ -261,24 +339,20 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
                   key={opt.id}
                   type="button"
                   onClick={() => setValue(opt.value)}
-                  className={`flex w-full items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
-                    checked
-                      ? "border-orange-300 bg-orange-50/70 ring-2 ring-orange-500/10"
-                      : "border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50"
-                  }`}
+                  className={choiceRowClass(checked)}
                 >
                   <span
                     className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors ${
                       checked
-                        ? "border-orange-500"
-                        : "border-stone-300"
+                        ? "border-teal-500 dark:border-teal-400"
+                        : "border-stone-300 dark:border-stone-600"
                     }`}
                   >
                     {checked ? (
-                      <span className="h-2 w-2 rounded-full bg-orange-500" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-teal-500 dark:bg-teal-400" />
                     ) : null}
                   </span>
-                  <span className="min-w-0 flex-1 text-[13.5px] text-stone-800">
+                  <span className="min-w-0 flex-1 text-[13.5px] text-stone-800 dark:text-stone-100">
                     {opt.label}
                   </span>
                 </button>
@@ -301,24 +375,20 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
                   key={opt.id}
                   type="button"
                   onClick={toggle}
-                  className={`flex w-full items-center gap-3 rounded-xl border px-3.5 py-2.5 text-left transition-all ${
-                    checked
-                      ? "border-orange-300 bg-orange-50/70 ring-2 ring-orange-500/10"
-                      : "border-stone-200 bg-white hover:border-stone-300 hover:bg-stone-50"
-                  }`}
+                  className={choiceRowClass(checked)}
                 >
                   <span
-                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-md border-2 transition-colors ${
+                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors ${
                       checked
-                        ? "border-orange-500 bg-orange-500"
-                        : "border-stone-300"
+                        ? "border-teal-500 bg-teal-500 dark:border-teal-500 dark:bg-teal-500"
+                        : "border-stone-300 dark:border-stone-600"
                     }`}
                   >
                     {checked ? (
                       <span className="text-white">{I.check("h-2.5 w-2.5")}</span>
                     ) : null}
                   </span>
-                  <span className="min-w-0 flex-1 text-[13.5px] text-stone-800">
+                  <span className="min-w-0 flex-1 text-[13.5px] text-stone-800 dark:text-stone-100">
                     {opt.label}
                   </span>
                 </button>
@@ -356,10 +426,10 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
                   key={opt.label}
                   type="button"
                   onClick={() => setValue(opt.val)}
-                  className={`flex-1 rounded-xl border px-4 py-2.5 text-[13.5px] font-semibold transition-all ${
+                  className={`flex-1 rounded-md border px-4 py-2.5 text-[13.5px] font-semibold transition-all ${
                     checked
-                      ? "border-orange-300 bg-orange-50 text-orange-700 ring-2 ring-orange-500/10"
-                      : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-50"
+                      ? "border-teal-400 bg-teal-50 text-teal-700 ring-2 ring-teal-500/10 dark:border-teal-500/60 dark:bg-teal-500/10 dark:text-teal-300 dark:ring-teal-500/20"
+                      : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:hover:border-stone-600 dark:hover:bg-stone-800"
                   }`}
                 >
                   {opt.label}
@@ -390,9 +460,8 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
         ) : null}
       </div>
 
-      {/* Error message */}
       {hasError ? (
-        <p className="mt-1.5 flex items-center gap-1.5 text-[11.5px] font-medium text-red-600">
+        <p className="mt-2 flex items-center gap-1.5 text-[11.5px] font-medium text-red-600 dark:text-red-400">
           {I.alert("h-3.5 w-3.5 shrink-0")}
           {error}
         </p>
@@ -402,82 +471,7 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Rating input
-// ─────────────────────────────────────────────────────────────
-const RatingInput = ({ value, min, max, onChange }) => {
-  const items = [];
-  for (let i = min; i <= max; i++) items.push(i);
-
-  return (
-    <div className="flex items-center gap-1.5">
-      {items.map((n) => {
-        const active = value >= n;
-        return (
-          <button
-            key={n}
-            type="button"
-            onClick={() => onChange(n)}
-            className={`flex h-11 w-11 items-center justify-center rounded-xl border transition-all active:scale-95 ${
-              active
-                ? "border-amber-300 bg-amber-50 text-amber-500"
-                : "border-stone-200 bg-white text-stone-300 hover:border-stone-300"
-            }`}
-            aria-label={`Rate ${n}`}
-          >
-            {active
-              ? I.star("h-5 w-5")
-              : I.starOutline("h-5 w-5")}
-          </button>
-        );
-      })}
-      {value ? (
-        <button
-          type="button"
-          onClick={() => onChange(0)}
-          className="ml-1 text-[11.5px] font-semibold text-stone-400 hover:text-stone-700"
-        >
-          Clear
-        </button>
-      ) : null}
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────
-// Linear scale input
-// ─────────────────────────────────────────────────────────────
-const ScaleInput = ({ value, min, max, onChange }) => {
-  const items = [];
-  for (let i = min; i <= max; i++) items.push(i);
-  const compact = items.length > 7;
-
-  return (
-    <div className="scrollbar-none -mx-3.5 flex gap-1.5 overflow-x-auto px-3.5 pb-1">
-      {items.map((n) => {
-        const active = value === n;
-        return (
-          <button
-            key={n}
-            type="button"
-            onClick={() => onChange(n)}
-            className={`flex h-11 shrink-0 items-center justify-center rounded-xl border font-semibold transition-all active:scale-95 ${
-              compact ? "w-11 text-[12.5px]" : "flex-1 text-[13px]"
-            } ${
-              active
-                ? "border-orange-300 bg-orange-500 text-white shadow-sm shadow-orange-500/30"
-                : "border-stone-200 bg-white text-stone-700 hover:border-stone-300 hover:bg-stone-50"
-            }`}
-          >
-            {n}
-          </button>
-        );
-      })}
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────
-// Login screen (private forms only)
+// Login screen (private forms)
 // ─────────────────────────────────────────────────────────────
 const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
   const [email, setEmail] = useState("");
@@ -508,34 +502,34 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
   };
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#f7f5f0] text-stone-900 antialiased">
+    <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       <div
         className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-8 sm:px-6"
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
         <div className="mb-6 flex justify-center">
-          <XamutMark className="h-12 w-12 rounded-2xl" />
+          <XamutMark className="h-11 w-11" />
         </div>
 
         <div className="mb-6 text-center">
-          <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-3 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-stone-500">
+          <span className="inline-flex items-center gap-1.5 rounded-md bg-stone-100 px-2.5 py-1 text-[10.5px] font-semibold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
             {I.lock("h-3 w-3")}
             Private form
           </span>
-          <h1 className="mt-3 text-[20px] font-semibold tracking-tight text-stone-900 sm:text-[24px]">
+          <h1 className="mt-3 text-[20px] font-semibold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[22px]">
             {formTitle || "Sign in to continue"}
           </h1>
-          <p className="mt-1.5 text-[13px] leading-relaxed text-stone-500">
+          <p className="mt-1.5 text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
             Enter the email and password from your invite email.
           </p>
         </div>
 
         <form
           onSubmit={handleSubmit}
-          className="rounded-3xl border border-stone-200/80 bg-white p-5 shadow-lg shadow-stone-900/[0.03] sm:p-6"
+          className="rounded-lg border border-stone-200/80 bg-white p-5 shadow-sm dark:border-stone-800 dark:bg-stone-900 sm:p-6"
         >
           {error ? (
-            <div className="mb-4 flex items-start gap-2 rounded-xl border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] text-red-700">
+            <div className="mb-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
               <span className="mt-0.5 shrink-0">{I.alert("h-4 w-4")}</span>
               <span>{error}</span>
             </div>
@@ -545,7 +539,7 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
             <div>
               <label
                 htmlFor="participant-email"
-                className="mb-1.5 block text-[12px] font-semibold uppercase tracking-wider text-stone-500"
+                className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
               >
                 Email
               </label>
@@ -560,14 +554,14 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
                   if (error) setError("");
                 }}
                 placeholder="you@example.com"
-                className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10"
+                className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
               />
             </div>
 
             <div>
               <label
                 htmlFor="participant-password"
-                className="mb-1.5 block text-[12px] font-semibold uppercase tracking-wider text-stone-500"
+                className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
               >
                 Password
               </label>
@@ -582,12 +576,12 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
                     if (error) setError("");
                   }}
                   placeholder="Your invite password"
-                  className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 pr-11 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10"
+                  className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 pr-11 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
                 />
                 <button
                   type="button"
                   onClick={() => setShowPassword((s) => !s)}
-                  className="absolute right-2.5 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-lg text-stone-400 hover:bg-stone-100 hover:text-stone-700"
+                  className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
                   aria-label={showPassword ? "Hide" : "Show"}
                 >
                   {showPassword ? I.eyeOff("h-4 w-4") : I.eye("h-4 w-4")}
@@ -599,11 +593,11 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
           <button
             type="submit"
             disabled={isLoading}
-            className="mt-5 w-full rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-5 py-3 text-[13px] font-semibold text-white shadow-lg shadow-orange-500/25 transition-all hover:shadow-xl hover:shadow-orange-500/35 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70"
+            className="mt-5 w-full rounded-md bg-teal-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
           >
             {isLoading ? (
               <span className="inline-flex items-center gap-2">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                {I.spinner("h-3.5 w-3.5")}
                 Signing in…
               </span>
             ) : (
@@ -611,9 +605,9 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
             )}
           </button>
 
-          <p className="mt-4 text-center text-[11px] leading-relaxed text-stone-400">
-            This isn't a Xamut account. Use the credentials from your invite email.
-            Lost them? Ask the form owner to resend.
+          <p className="mt-4 text-center text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+            This isn't a Xamut account. Use the credentials from your invite
+            email. Lost them? Ask the form owner to resend.
           </p>
         </form>
       </div>
@@ -638,46 +632,46 @@ const SubmittedScreen = ({ form, result }) => {
   }, [result?.successRedirectUrl]);
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#f7f5f0] text-stone-900 antialiased">
+    <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       <div
         className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-8 sm:px-6"
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
-        <div className="rounded-3xl border border-stone-200/80 bg-white p-6 text-center shadow-lg shadow-stone-900/[0.03] sm:p-8">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-lg shadow-emerald-500/25">
-            <span className="text-white">{I.check("h-7 w-7")}</span>
+        <div className="rounded-lg border border-stone-200/80 bg-white p-6 text-center shadow-sm dark:border-stone-800 dark:bg-stone-900 sm:p-8">
+          <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-gradient-to-br from-emerald-400 to-emerald-600 shadow-sm shadow-emerald-500/25">
+            <span className="text-white">{I.check("h-6 w-6")}</span>
           </div>
 
-          <h1 className="mt-4 text-[20px] font-semibold tracking-tight text-stone-900 sm:text-[24px]">
+          <h1 className="mt-4 text-[20px] font-semibold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[22px]">
             All done
           </h1>
-          <p className="mt-2 text-[13.5px] leading-relaxed text-stone-500">
+          <p className="mt-2 text-[13.5px] leading-relaxed text-stone-500 dark:text-stone-400">
             {result?.confirmationMessage ||
               form?.settings?.confirmationMessage ||
               "Thanks, your response has been recorded."}
           </p>
 
           {showScore ? (
-            <div className="mt-6 rounded-2xl border border-purple-200/70 bg-purple-50/50 p-4">
-              <div className="flex items-center justify-center gap-2 text-purple-600">
+            <div className="mt-5 rounded-lg border border-purple-200/70 bg-purple-50/50 p-4 dark:border-purple-500/30 dark:bg-purple-500/10">
+              <div className="flex items-center justify-center gap-2 text-purple-600 dark:text-purple-400">
                 {I.trophy("h-4 w-4")}
                 <p className="text-[11px] font-semibold uppercase tracking-wider">
                   Your score
                 </p>
               </div>
-              <p className="mt-2 text-[32px] font-bold leading-none tracking-tight text-purple-700">
+              <p className="mt-2 text-[30px] font-bold leading-none tracking-tight text-purple-700 dark:text-purple-300">
                 {result.score.percentage}%
               </p>
-              <p className="mt-1.5 text-[12px] text-purple-700/80">
+              <p className="mt-1.5 text-[12px] text-purple-700/80 dark:text-purple-400/80">
                 {result.score.totalScore} out of {result.score.maxScore} points
               </p>
               {result.score.passed !== null &&
               result.score.passed !== undefined ? (
                 <p
-                  className={`mt-2 inline-block rounded-full px-3 py-1 text-[11px] font-bold uppercase tracking-wider ${
+                  className={`mt-2 inline-block rounded-md px-2.5 py-1 text-[10.5px] font-bold uppercase tracking-wider ${
                     result.score.passed
-                      ? "bg-emerald-100 text-emerald-700"
-                      : "bg-red-100 text-red-600"
+                      ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300"
+                      : "bg-red-100 text-red-600 dark:bg-red-500/20 dark:text-red-300"
                   }`}
                 >
                   {result.score.passed ? "Passed" : "Failed"}
@@ -687,15 +681,15 @@ const SubmittedScreen = ({ form, result }) => {
           ) : null}
 
           {result?.successRedirectUrl ? (
-            <p className="mt-5 text-[11.5px] text-stone-400">
+            <p className="mt-5 text-[11.5px] text-stone-400 dark:text-stone-500">
               Redirecting…
             </p>
           ) : null}
 
           <div className="mt-6 flex justify-center">
-            <XamutMark className="h-8 w-8 rounded-xl" />
+            <XamutMark className="h-7 w-7" />
           </div>
-          <p className="mt-2 text-[10.5px] uppercase tracking-wider text-stone-400">
+          <p className="mt-2 text-[10.5px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
             Made with Xamut
           </p>
         </div>
@@ -712,13 +706,13 @@ const FatalScreen = ({ title, message, status }) => {
   const isMissing = status === 404;
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#f7f5f0] text-stone-900 antialiased">
+    <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       <div
         className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-4 py-8 text-center sm:px-6"
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
-        <XamutMark className="h-11 w-11 rounded-2xl" />
-        <h1 className="mt-5 text-[19px] font-semibold tracking-tight text-stone-900">
+        <XamutMark className="h-11 w-11" />
+        <h1 className="mt-5 text-[19px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
           {title ||
             (isClosed
               ? "This form isn't accepting responses"
@@ -726,7 +720,7 @@ const FatalScreen = ({ title, message, status }) => {
               ? "Form not found"
               : "Something went wrong")}
         </h1>
-        <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-stone-500">
+        <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
           {message ||
             (isClosed
               ? "The owner closed it or the deadline has passed."
@@ -740,8 +734,22 @@ const FatalScreen = ({ title, message, status }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Loading screen
+// ─────────────────────────────────────────────────────────────
+const LoadingScreen = ({ label = "Loading form…" }) => (
+  <div className="flex min-h-dvh items-center justify-center bg-stone-50 dark:bg-stone-950">
+    <div className="flex flex-col items-center gap-3">
+      <span className="h-7 w-7 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500 dark:border-stone-700 dark:border-t-teal-400" />
+      <p className="text-[12px] text-stone-400 dark:text-stone-500">{label}</p>
+    </div>
+  </div>
+);
+
+// ─────────────────────────────────────────────────────────────
 // Main page
 // ─────────────────────────────────────────────────────────────
+const FORM_ID = "public-form";
+
 const PublicForm = () => {
   const { slug } = useParams();
 
@@ -751,20 +759,15 @@ const PublicForm = () => {
   const [participantInfo, setParticipantInfo] = useState(null);
   const [needLogin, setNeedLogin] = useState(false);
 
-  // form data
   const {
     data: formData,
     isLoading,
     error,
     refetch,
-  } = useGetPublicFormQuery(
-    { slug, participantToken },
-    { skip: !slug }
-  );
+  } = useGetPublicFormQuery({ slug, participantToken }, { skip: !slug });
 
   const [submit, { isLoading: submitting }] = useSubmitResponseMutation();
 
-  // If the query comes back 401 (private form, no token), flip to login
   useEffect(() => {
     if (error?.status === 401) {
       setNeedLogin(true);
@@ -773,7 +776,6 @@ const PublicForm = () => {
     }
   }, [error, slug]);
 
-  // If we were given a token at mount and got data back, we're logged in
   useEffect(() => {
     if (formData?.participant) {
       setParticipantInfo(formData.participant);
@@ -783,7 +785,6 @@ const PublicForm = () => {
 
   const form = formData?.form;
 
-  // answers keyed by fieldId
   const [answers, setAnswers] = useState({});
   const [errors, setErrors] = useState({});
   const [submitted, setSubmitted] = useState(null);
@@ -791,16 +792,12 @@ const PublicForm = () => {
   const [startedAt] = useState(() => new Date().toISOString());
   const [showJump, setShowJump] = useState(false);
 
-  // Track scroll to show "scroll to top" on long forms
   useEffect(() => {
-    const onScroll = () => {
-      setShowJump(window.scrollY > 600);
-    };
+    const onScroll = () => setShowJump(window.scrollY > 600);
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Required + basic type validation. Server does the authoritative check.
   const validate = () => {
     if (!form) return true;
     const errs = {};
@@ -863,12 +860,9 @@ const PublicForm = () => {
     e.preventDefault();
     setSubmitError("");
     if (!validate()) {
-      // Scroll to the first error
       const firstErrorId = Object.keys(errors)[0];
       if (firstErrorId) {
-        const el = document.querySelector(
-          `[data-field-id="${firstErrorId}"]`
-        );
+        const el = document.querySelector(`[data-field-id="${firstErrorId}"]`);
         el?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
       return;
@@ -896,16 +890,7 @@ const PublicForm = () => {
   };
 
   // ── Render branches ───────────────────────────────────────
-  if (isLoading && !form) {
-    return (
-      <div className="flex min-h-dvh items-center justify-center bg-[#f7f5f0]">
-        <div className="flex flex-col items-center gap-3">
-          <span className="h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-orange-500" />
-          <p className="text-[12px] text-stone-400">Loading form…</p>
-        </div>
-      </div>
-    );
-  }
+  if (isLoading && !form) return <LoadingScreen />;
 
   if (needLogin && form?.visibility === "private") {
     return (
@@ -935,20 +920,10 @@ const PublicForm = () => {
     );
   }
 
-  if (error && !form) {
-    return <FatalScreen status={error?.status} />;
-  }
+  if (error && !form) return <FatalScreen status={error?.status} />;
+  if (!form) return <FatalScreen status={404} />;
+  if (submitted) return <SubmittedScreen form={form} result={submitted} />;
 
-  if (!form) {
-    return <FatalScreen status={404} />;
-  }
-
-  if (submitted) {
-    return <SubmittedScreen form={form} result={submitted} />;
-  }
-
-  // If the form is private and we somehow got here without a token,
-  // the login flow should have taken over. Safety net:
   if (form.visibility === "private" && !participantToken) {
     return (
       <ParticipantLogin
@@ -963,10 +938,8 @@ const PublicForm = () => {
     );
   }
 
-  // ── Visible fields (skip nothing, we render sections too) ─
   const visibleFields = form.fields || [];
 
-  // Progress (answered required fields)
   const requiredFields = visibleFields.filter(
     (f) => f.type !== "section" && f.required
   );
@@ -979,153 +952,280 @@ const PublicForm = () => {
       (Array.isArray(v) && v.length === 0)
     );
   });
-  const progress = requiredFields.length
-    ? Math.round((answeredRequired.length / requiredFields.length) * 100)
+  const totalFields = visibleFields.filter((f) => f.type !== "section");
+  const answeredAll = totalFields.filter((f) => {
+    const v = answers[f.id];
+    return !(
+      v === undefined ||
+      v === null ||
+      v === "" ||
+      (Array.isArray(v) && v.length === 0)
+    );
+  });
+  const progress = totalFields.length
+    ? Math.round((answeredAll.length / totalFields.length) * 100)
     : 0;
+  const requiredLeft = requiredFields.length - answeredRequired.length;
+
+  const showProgress = form.settings?.showProgressBar !== false;
+  const hasFields = visibleFields.length > 0;
+  const showMobileProgress = showProgress && totalFields.length > 0;
 
   return (
-    <div className="flex min-h-dvh flex-col bg-[#f7f5f0] text-stone-900 antialiased">
-      {/* Progress bar (top of viewport when enabled) */}
-      {form.settings?.showProgressBar && requiredFields.length > 0 ? (
-        <div
-          className="fixed inset-x-0 top-0 z-40 h-1 bg-stone-200"
-          style={{ top: "env(safe-area-inset-top)" }}
-        >
-          <div
-            className="h-full bg-gradient-to-r from-orange-400 to-orange-600 transition-all duration-300"
-            style={{ width: `${progress}%` }}
-          />
-        </div>
-      ) : null}
-
-      {/* Header */}
-      <div
-        className="mx-auto w-full max-w-2xl px-3 pt-6 sm:px-6 sm:pt-8"
-        style={{ paddingTop: "max(env(safe-area-inset-top), 1.5rem)" }}
+    <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+      {/* Sticky header — mobile has a real progress bar block at its bottom edge */}
+      <header
+        className="sticky top-0 z-30 bg-stone-50/90 backdrop-blur-xl dark:bg-stone-950/90"
+        style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
-        <div className="mb-4 flex items-center justify-between">
-          <XamutMark className="h-9 w-9 rounded-xl" />
+        <div className="mx-auto flex h-12 w-full max-w-5xl items-center gap-2.5 px-3 sm:h-14 sm:px-6">
+          <XamutMark className="h-7 w-7" />
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+              {form.title}
+            </p>
+            <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
+              {showProgress ? `${progress}% complete` : "Form in progress"}
+              {requiredLeft > 0
+                ? ` · ${requiredLeft} required left`
+                : requiredFields.length > 0
+                ? " · ready to submit"
+                : ""}
+            </p>
+          </div>
           {form.visibility === "private" ? (
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-500">
+            <span className="inline-flex items-center gap-1 rounded-md bg-stone-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
               {I.lock("h-3 w-3")}
               Private
             </span>
           ) : null}
         </div>
 
-        {/* Title card */}
-        <div className="overflow-hidden rounded-3xl border border-stone-200/80 bg-white shadow-lg shadow-stone-900/[0.03]">
-          <div className="h-2 bg-gradient-to-r from-orange-400 via-orange-500 to-orange-600" />
-          <div className="px-5 pb-5 pt-5 sm:px-7 sm:pb-7 sm:pt-6">
-            <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-stone-900 sm:text-[26px]">
-              {form.title}
-            </h1>
-            {form.description ? (
-              <p className="mt-2 whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-stone-500">
-                {form.description}
-              </p>
-            ) : null}
-            {form.visibility === "private" && participantInfo?.email ? (
-              <p className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-stone-100 px-2.5 py-1 text-[11px] text-stone-600">
-                {I.check("h-3 w-3 text-emerald-600")}
-                Signed in as{" "}
-                <span className="font-semibold">{participantInfo.email}</span>
-              </p>
-            ) : null}
-          </div>
-        </div>
-      </div>
-
-      {/* Fields */}
-      <form
-        onSubmit={handleSubmit}
-        className="mx-auto w-full max-w-2xl flex-1 px-3 pb-32 pt-3 sm:px-6 sm:pb-40 sm:pt-4"
-      >
-        {submitError ? (
-          <div className="mb-3 flex items-start gap-2 rounded-2xl border border-red-200 bg-red-50 px-4 py-3 text-[12.5px] text-red-700">
-            <span className="mt-0.5 shrink-0">{I.alert("h-4 w-4")}</span>
-            <span>{submitError}</span>
+        {/* Mobile progress bar — real block element, so no stacking/clipping issues.
+            Sits right at the bottom edge of the sticky header and stays pinned
+            to the top of the viewport as the user scrolls. */}
+        {showMobileProgress ? (
+          <div className="h-1 w-full bg-stone-200 dark:bg-stone-800 lg:hidden">
+            <div
+              className="h-full bg-teal-500 transition-[width] duration-300 ease-out dark:bg-teal-400"
+              style={{ width: `${Math.max(2, progress)}%` }}
+            />
           </div>
         ) : null}
 
-        <div className="space-y-4">
-          {visibleFields.map((f) => (
-            <div
-              key={f.id}
-              data-field-id={f.id}
-              className={
-                f.type === "section"
-                  ? ""
-                  : "rounded-2xl border border-stone-200/80 bg-white p-4 shadow-sm shadow-stone-900/[0.02] sm:p-5"
-              }
-            >
-              <FieldRenderer
-                field={f}
-                value={answers[f.id]}
-                error={errors[f.id]}
-                onChange={handleChange}
-              />
-            </div>
-          ))}
+        {/* Header bottom border — mobile keeps it under the progress bar
+            when the bar is showing, otherwise sits flush at the header edge */}
+        <div className="border-b border-stone-200/70 dark:border-stone-800/70" />
+      </header>
+
+      {/* Content */}
+      <div className="mx-auto w-full max-w-5xl flex-1 px-3 pt-4 pb-28 sm:px-6 sm:pt-6 lg:pb-16">
+        {/* Title hero */}
+        <div className="mb-5 sm:mb-6">
+          <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-stone-900 dark:text-stone-100 sm:text-[28px]">
+            {form.title}
+          </h1>
+          {form.description ? (
+            <p className="mt-2 max-w-3xl whitespace-pre-wrap break-words text-[13.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+              {form.description}
+            </p>
+          ) : null}
+          {form.visibility === "private" && participantInfo?.email ? (
+            <p className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-emerald-50 px-2.5 py-1 text-[11px] text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">
+              {I.check("h-3 w-3")}
+              Signed in as{" "}
+              <span className="font-semibold">{participantInfo.email}</span>
+            </p>
+          ) : null}
         </div>
 
-        {/* Submit button — in-flow at end of fields */}
-        <div className="mt-6 flex flex-col items-stretch gap-2 sm:flex-row sm:items-center sm:justify-between">
-          <p className="text-center text-[11px] text-stone-400 sm:text-left">
-            Never submit passwords through this form.
-          </p>
+        {/* Two-column layout on desktop */}
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_280px] lg:gap-6">
+          {/* Form — the ONLY form on the page */}
+          <form id={FORM_ID} onSubmit={handleSubmit} className="min-w-0">
+            {submitError ? (
+              <div className="mb-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3.5 py-3 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
+                <span className="mt-0.5 shrink-0">{I.alert("h-4 w-4")}</span>
+                <span>{submitError}</span>
+              </div>
+            ) : null}
+
+            {/* Fields sheet */}
+            <div className="overflow-hidden rounded-lg border border-stone-200/80 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+              {!hasFields ? (
+                <div className="px-5 py-10 text-center">
+                  <p className="text-[13px] text-stone-400 dark:text-stone-500">
+                    This form has no fields yet.
+                  </p>
+                </div>
+              ) : (
+                visibleFields.map((f, i) => {
+                  const isSection = f.type === "section";
+                  return (
+                    <div
+                      key={f.id}
+                      data-field-id={f.id}
+                      className={
+                        i > 0
+                          ? "border-t border-stone-100 dark:border-stone-800/60"
+                          : ""
+                      }
+                    >
+                      {isSection ? (
+                        <div className="bg-stone-50/70 px-5 py-4 dark:bg-stone-900/50 sm:px-6 sm:py-5">
+                          <FieldRenderer
+                            field={f}
+                            value={answers[f.id]}
+                            error={errors[f.id]}
+                            onChange={handleChange}
+                          />
+                        </div>
+                      ) : (
+                        <div className="px-4 py-5 sm:px-6">
+                          <FieldRenderer
+                            field={f}
+                            value={answers[f.id]}
+                            error={errors[f.id]}
+                            onChange={handleChange}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* Brand footer — desktop only, in-flow */}
+            <div className="mt-8 hidden flex-col items-center gap-1.5 pb-2 text-center lg:flex">
+              <XamutMark className="h-6 w-6" />
+              <p className="text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                Powered by Xamut
+              </p>
+            </div>
+          </form>
+
+          {/* Desktop sidebar */}
+          <aside className="hidden lg:block">
+            <div className="sticky top-[80px] space-y-3">
+              {/* Progress card */}
+              <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
+                <div className="flex items-center justify-between">
+                  <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                    Progress
+                  </p>
+                  <p className="text-[13px] font-semibold text-teal-600 dark:text-teal-400">
+                    {progress}%
+                  </p>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-stone-100 dark:bg-stone-800">
+                  <div
+                    className="h-full rounded-full bg-teal-500 transition-all duration-300 dark:bg-teal-400"
+                    style={{ width: `${Math.max(2, progress)}%` }}
+                  />
+                </div>
+                <div className="mt-3 grid grid-cols-2 gap-2 border-t border-stone-100 pt-3 dark:border-stone-800/60">
+                  <div>
+                    <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                      Answered
+                    </p>
+                    <p className="mt-0.5 text-[14px] font-semibold text-stone-800 dark:text-stone-100">
+                      {answeredAll.length}
+                      <span className="text-[11px] font-normal text-stone-400 dark:text-stone-500">
+                        /{totalFields.length}
+                      </span>
+                    </p>
+                  </div>
+                  <div>
+                    <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                      Required
+                    </p>
+                    <p
+                      className={`mt-0.5 text-[14px] font-semibold ${
+                        requiredLeft > 0
+                          ? "text-stone-800 dark:text-stone-100"
+                          : "text-emerald-600 dark:text-emerald-400"
+                      }`}
+                    >
+                      {requiredLeft > 0 ? `${requiredLeft} left` : "Done"}
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Submit card */}
+              <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
+                <button
+                  type="submit"
+                  form={FORM_ID}
+                  disabled={submitting}
+                  className="flex w-full items-center justify-center gap-2 rounded-md bg-teal-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
+                >
+                  {submitting ? (
+                    <>
+                      {I.spinner("h-3.5 w-3.5")}
+                      Submitting…
+                    </>
+                  ) : (
+                    "Submit form"
+                  )}
+                </button>
+                {requiredLeft > 0 ? (
+                  <p className="mt-2 text-center text-[10.5px] leading-relaxed text-stone-400 dark:text-stone-500">
+                    {requiredLeft} required question
+                    {requiredLeft === 1 ? "" : "s"} left
+                  </p>
+                ) : null}
+              </div>
+
+              {/* Note */}
+              <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                  Note
+                </p>
+                <p className="mt-1.5 text-[11.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+                  Never submit passwords through this form. This page is served
+                  by Xamut on behalf of the form owner.
+                </p>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </div>
+
+      {/* Mobile fixed bottom submit — the ONLY submit on mobile */}
+      {hasFields && !submitted ? (
+        <div
+          className="fixed inset-x-0 z-30 flex justify-center border-t border-stone-200/70 bg-stone-50/95 px-3 py-2.5 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/95 lg:hidden"
+          style={{
+            bottom: 0,
+            paddingBottom: "max(env(safe-area-inset-bottom), 0.625rem)",
+          }}
+        >
           <button
             type="submit"
+            form={FORM_ID}
             disabled={submitting}
-            className="inline-flex items-center justify-center gap-2 rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-6 py-3 text-[13px] font-semibold text-white shadow-lg shadow-orange-500/25 transition-all hover:shadow-xl hover:shadow-orange-500/35 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70"
+            className="w-full max-w-md rounded-md bg-teal-600 px-6 py-3 text-[13.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
           >
             {submitting ? (
-              <>
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+              <span className="inline-flex items-center gap-2">
+                {I.spinner("h-3.5 w-3.5")}
                 Submitting…
-              </>
+              </span>
             ) : (
               "Submit"
             )}
           </button>
         </div>
-
-        <div className="mt-8 flex flex-col items-center gap-1.5 pb-4 text-center">
-          <XamutMark className="h-7 w-7 rounded-lg" />
-          <p className="text-[10.5px] uppercase tracking-wider text-stone-400">
-            Powered by Xamut
-          </p>
-        </div>
-      </form>
-
-      {/* Floating submit button on mobile (sticks to bottom) */}
-      <div
-        className="fixed inset-x-0 z-30 flex justify-center px-4 sm:hidden"
-        style={{ bottom: "max(env(safe-area-inset-bottom), 1rem)" }}
-      >
-        <button
-          type="button"
-          onClick={handleSubmit}
-          disabled={submitting}
-          className="w-full max-w-md rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-6 py-3.5 text-[13.5px] font-semibold text-white shadow-xl shadow-orange-500/35 transition-all active:scale-[0.98] disabled:opacity-70"
-        >
-          {submitting ? (
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-              Submitting…
-            </span>
-          ) : (
-            "Submit"
-          )}
-        </button>
-      </div>
+      ) : null}
 
       {/* Scroll to top */}
       {showJump ? (
         <button
           type="button"
           onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
-          className="fixed right-4 z-30 flex h-10 w-10 items-center justify-center rounded-full border border-stone-200 bg-white text-stone-500 shadow-lg shadow-stone-900/5 transition-all hover:-translate-y-0.5 hover:text-orange-600"
+          className="fixed right-4 z-30 flex h-9 w-9 items-center justify-center rounded-md border border-stone-200 bg-white text-stone-500 shadow-sm transition-all hover:-translate-y-0.5 hover:text-teal-600 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400 dark:hover:text-teal-400 lg:hidden"
           style={{ bottom: "max(env(safe-area-inset-bottom), 5rem)" }}
           aria-label="Scroll to top"
         >

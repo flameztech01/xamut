@@ -43,24 +43,35 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────
-   iOS zoom guard
-   Only text-entry fields need to be 16px on mobile, otherwise
-   Safari zooms the whole page when they're focused. Buttons and
-   selects do not need this and forcing it there was breaking
-   every small UI control on mobile.
+   iOS zoom guard — REMOVED.
+
+   The old rule forced font-size:16px on every text input and
+   textarea under 640px. Its specificity (0,1,1) beat every
+   Tailwind utility you apply to inputs (0,1,0), so all your
+   custom input sizes were being silently overridden on mobile.
+
+   If you want the guard back without it stomping your styles,
+   wrap the selector in :where() so it drops to specificity
+   (0,0,0). Then Tailwind classes win, and the guard only acts
+   as a fallback default for inputs you haven't explicitly sized.
+   Trade-off: iOS will still zoom on focus for any input below
+   16px, because iOS checks computed size, not specificity.
+
+   @media (max-width: 639px) {
+     :where(
+       input[type="text"],
+       input[type="email"],
+       input[type="password"],
+       input[type="search"],
+       input[type="tel"],
+       input[type="url"],
+       input[type="number"],
+       textarea
+     ) {
+       font-size: 16px;
+     }
+   }
    ───────────────────────────────────────────────────────────── */
-@media (max-width: 639px) {
-  input[type="text"],
-  input[type="email"],
-  input[type="password"],
-  input[type="search"],
-  input[type="tel"],
-  input[type="url"],
-  input[type="number"],
-  textarea {
-    font-size: 16px;
-  }
-}
 
 /* ─────────────────────────────────────────────────────────────
    Scrollbars

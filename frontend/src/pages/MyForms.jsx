@@ -14,18 +14,69 @@ import {
 // Constants
 // ─────────────────────────────────────────────────────────────
 const FORM_TYPE_META = {
-  form: { label: "Form", bg: "bg-orange-50", text: "text-orange-600" },
-  quiz: { label: "Quiz", bg: "bg-purple-50", text: "text-purple-600" },
-  survey: { label: "Survey", bg: "bg-blue-50", text: "text-blue-600" },
-  feedback: { label: "Feedback", bg: "bg-emerald-50", text: "text-emerald-600" },
-  attendance: { label: "Attendance", bg: "bg-amber-50", text: "text-amber-700" },
+  form: {
+    label: "Form",
+    bg: "bg-teal-50 dark:bg-teal-500/15",
+    text: "text-teal-600 dark:text-teal-400",
+  },
+  quiz: {
+    label: "Quiz",
+    bg: "bg-purple-50 dark:bg-purple-500/15",
+    text: "text-purple-600 dark:text-purple-400",
+  },
+  survey: {
+    label: "Survey",
+    bg: "bg-blue-50 dark:bg-blue-500/15",
+    text: "text-blue-600 dark:text-blue-400",
+  },
+  feedback: {
+    label: "Feedback",
+    bg: "bg-emerald-50 dark:bg-emerald-500/15",
+    text: "text-emerald-600 dark:text-emerald-400",
+  },
+  attendance: {
+    label: "Attendance",
+    bg: "bg-amber-50 dark:bg-amber-500/15",
+    text: "text-amber-700 dark:text-amber-400",
+  },
 };
 
 const STATUS_META = {
-  draft: { label: "Draft", dot: "bg-stone-400", text: "text-stone-500" },
-  open: { label: "Open", dot: "bg-emerald-500", text: "text-emerald-600" },
-  closed: { label: "Closed", dot: "bg-red-400", text: "text-red-500" },
+  draft: {
+    label: "Draft",
+    dot: "bg-stone-400 dark:bg-stone-500",
+    text: "text-stone-500 dark:text-stone-400",
+    chip: "bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-300",
+  },
+  open: {
+    label: "Open",
+    dot: "bg-emerald-500",
+    text: "text-emerald-600 dark:text-emerald-400",
+    chip: "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-400",
+  },
+  closed: {
+    label: "Closed",
+    dot: "bg-red-400",
+    text: "text-red-500 dark:text-red-400",
+    chip: "bg-red-50 text-red-600 dark:bg-red-500/15 dark:text-red-400",
+  },
 };
+
+const STATUS_FILTERS = [
+  { id: "all", label: "All" },
+  { id: "draft", label: "Drafts" },
+  { id: "open", label: "Open" },
+  { id: "closed", label: "Closed" },
+];
+
+const TYPE_FILTERS = [
+  { id: "all", label: "All types" },
+  { id: "form", label: "Forms" },
+  { id: "quiz", label: "Quizzes" },
+  { id: "survey", label: "Surveys" },
+  { id: "feedback", label: "Feedback" },
+  { id: "attendance", label: "Attendance" },
+];
 
 const formatDate = (iso) => {
   if (!iso) return "";
@@ -35,13 +86,11 @@ const formatDate = (iso) => {
   const yesterday = new Date(now);
   yesterday.setDate(now.getDate() - 1);
 
-  if (sameDay) {
+  if (sameDay)
     return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-  }
   if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-  if (d.getFullYear() === now.getFullYear()) {
+  if (d.getFullYear() === now.getFullYear())
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
-  }
   return d.toLocaleDateString([], {
     month: "short",
     day: "numeric",
@@ -49,12 +98,26 @@ const formatDate = (iso) => {
   });
 };
 
+const formatShortDate = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = (now - d) / 1000;
+  if (diff < 60) return "now";
+  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h`;
+  if (diff < 604800) return `${Math.floor(diff / 86400)}d`;
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
 // ─────────────────────────────────────────────────────────────
 // Brand mark
 // ─────────────────────────────────────────────────────────────
 const XamutMark = ({ className = "h-9 w-9" }) => (
   <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[11px] bg-gradient-to-br from-orange-400 via-orange-500 to-orange-600 shadow-sm shadow-orange-500/30`}
+    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 shadow-sm shadow-teal-500/30`}
   >
     <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-white">
       <path
@@ -66,7 +129,65 @@ const XamutMark = ({ className = "h-9 w-9" }) => (
 );
 
 // ─────────────────────────────────────────────────────────────
-// Small icons (inline SVG, keeps the file self-contained)
+// Type icon
+// ─────────────────────────────────────────────────────────────
+const TypeIcon = ({ type, className = "h-4 w-4" }) => {
+  const props = {
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.9",
+    className,
+  };
+  switch (type) {
+    case "quiz":
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M9 12l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      );
+    case "survey":
+      return (
+        <svg {...props}>
+          <path d="M4 20V10M12 20V4M20 20v-7" strokeLinecap="round" />
+        </svg>
+      );
+    case "feedback":
+      return (
+        <svg {...props}>
+          <path
+            d="M21 12a8 8 0 0 1-8 8H7l-4 3v-7a8 8 0 0 1 8-8h2a8 8 0 0 1 8 4z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "attendance":
+      return (
+        <svg {...props}>
+          <path
+            d="M9 11l2 2 4-4M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    default:
+      return (
+        <svg {...props}>
+          <path
+            d="M9 12h6M9 16h6M9 8h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+  }
+};
+
+// ─────────────────────────────────────────────────────────────
+// Interface icons
 // ─────────────────────────────────────────────────────────────
 const IconPlus = ({ className = "h-4 w-4" }) => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={className}>
@@ -132,10 +253,29 @@ const IconLink = ({ className = "h-4 w-4" }) => (
   </svg>
 );
 
+const IconSearch = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <circle cx="11" cy="11" r="7" />
+    <path d="M21 21l-4.3-4.3" strokeLinecap="round" />
+  </svg>
+);
+
+const IconClose = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={className}>
+    <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+  </svg>
+);
+
+const IconArrowLeft = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <path d="M19 12H5M12 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 // ─────────────────────────────────────────────────────────────
-// Card menu (small dropdown for actions)
+// Card menu
 // ─────────────────────────────────────────────────────────────
-const CardMenu = ({ form, onAction }) => {
+const CardMenu = ({ form, onAction, align = "right" }) => {
   const [open, setOpen] = useState(false);
 
   const items = [
@@ -161,20 +301,20 @@ const CardMenu = ({ form, onAction }) => {
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex h-8 w-8 items-center justify-center rounded-lg text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700"
+        className="flex h-7 w-7 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
         aria-label="More actions"
       >
-        <IconDots className="h-4 w-4" />
+        <IconDots className="h-3.5 w-3.5" />
       </button>
 
       {open ? (
         <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
           <div
-            className="fixed inset-0 z-40"
-            onClick={() => setOpen(false)}
-            aria-hidden
-          />
-          <div className="absolute right-0 top-full z-50 mt-1.5 w-44 overflow-hidden rounded-xl border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10">
+            className={`absolute top-full z-50 mt-1 w-44 overflow-hidden rounded-md border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10 dark:border-stone-700/80 dark:bg-stone-900 dark:shadow-black/40 ${
+              align === "right" ? "right-0" : "left-0"
+            }`}
+          >
             {items.map((it) => (
               <button
                 key={it.id}
@@ -183,13 +323,13 @@ const CardMenu = ({ form, onAction }) => {
                   setOpen(false);
                   onAction(it.id, form);
                 }}
-                className={`flex w-full items-center gap-2 px-3 py-2 text-left text-[12.5px] leading-tight transition-colors ${
+                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-[12px] leading-tight transition-colors ${
                   it.danger
-                    ? "text-red-600 hover:bg-red-50"
-                    : "text-stone-700 hover:bg-stone-50"
+                    ? "text-red-600 hover:bg-red-50 dark:text-red-400 dark:hover:bg-red-500/10"
+                    : "text-stone-700 hover:bg-stone-50 dark:text-stone-200 dark:hover:bg-stone-800"
                 }`}
               >
-                <span className={it.danger ? "text-red-500" : "text-stone-400"}>
+                <span className={it.danger ? "text-red-500 dark:text-red-400" : "text-stone-400 dark:text-stone-500"}>
                   {it.icon}
                 </span>
                 <span className="min-w-0 flex-1 truncate">{it.label}</span>
@@ -203,16 +343,18 @@ const CardMenu = ({ form, onAction }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Form card
+// Desktop form card
 // ─────────────────────────────────────────────────────────────
-const FormCard = ({ form, role, onAction }) => {
+const DesktopFormCard = ({ form, role, onAction }) => {
   const navigate = useNavigate();
   const typeMeta = FORM_TYPE_META[form.type] || FORM_TYPE_META.form;
   const statusMeta = STATUS_META[form.status] || STATUS_META.draft;
 
   const openEditor = () => navigate(`/forms/${form._id}/edit`);
   const openResponses = () => navigate(`/forms/${form._id}/responses`);
-  const openPublic = () => {
+
+  const openPublic = (e) => {
+    e.stopPropagation();
     if (form.status !== "open") return;
     window.open(`/forms/${form.slug}`, "_blank", "noopener");
   };
@@ -225,83 +367,86 @@ const FormCard = ({ form, role, onAction }) => {
       onKeyDown={(e) => {
         if (e.key === "Enter") openEditor();
       }}
-      className="group flex cursor-pointer flex-col rounded-2xl border border-stone-200/80 bg-white p-3.5 shadow-sm shadow-stone-900/[0.02] transition-all duration-200 hover:-translate-y-0.5 hover:border-orange-200 hover:shadow-[0_10px_28px_-16px_rgba(234,88,12,0.35)] sm:p-4"
+      className="group flex cursor-pointer flex-col rounded-lg border border-stone-200/80 bg-white p-3.5 transition-all duration-150 hover:border-teal-300 hover:shadow-[0_4px_16px_-8px_rgba(13,148,136,0.35)] dark:border-stone-800 dark:bg-stone-900 dark:hover:border-teal-500/50 dark:hover:shadow-[0_4px_16px_-8px_rgba(13,148,136,0.5)]"
     >
-      {/* Top row: type badge + status */}
       <div className="mb-2.5 flex items-start justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-1.5">
           <span
-            className={`rounded-full px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider ${typeMeta.bg} ${typeMeta.text}`}
+            className={`inline-flex h-5 items-center gap-1 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wider ${typeMeta.bg} ${typeMeta.text}`}
           >
+            <TypeIcon type={form.type} className="h-2.5 w-2.5" />
             {typeMeta.label}
           </span>
           {role === "collaborator" ? (
-            <span className="rounded-full bg-stone-100 px-2 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500">
+            <span className="rounded bg-stone-100 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
               Shared
             </span>
           ) : null}
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           <span
-            className={`inline-flex items-center gap-1 text-[10.5px] font-semibold ${statusMeta.text}`}
+            className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider ${statusMeta.chip}`}
           >
-            <span className={`h-1.5 w-1.5 rounded-full ${statusMeta.dot}`} />
+            <span className={`h-1 w-1 rounded-full ${statusMeta.dot}`} />
             {statusMeta.label}
           </span>
           <CardMenu form={form} onAction={onAction} />
         </div>
       </div>
 
-      {/* Title + description */}
-      <h3 className="line-clamp-2 text-[14px] font-semibold tracking-tight text-stone-900">
+      <h3 className="line-clamp-2 text-[13.5px] font-semibold leading-snug tracking-tight text-stone-900 dark:text-stone-100">
         {form.title || "Untitled form"}
       </h3>
       {form.description ? (
-        <p className="mt-1 line-clamp-2 text-[12px] leading-snug text-stone-500">
+        <p className="mt-1 line-clamp-1 text-[11.5px] leading-snug text-stone-500 dark:text-stone-400">
           {form.description}
         </p>
-      ) : null}
+      ) : (
+        <p className="mt-1 text-[11.5px] italic leading-snug text-stone-400 dark:text-stone-600">
+          No description
+        </p>
+      )}
 
-      {/* Meta row */}
-      <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-stone-500">
-        <span className="inline-flex items-center gap-1">
-          <IconChart className="h-3 w-3 text-stone-400" />
-          <span className="font-semibold text-stone-700">
+      <div className="mt-3 grid grid-cols-3 divide-x divide-stone-100 border-y border-stone-100 py-2 dark:divide-stone-800 dark:border-stone-800">
+        <div className="px-2 first:pl-0">
+          <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+            Responses
+          </p>
+          <p className="mt-0.5 text-[13px] font-semibold text-stone-800 dark:text-stone-100">
             {form.responseCount || 0}
-          </span>
-          {form.responseCount === 1 ? "response" : "responses"}
-        </span>
-        <span className="text-stone-300">·</span>
-        <span>
-          {form.fieldsCount || 0}{" "}
-          {form.fieldsCount === 1 ? "field" : "fields"}
-        </span>
-        {form.visibility === "private" ? (
-          <>
-            <span className="text-stone-300">·</span>
-            <span className="text-stone-600">
-              {form.participantsCount || 0}{" "}
-              {form.participantsCount === 1 ? "participant" : "participants"}
-            </span>
-          </>
-        ) : null}
+          </p>
+        </div>
+        <div className="px-2">
+          <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+            Fields
+          </p>
+          <p className="mt-0.5 text-[13px] font-semibold text-stone-800 dark:text-stone-100">
+            {form.fieldsCount || 0}
+          </p>
+        </div>
+        <div className="px-2">
+          <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+            {form.visibility === "private" ? "Invited" : "Access"}
+          </p>
+          <p className="mt-0.5 text-[13px] font-semibold text-stone-800 dark:text-stone-100">
+            {form.visibility === "private"
+              ? form.participantsCount || 0
+              : "Public"}
+          </p>
+        </div>
       </div>
 
-      {/* Footer: updated at + quick actions */}
-      <div className="mt-3.5 flex items-center justify-between border-t border-stone-100 pt-2.5">
-        <span className="text-[10.5px] text-stone-400">
+      <div className="mt-2.5 flex items-center justify-between">
+        <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
           Updated {formatDate(form.updatedAt)}
         </span>
 
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-0.5">
           {form.status === "open" ? (
             <button
               type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                openPublic();
-              }}
-              className="rounded-lg p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-orange-600"
+              onClick={openPublic}
+              className="flex h-6 w-6 items-center justify-center rounded text-stone-400 transition-colors hover:bg-stone-100 hover:text-teal-600 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-teal-400"
               title="Open public view"
             >
               <IconExternal className="h-3.5 w-3.5" />
@@ -313,7 +458,7 @@ const FormCard = ({ form, role, onAction }) => {
               e.stopPropagation();
               openResponses();
             }}
-            className="rounded-lg px-2 py-1 text-[11px] font-semibold text-orange-600 transition-colors hover:bg-orange-50"
+            className="rounded px-2 py-1 text-[10.5px] font-semibold text-teal-600 transition-colors hover:bg-teal-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
           >
             Responses
           </button>
@@ -324,39 +469,56 @@ const FormCard = ({ form, role, onAction }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Mobile form row
+// ─────────────────────────────────────────────────────────────
+const MobileFormRow = ({ form, onAction }) => {
+  const navigate = useNavigate();
+  const typeMeta = FORM_TYPE_META[form.type] || FORM_TYPE_META.form;
+  const statusMeta = STATUS_META[form.status] || STATUS_META.draft;
+
+  return (
+    <button
+      type="button"
+      onClick={() => navigate(`/forms/${form._id}/edit`)}
+      className="flex w-full items-center gap-3 border-b border-stone-100 bg-white px-4 py-3 text-left transition-colors active:bg-stone-50 dark:border-stone-800/60 dark:bg-stone-950 dark:active:bg-stone-900"
+    >
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${typeMeta.bg} ${typeMeta.text}`}
+      >
+        <TypeIcon type={form.type} className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-[13.5px] font-semibold text-stone-900 dark:text-stone-100">
+            {form.title || "Untitled form"}
+          </span>
+          <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusMeta.dot}`} />
+        </span>
+        <span className="mt-0.5 block truncate text-[11px] text-stone-500 dark:text-stone-400">
+          {plural(form.responseCount || 0, "response")}
+          <span className="mx-1 text-stone-300 dark:text-stone-600">·</span>
+          {typeMeta.label.toLowerCase()}
+        </span>
+      </span>
+      <span className="flex shrink-0 items-center gap-1">
+        <span className="text-[10px] text-stone-400 dark:text-stone-500">
+          {formatShortDate(form.updatedAt)}
+        </span>
+        <CardMenu form={form} onAction={onAction} />
+      </span>
+    </button>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Create modal
 // ─────────────────────────────────────────────────────────────
 const TYPE_OPTIONS = [
-  {
-    id: "form",
-    label: "Blank form",
-    desc: "Start from scratch with any fields you want.",
-    icon: "📝",
-  },
-  {
-    id: "quiz",
-    label: "Quiz",
-    desc: "Score respondents, set correct answers and points.",
-    icon: "🎯",
-  },
-  {
-    id: "survey",
-    label: "Survey",
-    desc: "Collect opinions and general feedback.",
-    icon: "📊",
-  },
-  {
-    id: "feedback",
-    label: "Feedback",
-    desc: "Ask for reviews or suggestions.",
-    icon: "💬",
-  },
-  {
-    id: "attendance",
-    label: "Attendance",
-    desc: "Check who showed up. Good for events and classes.",
-    icon: "✅",
-  },
+  { id: "form", label: "Blank form", desc: "Start from scratch.", icon: "📝" },
+  { id: "quiz", label: "Quiz", desc: "Score respondents.", icon: "🎯" },
+  { id: "survey", label: "Survey", desc: "Collect opinions.", icon: "📊" },
+  { id: "feedback", label: "Feedback", desc: "Ask for reviews.", icon: "💬" },
+  { id: "attendance", label: "Attendance", desc: "Track who showed up.", icon: "✅" },
 ];
 
 const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
@@ -378,7 +540,7 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-stone-900/40 backdrop-blur-[3px] sm:items-center">
+    <div className="fixed inset-0 z-[70] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
       <div
         className="absolute inset-0"
         onClick={() => !creating && onClose()}
@@ -386,38 +548,33 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
       />
       <form
         onSubmit={handleSubmit}
-        className="relative z-10 flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl bg-white shadow-2xl sm:rounded-3xl"
+        className="relative z-10 flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-xl bg-white shadow-2xl dark:bg-stone-900 sm:rounded-xl"
       >
-        {/* Header */}
         <div
-          className="flex items-center justify-between border-b border-stone-100 px-4 pb-3 sm:px-5"
+          className="flex items-center justify-between border-b border-stone-100 px-4 pb-3 dark:border-stone-800 sm:px-5"
           style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}
         >
           <div>
-            <h2 className="text-[15px] font-semibold tracking-tight text-stone-900">
+            <h2 className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
               New form
             </h2>
-            <p className="mt-0.5 text-[11.5px] text-stone-400">
-              Pick a type, give it a name, you can edit everything later.
+            <p className="mt-0.5 text-[11.5px] text-stone-400 dark:text-stone-500">
+              Pick a type, give it a name, edit later.
             </p>
           </div>
           <button
             type="button"
             onClick={onClose}
             disabled={creating}
-            className="flex h-8 w-8 items-center justify-center rounded-lg text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-40"
+            className="flex h-8 w-8 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-40 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
             aria-label="Close"
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className="h-4 w-4">
-              <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
-            </svg>
+            <IconClose className="h-4 w-4" />
           </button>
         </div>
 
-        {/* Body */}
         <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-4 sm:px-5">
-          {/* Type picker */}
-          <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-stone-400">
+          <p className="mb-2 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
             Type
           </p>
           <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -428,22 +585,24 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
                   key={t.id}
                   type="button"
                   onClick={() => setType(t.id)}
-                  className={`flex items-start gap-2.5 rounded-xl border p-3 text-left transition-all duration-150 ${
+                  className={`flex items-start gap-2.5 rounded-lg border p-3 text-left transition-all duration-150 ${
                     active
-                      ? "border-orange-300 bg-orange-50/70 ring-2 ring-orange-500/10"
-                      : "border-stone-200 hover:border-stone-300 hover:bg-stone-50"
+                      ? "border-teal-400 bg-teal-50/70 ring-2 ring-teal-500/15 dark:border-teal-500/60 dark:bg-teal-500/10 dark:ring-teal-500/20"
+                      : "border-stone-200 hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:hover:border-stone-600 dark:hover:bg-stone-800"
                   }`}
                 >
                   <span className="text-lg leading-none">{t.icon}</span>
                   <span className="min-w-0 flex-1">
                     <span
                       className={`block text-[12.5px] font-semibold ${
-                        active ? "text-orange-700" : "text-stone-800"
+                        active
+                          ? "text-teal-700 dark:text-teal-300"
+                          : "text-stone-800 dark:text-stone-100"
                       }`}
                     >
                       {t.label}
                     </span>
-                    <span className="mt-0.5 block text-[11px] leading-snug text-stone-500">
+                    <span className="mt-0.5 block text-[11px] leading-snug text-stone-500 dark:text-stone-400">
                       {t.desc}
                     </span>
                   </span>
@@ -452,11 +611,10 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
             })}
           </div>
 
-          {/* Title */}
           <div className="mt-5">
             <label
               htmlFor="form-title"
-              className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500"
+              className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
             >
               Title
             </label>
@@ -467,17 +625,16 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
               onChange={(e) => setTitle(e.target.value)}
               placeholder="e.g. Team feedback Q1"
               autoFocus
-              className="w-full rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10"
+              className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
             />
           </div>
 
-          {/* Description */}
           <div className="mt-4">
             <label
               htmlFor="form-description"
-              className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500"
+              className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
             >
-              Description <span className="text-stone-300">(optional)</span>
+              Description <span className="text-stone-300 dark:text-stone-600">(optional)</span>
             </label>
             <textarea
               id="form-description"
@@ -485,27 +642,18 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               placeholder="What's this form about?"
-              className="w-full resize-none rounded-xl border border-stone-200 bg-white px-3.5 py-2.5 text-[13.5px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10"
+              className="w-full resize-none rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[13.5px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
             />
           </div>
 
-          {/* Visibility */}
           <div className="mt-4">
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-stone-500">
+            <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
               Who can fill it
             </p>
             <div className="grid grid-cols-2 gap-2">
               {[
-                {
-                  id: "public",
-                  label: "Anyone",
-                  desc: "Public link, no password",
-                },
-                {
-                  id: "private",
-                  label: "Invited only",
-                  desc: "You add emails, they get a password",
-                },
+                { id: "public", label: "Anyone", desc: "Public link" },
+                { id: "private", label: "Invited only", desc: "You send access" },
               ].map((v) => {
                 const active = visibility === v.id;
                 return (
@@ -513,20 +661,22 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
                     key={v.id}
                     type="button"
                     onClick={() => setVisibility(v.id)}
-                    className={`rounded-xl border p-3 text-left transition-all duration-150 ${
+                    className={`rounded-lg border p-3 text-left transition-all duration-150 ${
                       active
-                        ? "border-orange-300 bg-orange-50/70 ring-2 ring-orange-500/10"
-                        : "border-stone-200 hover:border-stone-300 hover:bg-stone-50"
+                        ? "border-teal-400 bg-teal-50/70 ring-2 ring-teal-500/15 dark:border-teal-500/60 dark:bg-teal-500/10 dark:ring-teal-500/20"
+                        : "border-stone-200 hover:border-stone-300 hover:bg-stone-50 dark:border-stone-700 dark:hover:border-stone-600 dark:hover:bg-stone-800"
                     }`}
                   >
                     <span
                       className={`block text-[12.5px] font-semibold ${
-                        active ? "text-orange-700" : "text-stone-800"
+                        active
+                          ? "text-teal-700 dark:text-teal-300"
+                          : "text-stone-800 dark:text-stone-100"
                       }`}
                     >
                       {v.label}
                     </span>
-                    <span className="mt-0.5 block text-[11px] leading-snug text-stone-500">
+                    <span className="mt-0.5 block text-[11px] leading-snug text-stone-500 dark:text-stone-400">
                       {v.desc}
                     </span>
                   </button>
@@ -536,34 +686,24 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
           </div>
         </div>
 
-        {/* Footer */}
         <div
-          className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 pt-3 sm:px-5"
-          style={{
-            paddingBottom: "max(env(safe-area-inset-bottom), 0.875rem)",
-          }}
+          className="flex items-center justify-end gap-2 border-t border-stone-100 px-4 py-3 dark:border-stone-800 sm:px-5"
+          style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)" }}
         >
           <button
             type="button"
             onClick={onClose}
             disabled={creating}
-            className="rounded-full px-4 py-2 text-[12.5px] font-semibold text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40"
+            className="rounded-md px-3.5 py-2 text-[12.5px] font-semibold text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
           >
             Cancel
           </button>
           <button
             type="submit"
             disabled={creating}
-            className="rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-5 py-2.5 text-[12.5px] font-semibold text-white shadow-md shadow-orange-500/25 transition-all duration-200 hover:shadow-lg hover:shadow-orange-500/35 active:scale-95 disabled:opacity-60"
+            className="rounded-md bg-teal-600 px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:opacity-50 dark:bg-teal-500 dark:hover:bg-teal-400"
           >
-            {creating ? (
-              <span className="inline-flex items-center gap-2">
-                <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
-                Creating…
-              </span>
-            ) : (
-              "Create form"
-            )}
+            {creating ? "Creating…" : "Create form"}
           </button>
         </div>
       </form>
@@ -574,36 +714,34 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
 // ─────────────────────────────────────────────────────────────
 // Confirm delete modal
 // ─────────────────────────────────────────────────────────────
-const ConfirmDeleteModal = ({ open, form, onClose, onConfirm, deleting }) => {
-  if (!open || !form) return null;
+const ConfirmDeleteModal = ({ form, onClose, onConfirm, deleting }) => {
+  if (!form) return null;
   return (
-    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-stone-900/40 px-4 backdrop-blur-[3px]">
+    <div className="fixed inset-0 z-[80] flex items-center justify-center bg-stone-900/50 px-4 backdrop-blur-[3px] dark:bg-black/60">
       <div className="absolute inset-0" onClick={() => !deleting && onClose()} aria-hidden />
-      <div className="relative z-10 w-full max-w-sm overflow-hidden rounded-2xl bg-white p-5 shadow-2xl">
+      <div className="relative z-10 w-full max-w-sm rounded-lg bg-white p-5 shadow-2xl dark:bg-stone-900">
         <div className="flex items-start gap-3">
-          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-50 text-red-600">
-            <IconTrash className="h-5 w-5" />
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-red-50 text-red-500 dark:bg-red-500/15 dark:text-red-400">
+            <IconTrash className="h-4 w-4" />
           </span>
           <div className="min-w-0 flex-1">
-            <h3 className="text-[15px] font-semibold tracking-tight text-stone-900">
-              Delete this form?
+            <h3 className="text-[14.5px] font-semibold text-stone-900 dark:text-stone-100">
+              Delete form?
             </h3>
-            <p className="mt-1 text-[12.5px] leading-relaxed text-stone-500">
-              <span className="font-medium text-stone-700">
-                {form.title || "Untitled form"}
+            <p className="mt-1 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+              <span className="font-medium text-stone-700 dark:text-stone-300">
+                "{form.title || "Untitled form"}"
               </span>{" "}
-              and all of its responses will be permanently deleted. This can't
-              be undone.
+              and all of its responses will be permanently deleted. This can't be undone.
             </p>
           </div>
         </div>
-
         <div className="mt-5 flex items-center justify-end gap-2">
           <button
             type="button"
             onClick={onClose}
             disabled={deleting}
-            className="rounded-full px-4 py-2 text-[12.5px] font-semibold text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40"
+            className="rounded-md px-3.5 py-2 text-[12.5px] font-semibold text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-800 disabled:opacity-40 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
           >
             Cancel
           </button>
@@ -611,9 +749,9 @@ const ConfirmDeleteModal = ({ open, form, onClose, onConfirm, deleting }) => {
             type="button"
             onClick={onConfirm}
             disabled={deleting}
-            className="rounded-full bg-red-500 px-4 py-2.5 text-[12.5px] font-semibold text-white shadow-md shadow-red-500/25 transition-all hover:bg-red-600 active:scale-95 disabled:opacity-60"
+            className="rounded-md bg-red-600 px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm shadow-red-500/25 transition-all hover:bg-red-700 active:scale-[0.98] disabled:opacity-50 dark:bg-red-500 dark:hover:bg-red-400"
           >
-            {deleting ? "Deleting…" : "Delete forever"}
+            {deleting ? "Deleting…" : "Delete"}
           </button>
         </div>
       </div>
@@ -622,62 +760,15 @@ const ConfirmDeleteModal = ({ open, form, onClose, onConfirm, deleting }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Empty state
-// ─────────────────────────────────────────────────────────────
-const EmptyState = ({ onCreate, variant = "owned" }) => (
-  <div className="flex flex-col items-center px-4 py-14 text-center">
-    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-orange-50">
-      <svg
-        viewBox="0 0 24 24"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.6"
-        className="h-7 w-7 text-orange-500"
-      >
-        <path
-          d="M9 12h6M9 16h6M9 8h6M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    </div>
-    <h3 className="mt-4 text-[15px] font-semibold tracking-tight text-stone-900">
-      {variant === "owned"
-        ? "No forms yet"
-        : variant === "collaborated"
-        ? "Nothing shared with you"
-        : "No forms match"}
-    </h3>
-    <p className="mt-1.5 max-w-xs text-[12.5px] leading-relaxed text-stone-500">
-      {variant === "owned"
-        ? "Create your first form, quiz, survey or attendance sheet. It takes ten seconds."
-        : variant === "collaborated"
-        ? "When someone adds you as a collaborator on a form, it'll show up here."
-        : "Try a different filter or search term."}
-    </p>
-    {variant === "owned" ? (
-      <button
-        type="button"
-        onClick={onCreate}
-        className="mt-5 inline-flex items-center gap-2 rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-4 py-2.5 text-[12.5px] font-semibold text-white shadow-md shadow-orange-500/25 transition-all hover:shadow-lg hover:shadow-orange-500/35 active:scale-95"
-      >
-        <IconPlus className="h-3.5 w-3.5" />
-        Create a form
-      </button>
-    ) : null}
-  </div>
-);
-
-// ─────────────────────────────────────────────────────────────
-// Page
+// Main page
 // ─────────────────────────────────────────────────────────────
 const MyForms = () => {
   const navigate = useNavigate();
 
   const [tab, setTab] = useState("owned"); // "owned" | "collaborated"
   const [search, setSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("all"); // all | open | draft | closed
-
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [typeFilter, setTypeFilter] = useState("all");
   const [createOpen, setCreateOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(null);
   const [toast, setToast] = useState("");
@@ -697,10 +788,10 @@ const MyForms = () => {
     setTimeout(() => setToast(""), 2400);
   };
 
-  // Filter + search
-  const filterForms = (list) => {
+  const applyFilters = (list) => {
     let out = list;
     if (statusFilter !== "all") out = out.filter((f) => f.status === statusFilter);
+    if (typeFilter !== "all") out = out.filter((f) => f.type === typeFilter);
     const q = search.trim().toLowerCase();
     if (q) {
       out = out.filter(
@@ -712,16 +803,47 @@ const MyForms = () => {
     return out;
   };
 
-  const visibleOwned = useMemo(() => filterForms(owned), [owned, search, statusFilter]);
+  const visibleOwned = useMemo(
+    () => applyFilters(owned),
+    [owned, search, statusFilter, typeFilter]
+  );
   const visibleCollab = useMemo(
-    () => filterForms(collaborated),
-    [collaborated, search, statusFilter]
+    () => applyFilters(collaborated),
+    [collaborated, search, statusFilter, typeFilter]
   );
 
   const currentList = tab === "owned" ? visibleOwned : visibleCollab;
-  const totalCount = owned.length + collaborated.length;
+  const allForms = useMemo(
+    () => [...owned, ...collaborated],
+    [owned, collaborated]
+  );
 
-  // ─── Handlers ────────────────────────────────────────────────
+  const stats = useMemo(() => {
+    const total = allForms.length;
+    const responses = allForms.reduce(
+      (sum, f) => sum + (f.responseCount || 0),
+      0
+    );
+    const open = allForms.filter((f) => f.status === "open").length;
+    const draft = allForms.filter((f) => f.status === "draft").length;
+    return { total, responses, open, draft };
+  }, [allForms]);
+
+  const statusCounts = useMemo(() => {
+    const c = { all: allForms.length, draft: 0, open: 0, closed: 0 };
+    for (const f of allForms) if (c[f.status] != null) c[f.status]++;
+    return c;
+  }, [allForms]);
+
+  const typeCounts = useMemo(() => {
+    const c = { all: allForms.length };
+    for (const f of allForms) c[f.type] = (c[f.type] || 0) + 1;
+    return c;
+  }, [allForms]);
+
+  const isFiltered =
+    search.trim() || statusFilter !== "all" || typeFilter !== "all";
+
   const handleCreate = async (payload) => {
     try {
       const res = await createForm(payload).unwrap();
@@ -741,29 +863,24 @@ const MyForms = () => {
         case "edit":
           navigate(`/forms/${form._id}/edit`);
           break;
-
         case "responses":
           navigate(`/forms/${form._id}/responses`);
           break;
-
-        case "duplicate": {
+        case "duplicate":
           await duplicateForm(form._id).unwrap();
           showToast("Duplicated.");
+          refetch();
           break;
-        }
-
-        case "publish": {
+        case "publish":
           await publishForm(form._id).unwrap();
           showToast("Form published. Link is live.");
+          refetch();
           break;
-        }
-
-        case "close": {
+        case "close":
           await closeForm(form._id).unwrap();
           showToast("Form closed.");
+          refetch();
           break;
-        }
-
         case "copy-link": {
           const url = `${window.location.origin}/forms/${form.slug}`;
           try {
@@ -774,11 +891,9 @@ const MyForms = () => {
           }
           break;
         }
-
         case "delete":
           setConfirmDelete(form);
           break;
-
         default:
           break;
       }
@@ -793,197 +908,400 @@ const MyForms = () => {
       await deleteForm(confirmDelete._id).unwrap();
       showToast("Form deleted.");
       setConfirmDelete(null);
+      refetch();
     } catch (err) {
       showToast(err?.data?.message || "Couldn't delete the form.");
     }
   };
 
   return (
-    <div className="flex min-h-dvh w-full flex-col bg-[#f7f5f0] text-stone-900 antialiased">
-      {/* ─── Header ────────────────────────────────────────── */}
-      <header
-        className="sticky top-0 z-30 border-b border-stone-200/70 bg-white/85 backdrop-blur-xl"
-        style={{ paddingTop: "env(safe-area-inset-top)" }}
-      >
-        <div className="mx-auto flex max-w-6xl items-center gap-2.5 px-3 py-2.5 sm:gap-3 sm:px-6 sm:py-3.5">
-          <Link to="/chat" className="shrink-0" aria-label="Back to chat">
-            <XamutMark className="h-9 w-9" />
+    <div className="flex h-dvh w-full overflow-hidden bg-white text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+      {/* ── Desktop sidebar ──────────────────────────────── */}
+      <aside className="hidden shrink-0 flex-col border-r border-stone-200/70 bg-stone-50/50 dark:border-stone-800/70 dark:bg-stone-900/40 md:flex md:w-[260px]">
+        <div className="flex h-14 items-center gap-2.5 border-b border-stone-200/70 px-4 dark:border-stone-800/70">
+          <Link to="/chat" className="flex items-center gap-2.5">
+            <XamutMark className="h-7 w-7" />
+            <span className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+              Xamut
+            </span>
+          </Link>
+        </div>
+
+        <div className="px-3 pt-4">
+          <Link
+            to="/chat"
+            className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-[13px] font-medium text-stone-600 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+          >
+            <IconArrowLeft className="h-4 w-4 text-stone-400 dark:text-stone-500" />
+            Back to chat
+          </Link>
+        </div>
+
+        <div className="px-3 pt-4">
+          <div className="grid grid-cols-2 gap-0.5 rounded-md border border-stone-200/70 bg-white p-0.5 dark:border-stone-800 dark:bg-stone-900">
+            {[
+              { id: "owned", label: "Mine", count: owned.length },
+              { id: "collaborated", label: "Shared", count: collaborated.length },
+            ].map((t) => {
+              const active = tab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTab(t.id)}
+                  className={`flex items-center justify-center gap-1 rounded px-2 py-1.5 text-[11.5px] font-semibold transition-colors ${
+                    active
+                      ? "bg-teal-50 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100"
+                  }`}
+                >
+                  {t.label}
+                  <span
+                    className={`text-[10px] ${
+                      active
+                        ? "text-teal-600 dark:text-teal-400"
+                        : "text-stone-400 dark:text-stone-500"
+                    }`}
+                  >
+                    {t.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="px-3 pt-5">
+          <p className="px-2.5 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+            Status
+          </p>
+          <div className="space-y-0.5">
+            {STATUS_FILTERS.map((s) => {
+              const active = statusFilter === s.id;
+              const count = statusCounts[s.id] ?? 0;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setStatusFilter(s.id)}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors ${
+                    active
+                      ? "bg-teal-50 font-semibold text-teal-700 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
+                  }`}
+                >
+                  <span className="min-w-0 flex-1 truncate">{s.label}</span>
+                  <span
+                    className={`shrink-0 text-[10.5px] ${
+                      active
+                        ? "text-teal-600 dark:text-teal-400"
+                        : "text-stone-400 dark:text-stone-500"
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="px-3 pt-5">
+          <p className="px-2.5 pb-2 text-[10px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+            Type
+          </p>
+          <div className="space-y-0.5">
+            {TYPE_FILTERS.map((t) => {
+              const active = typeFilter === t.id;
+              const count = typeCounts[t.id] ?? 0;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTypeFilter(t.id)}
+                  className={`flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-[13px] transition-colors ${
+                    active
+                      ? "bg-teal-50 font-semibold text-teal-700 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "text-stone-600 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
+                  }`}
+                >
+                  <span className="min-w-0 flex-1 truncate">{t.label}</span>
+                  <span
+                    className={`shrink-0 text-[10.5px] ${
+                      active
+                        ? "text-teal-600 dark:text-teal-400"
+                        : "text-stone-400 dark:text-stone-500"
+                    }`}
+                  >
+                    {count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="flex-1" />
+
+        <div className="border-t border-stone-200/70 p-3 dark:border-stone-800/70">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-md border border-stone-200/70 bg-white p-2.5 dark:border-stone-800 dark:bg-stone-900">
+              <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                Responses
+              </p>
+              <p className="mt-0.5 text-[16px] font-semibold text-stone-900 dark:text-stone-100">
+                {stats.responses}
+              </p>
+            </div>
+            <div className="rounded-md border border-stone-200/70 bg-white p-2.5 dark:border-stone-800 dark:bg-stone-900">
+              <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                Open
+              </p>
+              <p className="mt-0.5 text-[16px] font-semibold text-emerald-600 dark:text-emerald-400">
+                {stats.open}
+              </p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      {/* ── Main area ────────────────────────────────────── */}
+      <main className="relative flex h-full min-w-0 flex-1 flex-col bg-white dark:bg-stone-950">
+        <header
+          className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/90 px-3 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/90 sm:px-5"
+          style={{ paddingTop: "env(safe-area-inset-top)" }}
+        >
+          <Link to="/chat" className="flex items-center gap-2 md:hidden">
+            <XamutMark className="h-7 w-7" />
           </Link>
 
           <div className="min-w-0 flex-1">
-            <h1 className="truncate text-[15px] font-semibold tracking-tight text-stone-900 sm:text-base">
-              Forms
+            <h1 className="truncate text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100 md:text-[17px]">
+              My forms
             </h1>
-            <p className="truncate text-[10.5px] text-stone-400 sm:text-[11px]">
-              {totalCount === 0
-                ? "Create, share, collect responses"
-                : `${totalCount} ${totalCount === 1 ? "form" : "forms"} total`}
+            <p className="hidden truncate text-[11px] text-stone-400 dark:text-stone-500 md:block">
+              {stats.total} total
+              <span className="mx-1.5 text-stone-300 dark:text-stone-600">·</span>
+              {stats.open} open
+              <span className="mx-1.5 text-stone-300 dark:text-stone-600">·</span>
+              {stats.draft} draft{stats.draft === 1 ? "" : "s"}
             </p>
+          </div>
+
+          <div className="relative hidden md:block">
+            <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-stone-500" />
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search forms…"
+              className="w-56 rounded-md border border-stone-200 bg-stone-50 py-1.5 pl-8 pr-3 text-[12.5px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:bg-stone-900"
+            />
           </div>
 
           <button
             type="button"
             onClick={() => setCreateOpen(true)}
-            className="flex shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-orange-500 to-orange-600 px-3 py-2 text-[12px] font-semibold text-white shadow-sm shadow-orange-500/25 transition-all hover:shadow-md hover:shadow-orange-500/35 active:scale-95 sm:px-4 sm:py-2.5 sm:text-[12.5px]"
+            className="flex h-9 shrink-0 items-center gap-1.5 rounded-md bg-teal-600 px-3 text-[12.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.97] dark:bg-teal-500 dark:hover:bg-teal-400"
           >
-            <IconPlus className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
+            <IconPlus className="h-3.5 w-3.5" />
             <span className="hidden sm:inline">New form</span>
             <span className="sm:hidden">New</span>
           </button>
-        </div>
+        </header>
 
-        {/* Tabs + controls */}
-        <div className="mx-auto max-w-6xl px-3 pb-2.5 sm:px-6 sm:pb-3.5">
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-            {/* Tabs */}
-            <div className="flex shrink-0 items-center gap-1 rounded-full bg-stone-100/80 p-1">
-              {[
-                { id: "owned", label: "My forms", count: owned.length },
-                {
-                  id: "collaborated",
-                  label: "Shared",
-                  count: collaborated.length,
-                },
-              ].map((t) => {
-                const active = tab === t.id;
-                return (
-                  <button
-                    key={t.id}
-                    type="button"
-                    onClick={() => setTab(t.id)}
-                    className={`flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11.5px] font-semibold transition-colors ${
-                      active
-                        ? "bg-white text-orange-600 shadow-sm ring-1 ring-stone-900/5"
-                        : "text-stone-500 hover:text-stone-800"
-                    }`}
-                  >
-                    {t.label}
-                    <span
-                      className={`rounded-full px-1.5 py-0.5 text-[9.5px] font-bold ${
-                        active
-                          ? "bg-orange-100 text-orange-700"
-                          : "bg-stone-200/70 text-stone-500"
-                      }`}
-                    >
-                      {t.count}
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* Search */}
-            <div className="relative min-w-0 flex-1">
-              <svg
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400"
-              >
-                <circle cx="11" cy="11" r="7" />
-                <path d="M21 21l-4.3-4.3" strokeLinecap="round" />
-              </svg>
+        {/* Mobile filter bar */}
+        <div className="border-b border-stone-200/70 bg-white dark:border-stone-800/70 dark:bg-stone-950 md:hidden">
+          <div className="px-3 pt-3">
+            <div className="relative">
+              <IconSearch className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-stone-400 dark:text-stone-500" />
               <input
                 type="text"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
                 placeholder="Search forms…"
-                className="w-full rounded-full border border-stone-200/80 bg-white py-1.5 pl-8 pr-3 text-[12.5px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-orange-400 focus:ring-4 focus:ring-orange-500/10"
+                className="w-full rounded-md border border-stone-200 bg-stone-50 py-2 pl-8 pr-3 text-[13px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:bg-white focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500"
               />
             </div>
+          </div>
 
-            {/* Status filter */}
-            <div className="scrollbar-none flex shrink-0 items-center gap-1 overflow-x-auto">
-              {[
-                { id: "all", label: "All" },
-                { id: "open", label: "Open" },
-                { id: "draft", label: "Draft" },
-                { id: "closed", label: "Closed" },
-              ].map((f) => {
-                const active = statusFilter === f.id;
-                return (
-                  <button
-                    key={f.id}
-                    type="button"
-                    onClick={() => setStatusFilter(f.id)}
-                    className={`shrink-0 rounded-full px-2.5 py-1 text-[11px] font-semibold transition-colors ${
-                      active
-                        ? "bg-orange-500 text-white shadow-sm shadow-orange-500/25"
-                        : "bg-stone-100 text-stone-500 hover:bg-stone-200"
-                    }`}
-                  >
-                    {f.label}
-                  </button>
-                );
-              })}
-            </div>
+          <div className="flex items-center gap-1.5 px-3 py-2.5 overflow-x-auto scrollbar-thin">
+            {[
+              { id: "owned", label: "Mine", count: owned.length },
+              { id: "collaborated", label: "Shared", count: collaborated.length },
+            ].map((t) => {
+              const active = tab === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTab(t.id)}
+                  className={`shrink-0 rounded-md border px-2.5 py-1 text-[11.5px] font-semibold transition-colors ${
+                    active
+                      ? "border-teal-400 bg-teal-50 text-teal-700 dark:border-teal-500/60 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "border-stone-200 bg-white text-stone-600 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+                  }`}
+                >
+                  {t.label} {t.count}
+                </button>
+              );
+            })}
+            <span className="mx-1 h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-700" />
+            {STATUS_FILTERS.map((s) => {
+              const active = statusFilter === s.id;
+              return (
+                <button
+                  key={s.id}
+                  type="button"
+                  onClick={() => setStatusFilter(s.id)}
+                  className={`shrink-0 rounded-md border px-2.5 py-1 text-[11.5px] font-semibold transition-colors ${
+                    active
+                      ? "border-teal-400 bg-teal-50 text-teal-700 dark:border-teal-500/60 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "border-stone-200 bg-white text-stone-600 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+                  }`}
+                >
+                  {s.label}
+                </button>
+              );
+            })}
+            <span className="mx-1 h-5 w-px shrink-0 bg-stone-200 dark:bg-stone-700" />
+            {TYPE_FILTERS.map((t) => {
+              const active = typeFilter === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setTypeFilter(t.id)}
+                  className={`shrink-0 rounded-md border px-2.5 py-1 text-[11.5px] font-semibold transition-colors ${
+                    active
+                      ? "border-teal-400 bg-teal-50 text-teal-700 dark:border-teal-500/60 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "border-stone-200 bg-white text-stone-600 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
           </div>
         </div>
-      </header>
 
-      {/* ─── Body ──────────────────────────────────────────── */}
-      <main className="min-h-0 flex-1">
-        <div className="mx-auto max-w-6xl px-3 pb-8 pt-4 sm:px-6 sm:pt-6">
-          {/* Loading skeletons */}
+        <div className="scrollbar-thin flex-1 overflow-y-auto">
+          {/* Loading */}
           {isLoading ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {[1, 2, 3, 4, 5, 6].map((i) => (
-                <div
-                  key={i}
-                  className="h-44 animate-pulse rounded-2xl bg-white/70 shadow-sm"
-                />
-              ))}
+            <div>
+              <div className="md:hidden">
+                {[1, 2, 3, 4, 5].map((i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-3 border-b border-stone-100 bg-white px-4 py-3 dark:border-stone-800/60 dark:bg-stone-950"
+                  >
+                    <div className="h-9 w-9 shrink-0 animate-pulse rounded-md bg-stone-100 dark:bg-stone-800/60" />
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <div className="h-3 w-2/3 animate-pulse rounded bg-stone-100 dark:bg-stone-800/60" />
+                      <div className="h-2.5 w-1/3 animate-pulse rounded bg-stone-100 dark:bg-stone-800/60" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="hidden p-5 md:block">
+                <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-4">
+                  {[1, 2, 3, 4, 5, 6, 7, 8].map((i) => (
+                    <div
+                      key={i}
+                      className="h-[180px] animate-pulse rounded-lg border border-stone-200/80 bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60"
+                    />
+                  ))}
+                </div>
+              </div>
             </div>
           ) : null}
 
-          {/* Empty states */}
+          {/* Empty state */}
           {!isLoading && currentList.length === 0 ? (
-            search.trim() || statusFilter !== "all" ? (
-              <EmptyState variant="filtered" />
-            ) : tab === "owned" ? (
-              <EmptyState variant="owned" onCreate={() => setCreateOpen(true)} />
-            ) : (
-              <EmptyState variant="collaborated" />
-            )
-          ) : null}
-
-          {/* Grid */}
-          {!isLoading && currentList.length > 0 ? (
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {currentList.map((f) => (
-                <FormCard
-                  key={f._id}
-                  form={f}
-                  role={tab === "owned" ? "owner" : "collaborator"}
-                  onAction={handleAction}
-                />
-              ))}
+            <div className="flex flex-col items-center justify-center px-6 py-20 text-center">
+              <div className="flex h-14 w-14 items-center justify-center rounded-lg bg-teal-50 text-teal-600 dark:bg-teal-500/15 dark:text-teal-400">
+                <TypeIcon type="form" className="h-6 w-6" />
+              </div>
+              <h2 className="mt-4 text-[15px] font-semibold text-stone-900 dark:text-stone-100">
+                {isFiltered
+                  ? "Nothing matches"
+                  : tab === "owned"
+                  ? "No forms yet"
+                  : "Nothing shared with you"}
+              </h2>
+              <p className="mt-1 max-w-xs text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+                {isFiltered
+                  ? "Try clearing your filters or searching for something else."
+                  : tab === "owned"
+                  ? "Create your first form, quiz, survey or attendance sheet. It takes ten seconds."
+                  : "When someone adds you as a collaborator on a form, it'll show up here."}
+              </p>
+              {!isFiltered && tab === "owned" ? (
+                <button
+                  type="button"
+                  onClick={() => setCreateOpen(true)}
+                  className="mt-5 flex items-center gap-1.5 rounded-md bg-teal-600 px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.97] dark:bg-teal-500 dark:hover:bg-teal-400"
+                >
+                  <IconPlus className="h-3.5 w-3.5" />
+                  Create a form
+                </button>
+              ) : null}
             </div>
           ) : null}
 
-          {/* Refreshing hint */}
-          {isFetching && !isLoading ? (
-            <p className="mt-6 text-center text-[11px] text-stone-400">
-              Refreshing…
-            </p>
+          {/* Mobile list */}
+          {!isLoading && currentList.length > 0 ? (
+            <div className="md:hidden">
+              {currentList.map((f) => (
+                <MobileFormRow key={f._id} form={f} onAction={handleAction} />
+              ))}
+              <div className="h-6" />
+            </div>
+          ) : null}
+
+          {/* Desktop grid */}
+          {!isLoading && currentList.length > 0 ? (
+            <div className="hidden p-5 md:block">
+              <div className="mb-3 flex items-center justify-between">
+                <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+                  {currentList.length}{" "}
+                  {currentList.length === 1 ? "form" : "forms"}
+                </p>
+                {isFetching ? (
+                  <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
+                    Refreshing…
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 xl:grid-cols-4">
+                {currentList.map((f) => (
+                  <DesktopFormCard
+                    key={f._id}
+                    form={f}
+                    role={tab === "owned" ? "owner" : "collaborator"}
+                    onAction={handleAction}
+                  />
+                ))}
+              </div>
+            </div>
           ) : null}
         </div>
       </main>
 
-      {/* ─── Toast ────────────────────────────────────────── */}
+      {/* ── Toast ──────────────────────────────────────── */}
       {toast ? (
         <div
           className="pointer-events-none fixed inset-x-0 z-[90] flex justify-center px-4"
           style={{ bottom: "max(env(safe-area-inset-bottom), 1.25rem)" }}
         >
-          <div className="pointer-events-auto max-w-sm rounded-full border border-stone-200/80 bg-stone-900 px-4 py-2.5 text-[12px] font-medium text-white shadow-xl shadow-stone-900/20">
+          <div className="pointer-events-auto max-w-sm rounded-md border border-stone-200/80 bg-stone-900 px-4 py-2.5 text-[12px] font-medium text-white shadow-xl shadow-stone-900/20 dark:border-stone-700 dark:bg-stone-100 dark:text-stone-900">
             {toast}
           </div>
         </div>
       ) : null}
 
-      {/* ─── Modals ───────────────────────────────────────── */}
+      {/* ── Modals ─────────────────────────────────────── */}
       <CreateFormModal
         open={createOpen}
         onClose={() => setCreateOpen(false)}
@@ -992,7 +1310,6 @@ const MyForms = () => {
       />
 
       <ConfirmDeleteModal
-        open={!!confirmDelete}
         form={confirmDelete}
         onClose={() => setConfirmDelete(null)}
         onConfirm={handleConfirmDelete}
