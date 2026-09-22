@@ -35,7 +35,7 @@ import {
   verifyTwilioWebhook,
   listContentTemplates,
   sendWhatsAppMessage,
-} from "../utils/twilioWhatsApp.js";
+} from "../utils/twilioWhatsapp.js";
 
 // ─────────────────────────────────────────────────────────────────────
 // Small helpers
