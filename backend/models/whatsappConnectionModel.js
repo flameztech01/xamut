@@ -2,18 +2,12 @@
 //
 // One row per Xamut user who has connected a WhatsApp number.
 //
-// In the Twilio ISV model we never let a user hand us their own Twilio
-// credentials. Instead:
-//   • We create one Twilio SUBACCOUNT per user (subaccountSid / token).
-//   • We attach a WhatsApp SENDER to that subaccount via Meta Embedded
-//     Signup (senderSid / phoneNumber / wabaId / phoneNumberId).
-//
-// All outbound sends go through the subaccount; all inbound webhooks
+// Single-master-account architecture: every user's WhatsApp number is
+// registered as a Twilio SENDER directly on our master Twilio account
+// via Meta Embedded Signup (senderSid / phoneNumber / wabaId /
+// phoneNumberId). There is no per-user Twilio subaccount — all outbound
+// sends go through the master account, and all inbound webhooks
 // resolve back to a user by matching `phoneNumber` on this row.
-//
-// `subaccountAuthToken` is sensitive — never return it from any API.
-// The only places that need it are the sub-client factory in
-// utils/twilioWhatsApp.js and any future server-side task.
 
 import mongoose from "mongoose";
 
@@ -27,20 +21,8 @@ const whatsappConnectionSchema = new mongoose.Schema(
       required: true,
     },
 
-    // ── Twilio side ──────────────────────────────────────────────
-    // The subaccount we spun up for this user.
-    subaccountSid: {
-      type: String,
-      default: null,
-    },
-    // Kept server-side only. Never exposed over the API.
-    subaccountAuthToken: {
-      type: String,
-      default: null,
-    },
-
     // ── Meta / WhatsApp side ─────────────────────────────────────
-    // The WhatsApp sender registered on the subaccount.
+    // The WhatsApp sender registered on the master account.
     senderSid: {
       type: String,
       default: null,

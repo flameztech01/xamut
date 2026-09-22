@@ -1,17 +1,21 @@
 // controllers/whatsappController.js
 //
-// WhatsApp messaging via Twilio ISV architecture.
+// WhatsApp messaging via Twilio, single-master-account architecture.
 //
 // Flow:
 //   1. User signs up on Xamut.
-//   2. /connect/start    → create a Twilio subaccount for them.
+//   2. /connect/start    → return Meta Embedded Signup config (no
+//                          Twilio subaccount is created — everyone
+//                          shares the master account).
 //   3. Frontend opens Meta Embedded Signup with the config we return.
 //   4. User completes the popup (links their WhatsApp Business number).
 //   5. /connect/callback → hand Meta's code to Twilio; sender gets
-//                          attached to their subaccount.
-//   6. From here, /messages/send sends via the user's subaccount, and
-//      Twilio's incoming webhook lands at /webhook/incoming so we can
-//      route the reply to the right user and store it.
+//                          registered on the master account, and
+//                          conn.senderSid is what ties it to this user.
+//   6. From here, /messages/send sends via the master account
+//      (from = this user's registered number), and Twilio's incoming
+//      webhook lands at /webhook/incoming so we can route the reply
+//      to the right user (by matching the To number) and store it.
 //
 // All Twilio / phone / signature logic lives in utils/twilioWhatsApp.js.
 // This file owns DB writes and HTTP response shaping only.
@@ -24,12 +28,9 @@ import WhatsAppConversation from "../models/whatsappConversationModel.js";
 import WhatsAppMessage from "../models/whatsappMessageModel.js";
 
 import {
-  masterClient,
-  subClient,
   sanitizePhone,
   toWaAddress,
   stripWaPrefix,
-  createSubaccount,
   releaseSender,
   registerSenderFromEmbeddedSignup,
   verifyTwilioWebhook,
@@ -53,10 +54,10 @@ const httpError = (msg, statusCode = 400) => {
 //
 // POST /api/whatsapp/connect/start
 //
-// Creates the user's Twilio subaccount if it doesn't exist yet, then
-// returns the config the frontend needs to open Meta's Embedded
-// Signup popup. Idempotent — calling it when already connected just
-// returns the current state.
+// No Twilio subaccount is created here anymore — every user's sender
+// lives on the master account. This just returns the config the
+// frontend needs to open Meta's Embedded Signup popup. Idempotent —
+// calling it when already connected just returns the current state.
 // ─────────────────────────────────────────────────────────────────────
 export const startConnect = asyncHandler(async (req, res) => {
   let conn = await WhatsAppConnection.findOne({ user: req.user._id });
@@ -74,37 +75,19 @@ export const startConnect = asyncHandler(async (req, res) => {
     });
   }
 
-  if (!conn || !conn.subaccountSid) {
-    let sub;
-    try {
-      sub = await createSubaccount(`xamut-user-${req.user._id}`);
-    } catch (err) {
-      console.error("❌ Twilio subaccount create failed:", err.message);
-      throw httpError(
-        "Could not create your WhatsApp workspace. Try again in a moment.",
-        502
-      );
-    }
-
-    if (!conn) conn = new WhatsAppConnection({ user: req.user._id });
-    conn.subaccountSid = sub.sid;
-    conn.subaccountAuthToken = sub.authToken;
-    conn.status = "pending_signup";
-    await conn.save();
-
-    console.log(
-      `✅ Twilio subaccount created for ${req.user._id}: ${sub.sid}`
-    );
+  if (!conn) {
+    conn = new WhatsAppConnection({ user: req.user._id });
   }
+  conn.status = "pending_signup";
+  await conn.save();
 
   res.status(200).json({
     success: true,
     alreadyConnected: false,
-    subaccountSid: conn.subaccountSid,
     config: {
       fbAppId: process.env.META_APP_ID,
       configId: process.env.META_WA_EMBEDDED_CONFIG_ID,
-      graphApiVersion: process.env.META_GRAPH_VERSION || "v20.0",
+      graphApiVersion: process.env.META_GRAPH_VERSION || "v26.0",
       userEmail: req.user.email || "",
     },
   });
@@ -127,8 +110,8 @@ export const completeConnect = asyncHandler(async (req, res) => {
     );
   }
 
-  const conn = await WhatsAppConnection.findOne({ user: req.user._id });
-  if (!conn || !conn.subaccountSid) {
+  let conn = await WhatsAppConnection.findOne({ user: req.user._id });
+  if (!conn) {
     throw httpError("Call /connect/start before completing the popup.", 409);
   }
 
@@ -139,7 +122,6 @@ export const completeConnect = asyncHandler(async (req, res) => {
       wabaId,
       phoneNumberId,
       businessId,
-      subaccountSid: conn.subaccountSid,
     });
   } catch (err) {
     console.error(
@@ -259,12 +241,9 @@ export const sendMessage = asyncHandler(async (req, res) => {
   }
 
   const conn = await WhatsAppConnection.findOne({ user: req.user._id });
-  if (!conn || conn.status !== "connected" || !conn.subaccountSid) {
+  if (!conn || conn.status !== "connected" || !conn.phoneNumber) {
     throw httpError("Connect your WhatsApp number before sending messages.", 409);
   }
-
-  const client = subClient(conn.subaccountSid, conn.subaccountAuthToken);
-  if (!client) throw httpError("Subaccount credentials missing.", 500);
 
   const from = toWaAddress(conn.phoneNumber);
 
@@ -286,7 +265,7 @@ export const sendMessage = asyncHandler(async (req, res) => {
 
   let twilioMessage;
   try {
-    twilioMessage = await sendWhatsAppMessage(client, {
+    twilioMessage = await sendWhatsAppMessage({
       from,
       to: toWaAddress(cleanTo),
       body,
@@ -541,11 +520,8 @@ export const listTemplates = asyncHandler(async (req, res) => {
     throw httpError("Connect your WhatsApp number first.", 409);
   }
 
-  const client = subClient(conn.subaccountSid, conn.subaccountAuthToken);
-  if (!client) throw httpError("Subaccount credentials missing.", 500);
-
   try {
-    const templates = await listContentTemplates(client);
+    const templates = await listContentTemplates();
     res.status(200).json({ success: true, templates });
   } catch (err) {
     console.error("❌ Template list failed:", err.message);

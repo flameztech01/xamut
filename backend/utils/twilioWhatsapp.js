@@ -1,16 +1,20 @@
 // utils/twilioWhatsApp.js
 //
-// Twilio WhatsApp helpers for the Xamut ISV architecture.
+// Twilio WhatsApp helpers for Xamut.
+//
+// All users share the master Twilio account. Each user's WhatsApp
+// number is registered as a Sender under the master account via
+// Meta Embedded Signup — no subaccounts involved. This sidesteps
+// Twilio's subaccount cap (which trial accounts hit almost
+// immediately) and is simpler: one account, many senders.
 //
 // Responsibilities:
-//   • Master + subaccount client factories
-//   • Subaccount lifecycle (create, release sender)
+//   • Master client factory
 //   • Meta Embedded Signup exchange (code + wabaId + phoneNumberId → sender)
 //   • Phone number normalisation (E.164, "whatsapp:" prefix handling)
 //   • Webhook signature verification
-//   • Content (template) listing on a subaccount
-//   • sendWhatsAppMessage() — a single place where every outbound send
-//     goes through, so error handling stays consistent
+//   • Content (template) listing
+//   • sendWhatsAppMessage() — single place every outbound send goes through
 //
 // Env vars used here:
 //   TWILIO_ACCOUNT_SID            master account SID
@@ -39,16 +43,11 @@ const assertMasterCreds = () => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Clients
+// Client
 // ─────────────────────────────────────────────────────────────────────
 export const masterClient = () => {
   assertMasterCreds();
   return twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
-};
-
-export const subClient = (sid, token) => {
-  if (!sid || !token) return null;
-  return twilio(sid, token);
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -76,22 +75,8 @@ export const stripWaPrefix = (addr) =>
   String(addr || "").replace(/^whatsapp:/i, "");
 
 // ─────────────────────────────────────────────────────────────────────
-// Subaccount lifecycle
+// Sender lifecycle
 // ─────────────────────────────────────────────────────────────────────
-
-// Creates a new Twilio subaccount under the master account.
-// Returns { sid, authToken, friendlyName }.
-export const createSubaccount = async (friendlyName) => {
-  assertMasterCreds();
-  const sub = await masterClient().api.v2010.accounts.create({
-    friendlyName,
-  });
-  return {
-    sid: sub.sid,
-    authToken: sub.authToken,
-    friendlyName: sub.friendlyName,
-  };
-};
 
 // Best-effort release of a WhatsApp sender from Twilio. Used when a
 // user disconnects so the number can be re-registered elsewhere.
@@ -130,7 +115,9 @@ export const releaseSender = async (senderSid) => {
 //
 // Frontend hands us the code + wabaId + phoneNumberId. We POST them to
 // Twilio's Senders API which does the OAuth dance with Meta on our
-// behalf and attaches the WhatsApp sender to the user's subaccount.
+// behalf and attaches the WhatsApp sender to the MASTER account.
+// senderSid on the resulting connection row is what tags a sender to
+// a specific Xamut user — there's no subaccount boundary anymore.
 //
 // Returns a normalised object:
 //   { senderSid, phoneNumber, displayName, qualityRating, messagingLimitTier, raw }
@@ -141,7 +128,6 @@ export const registerSenderFromEmbeddedSignup = async ({
   wabaId,
   phoneNumberId,
   businessId,
-  subaccountSid,
 }) => {
   assertMasterCreds();
 
@@ -149,11 +135,6 @@ export const registerSenderFromEmbeddedSignup = async ({
     const err = new Error(
       "Missing embedded signup payload (code, wabaId, phoneNumberId)."
     );
-    err.statusCode = 400;
-    throw err;
-  }
-  if (!subaccountSid) {
-    const err = new Error("subaccountSid is required to register a sender.");
     err.statusCode = 400;
     throw err;
   }
@@ -169,7 +150,7 @@ export const registerSenderFromEmbeddedSignup = async ({
       phoneNumberId,
       businessId: businessId || undefined,
     }),
-    AccountSid: subaccountSid,
+    AccountSid: process.env.TWILIO_ACCOUNT_SID,
   });
 
   let json;
@@ -253,15 +234,16 @@ export const verifyTwilioWebhook = (req) => {
 // ─────────────────────────────────────────────────────────────────────
 // Content (WhatsApp template) listing
 //
-// Templates live on the Twilio Content API, per subaccount. We expose
-// just enough for the frontend to render a picker.
+// Templates live on the Twilio Content API, on the master account.
+// We expose just enough for the frontend to render a picker.
+//
+// NOTE: Content API templates aren't scoped per-sender in a way this
+// endpoint filters — if you need per-user template isolation later,
+// tag templates by naming convention or maintain your own mapping in
+// Mongo. For now this returns everything visible on the account.
 // ─────────────────────────────────────────────────────────────────────
-export const listContentTemplates = async (client, limit = 200) => {
-  if (!client) {
-    const err = new Error("Missing Twilio subaccount client.");
-    err.statusCode = 500;
-    throw err;
-  }
+export const listContentTemplates = async (limit = 200) => {
+  const client = masterClient();
   const contents = await client.content.v1.contents.list({ limit });
   return contents.map((c) => ({
     sid: c.sid,
@@ -281,15 +263,8 @@ export const listContentTemplates = async (client, limit = 200) => {
 // `isTwentyFourHourWindow` flag tells the caller whether the failure
 // was the WhatsApp customer service window closing.
 // ─────────────────────────────────────────────────────────────────────
-export const sendWhatsAppMessage = async (
-  client,
-  { from, to, body, mediaUrls, templateSid }
-) => {
-  if (!client) {
-    const err = new Error("Missing Twilio subaccount client.");
-    err.statusCode = 500;
-    throw err;
-  }
+export const sendWhatsAppMessage = async ({ from, to, body, mediaUrls, templateSid }) => {
+  const client = masterClient();
 
   const payload = {
     from,
@@ -339,11 +314,9 @@ export const twilioConfig = {
 
 export default {
   masterClient,
-  subClient,
   sanitizePhone,
   toWaAddress,
   stripWaPrefix,
-  createSubaccount,
   releaseSender,
   registerSenderFromEmbeddedSignup,
   verifyTwilioWebhook,
