@@ -18,6 +18,8 @@ import MyForms from './pages/MyForms.jsx';
 import FormEditor from './pages/FormEditor.jsx';
 import FormResponses from './pages/FormResponses.jsx';
 import PublicForm from './pages/PublicForm.jsx';
+import WhatsAppSettings from './pages/WhatsappSettings.jsx';
+import WhatsAppInbox from './pages/WhatsappInbox.jsx';
 import PrivateRoute from './components/PrivateRoute.jsx';
 
 const router = createBrowserRouter([
@@ -47,6 +49,10 @@ const router = createBrowserRouter([
           { path: 'forms', element: <MyForms /> },
           { path: 'forms/:id/edit', element: <FormEditor /> },
           { path: 'forms/:id/responses', element: <FormResponses /> },
+
+          {path: 'whatsapp', element: <WhatsAppInbox />},
+          {path: 'whatsapp/:id', element: <WhatsAppInbox />},
+          {path: 'settings/whatsapp', element: <WhatsAppSettings />},
         ],
       },
     ],

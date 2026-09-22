@@ -8,6 +8,7 @@ import userRoutes from "./routes/userRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
 import formRoutes from "./routes/formRoutes.js";
 import formAiRoutes from "./routes/formAiRoutes.js";
+import whatsappRoutes from "./routes/whatsappRoutes.js";
 
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
@@ -42,6 +43,7 @@ app.use("/api/users", userRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/forms", formRoutes);
 app.use("/api/form-ai", formAiRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
