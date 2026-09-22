@@ -50,17 +50,111 @@ const formatDuration = (sec) => {
   return `${h}h ${m % 60}m`;
 };
 
+const formatBytes = (bytes) => {
+  if (!bytes || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+// ─────────────────────────────────────────────────────────────
+// Media value helpers
+//
+// Media field answers land here in one of three shapes:
+//   • a plain URL string (legacy `file` fields from before the
+//     media upload feature)
+//   • { url, filename, size, mimetype } (single-file upload)
+//   • [ ...objects ] (multi-file upload)
+//
+// These helpers normalise all three so the renderer doesn't care
+// which shape it received.
+// ─────────────────────────────────────────────────────────────
+const MEDIA_FIELD_TYPES = new Set(["file", "image", "document"]);
+
+const isMediaField = (type) => MEDIA_FIELD_TYPES.has(type);
+
+const mediaValueToUrl = (v) => {
+  if (v == null) return "";
+  if (typeof v === "string") return v;
+  if (typeof v === "object" && typeof v.url === "string") return v.url;
+  return "";
+};
+
+const mediaValueToName = (v) => {
+  if (v == null) return "";
+  if (typeof v === "object") {
+    return v.filename || v.name || "";
+  }
+  if (typeof v === "string") {
+    try {
+      const u = new URL(v);
+      const parts = u.pathname.split("/").filter(Boolean);
+      return decodeURIComponent(parts[parts.length - 1] || "");
+    } catch {
+      return v;
+    }
+  }
+  return "";
+};
+
+const normalizeMediaValue = (value) => {
+  if (value == null) return [];
+  if (Array.isArray(value)) return value.filter((v) => v != null && v !== "");
+  return [value];
+};
+
+const looksLikeImage = (v, kind) => {
+  if (kind === "image") return true;
+  if (typeof v === "object" && typeof v.mimetype === "string") {
+    return v.mimetype.startsWith("image/");
+  }
+  const url = mediaValueToUrl(v);
+  return /\.(jpe?g|png|gif|webp|avif|heic|heif|svg)(?:\?|$)/i.test(url);
+};
+
+// ─────────────────────────────────────────────────────────────
+// Value → display string (for CSV, chips, aria, etc.)
+// ─────────────────────────────────────────────────────────────
 const stripHtmlToText = (v) => {
   if (v === null || v === undefined) return "";
   if (typeof v === "boolean") return v ? "Yes" : "No";
-  if (Array.isArray(v)) return v.map(stripHtmlToText).join(", ");
+  if (Array.isArray(v)) {
+    return v
+      .map((x) => {
+        if (x && typeof x === "object" && typeof x.url === "string") {
+          return x.filename || x.url;
+        }
+        return String(x);
+      })
+      .join(", ");
+  }
+  if (typeof v === "object") {
+    if (typeof v.url === "string") return v.filename || v.url;
+    return "";
+  }
   return String(v);
 };
 
+// ─────────────────────────────────────────────────────────────
+// CSV exporter — media values get flattened to their URLs
+// ─────────────────────────────────────────────────────────────
 const toCSV = (columns, rows) => {
   const esc = (val) => {
     if (val === null || val === undefined) return "";
-    let s = Array.isArray(val) ? val.join("; ") : String(val);
+    let s;
+    if (Array.isArray(val)) {
+      s = val
+        .map((x) => {
+          if (x && typeof x === "object" && typeof x.url === "string")
+            return x.url;
+          return String(x);
+        })
+        .join("; ");
+    } else if (typeof val === "object" && typeof val.url === "string") {
+      s = val.url;
+    } else {
+      s = String(val);
+    }
     if (/[",\n]/.test(s)) s = `"${s.replace(/"/g, '""')}"`;
     return s;
   };
@@ -118,20 +212,15 @@ const getRespondentDisplay = (response, form) => {
   let foundName = String(r.respondentName || "").trim();
   let foundEmail = String(r.respondentEmail || "").trim();
 
-  // Scan the answers for name-ish and email-ish fields when the
-  // explicit respondent fields didn't give us anything.
   if ((!foundName || !foundEmail) && fields.length && answers.length) {
     for (const field of fields) {
       if (field.type === "section") continue;
       const a = answers.find((x) => x.fieldId === field.id);
       if (!a || a.value == null || a.value === "") continue;
 
-      const valueStr = Array.isArray(a.value)
-        ? a.value.map((v) => String(v)).join(", ").trim()
-        : String(a.value).trim();
+      const valueStr = stripHtmlToText(a.value).trim();
       if (!valueStr) continue;
 
-      // Name from a text field whose label looks name-ish
       if (
         !foundName &&
         (field.type === "short_text" || field.type === "long_text") &&
@@ -140,8 +229,6 @@ const getRespondentDisplay = (response, form) => {
         foundName = valueStr;
       }
 
-      // Email from an email-type field, or a field whose label
-      // reads like an email. Only accept it if it looks valid.
       if (
         !foundEmail &&
         (field.type === "email" || EMAIL_LABEL_RE.test(field.label || "")) &&
@@ -154,25 +241,18 @@ const getRespondentDisplay = (response, form) => {
     }
   }
 
-  // If we have an email but no name, try to derive a friendly name
-  // from the local part (jane.doe@x.com -> "Jane Doe"). Only do this
-  // when the local part is clean enough to make sense as a name.
   if (!foundName && foundEmail) {
     const local = foundEmail.split("@")[0];
     const clean = local
       .replace(/[._-]+/g, " ")
       .replace(/\d+/g, " ")
       .trim();
-    if (clean && clean.length <= 40 && !/^[^a-z]/i.test(clean) === false) {
-      // Only use the derived name if the local part starts with a
-      // letter — avoids weird stuff like "3jane" or "x_9".
-      if (/^[a-z]/i.test(local)) {
-        foundName = clean
-          .split(/\s+/)
-          .filter(Boolean)
-          .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-          .join(" ");
-      }
+    if (clean && clean.length <= 40 && /^[a-z]/i.test(local)) {
+      foundName = clean
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(" ");
     }
   }
 
@@ -294,6 +374,120 @@ const I = {
       <path d="M19 12H5M12 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  file: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" strokeLinejoin="round" />
+      <path d="M14 2v6h6" strokeLinejoin="round" />
+    </svg>
+  ),
+  external: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+};
+
+// ─────────────────────────────────────────────────────────────
+// Media answer renderer
+// ─────────────────────────────────────────────────────────────
+const MediaAnswer = ({ value, kind, compact = false }) => {
+  const items = normalizeMediaValue(value).filter((v) => mediaValueToUrl(v));
+  if (!items.length) {
+    return (
+      <span className="italic text-stone-400 dark:text-stone-500">
+        No answer
+      </span>
+    );
+  }
+
+  const renderOne = (item, i) => {
+    const url = mediaValueToUrl(item);
+    const name = mediaValueToName(item);
+    const size = typeof item === "object" ? item.size : 0;
+
+    if (looksLikeImage(item, kind)) {
+      return (
+        <a
+          key={i}
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          className={`group relative block overflow-hidden rounded-md ring-1 ring-stone-200 transition-all hover:ring-teal-400 dark:ring-stone-700 dark:hover:ring-teal-500/60 ${
+            compact ? "aspect-square" : "aspect-square"
+          }`}
+          title={name || "Open image"}
+        >
+          <img
+            src={url}
+            alt={name || "Uploaded image"}
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+          />
+          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+            <span className="text-white">{I.external("h-3 w-3")}</span>
+          </span>
+        </a>
+      );
+    }
+
+    return (
+      <a
+        key={i}
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-white px-3 py-2 transition-colors hover:border-teal-300 hover:bg-teal-50/50 dark:border-stone-700 dark:bg-stone-900 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10"
+      >
+        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-stone-100 text-stone-500 dark:bg-stone-800 dark:text-stone-400">
+          {I.file("h-4 w-4")}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[12px] font-medium text-stone-800 dark:text-stone-100">
+            {name || "Uploaded file"}
+          </span>
+          <span className="block truncate text-[10px] text-stone-400 dark:text-stone-500">
+            {formatBytes(size) || "Open file"}
+          </span>
+        </span>
+        <span className="shrink-0 text-stone-300 dark:text-stone-600">
+          {I.external("h-3.5 w-3.5")}
+        </span>
+      </a>
+    );
+  };
+
+  if (items.length === 1 && looksLikeImage(items[0], kind)) {
+    const only = items[0];
+    const url = mediaValueToUrl(only);
+    const name = mediaValueToName(only);
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group block overflow-hidden rounded-md ring-1 ring-stone-200 transition-all hover:ring-teal-400 dark:ring-stone-700 dark:hover:ring-teal-500/60"
+      >
+        <img
+          src={url}
+          alt={name || "Uploaded image"}
+          loading="lazy"
+          className="block max-h-64 w-full object-cover transition-transform duration-300 group-hover:scale-[1.01]"
+        />
+      </a>
+    );
+  }
+
+  return (
+    <div
+      className={
+        items.some((it) => looksLikeImage(it, kind))
+          ? "grid grid-cols-2 gap-2 sm:grid-cols-3"
+          : "space-y-2"
+      }
+    >
+      {items.map(renderOne)}
+    </div>
+  );
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -322,9 +516,7 @@ const StatBar = ({ label, count, percentage, correct }) => (
     <div className="h-1.5 overflow-hidden rounded-full bg-stone-100 dark:bg-stone-800">
       <div
         className={`h-full rounded-full transition-all duration-500 ${
-          correct
-            ? "bg-emerald-500"
-            : "bg-teal-500 dark:bg-teal-400"
+          correct ? "bg-emerald-500" : "bg-teal-500 dark:bg-teal-400"
         }`}
         style={{ width: `${Math.max(2, percentage)}%` }}
       />
@@ -468,7 +660,19 @@ const FieldStats = ({ field, stats }) => {
         </div>
       ) : null}
 
-      {["short_text", "long_text", "email", "phone", "url", "time", "file"].includes(
+      {isMediaField(field.type) && stats ? (
+        <div>
+          {stats.samples?.length ? (
+            <MediaAnswer value={stats.samples} kind={field.type} compact />
+          ) : (
+            <p className="text-[12px] text-stone-400 dark:text-stone-500">
+              No uploads yet.
+            </p>
+          )}
+        </div>
+      ) : null}
+
+      {["short_text", "long_text", "email", "phone", "url", "time"].includes(
         field.type
       ) && stats ? (
         <div>
@@ -626,6 +830,11 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
               const a = answerMap.get(field.id);
               const value = a?.value;
               const correct = a?.correct;
+              const isEmpty =
+                value === null ||
+                value === undefined ||
+                value === "" ||
+                (Array.isArray(value) && value.length === 0);
 
               return (
                 <div key={field.id}>
@@ -644,11 +853,13 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
                     ) : null}
                   </div>
                   <div className="rounded-md bg-stone-50 px-3 py-2.5 text-[12.5px] leading-relaxed text-stone-800 dark:bg-stone-800/60 dark:text-stone-200">
-                    {value === null || value === undefined || value === "" ? (
+                    {isEmpty ? (
                       <span className="italic text-stone-400 dark:text-stone-500">
                         No answer
                       </span>
-                    ) : field.type === "url" || field.type === "file" ? (
+                    ) : isMediaField(field.type) ? (
+                      <MediaAnswer value={value} kind={field.type} />
+                    ) : field.type === "url" ? (
                       <a
                         href={String(value)}
                         target="_blank"
@@ -838,8 +1049,14 @@ const MobileResponseRow = ({ response, form, onOpen }) => {
 
 // ─────────────────────────────────────────────────────────────
 // Leaderboard row
+//
+// Uses the exact same name resolution as the responses list, so a
+// leaderboard entry with no respondentName/Email but a "Full name"
+// or "Email" field answer still shows the person's name — and if
+// we only have an email, we derive a friendly name from the local
+// part before ever falling back to "Anonymous".
 // ─────────────────────────────────────────────────────────────
-const LeaderboardRow = ({ entry }) => {
+const LeaderboardRow = ({ entry, form }) => {
   const medal =
     entry.rank === 1
       ? "bg-gradient-to-br from-amber-300 to-amber-500 text-white shadow-sm shadow-amber-500/30"
@@ -849,13 +1066,17 @@ const LeaderboardRow = ({ entry }) => {
       ? "bg-gradient-to-br from-orange-300 to-orange-500 text-white"
       : "bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-300";
 
-  // Leaderboard entries come from the backend as { name, email }, so
-  // apply the same fallback logic here: name, else email, else derive
-  // from email, else Anonymous.
-  const name = String(entry.name || "").trim();
-  const email = String(entry.email || "").trim();
-  const primary = name || email || "Anonymous";
-  const secondary = name && email ? email : "";
+  // Shape the leaderboard entry like a response so we can reuse the
+  // exact same resolver as the responses list. `entry.answers` may be
+  // undefined on older backends — getRespondentDisplay handles that.
+  const { primary, secondary, initials } = getRespondentDisplay(
+    {
+      respondentName: entry.name,
+      respondentEmail: entry.email,
+      answers: entry.answers || [],
+    },
+    form
+  );
 
   return (
     <div className="flex items-center gap-3 border-b border-stone-100 px-4 py-2.5 last:border-b-0 dark:border-stone-800/60">
@@ -864,6 +1085,11 @@ const LeaderboardRow = ({ entry }) => {
       >
         {entry.rank}
       </span>
+
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
+        {initials}
+      </span>
+
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
           {primary}
@@ -874,6 +1100,7 @@ const LeaderboardRow = ({ entry }) => {
           </p>
         ) : null}
       </div>
+
       <div className="shrink-0 text-right">
         <p className="text-[13px] font-bold text-stone-800 dark:text-stone-100">
           {entry.totalScore}
@@ -1484,7 +1711,11 @@ const FormResponses = () => {
 
                   <div className="overflow-hidden rounded-lg border border-stone-200/80 bg-white dark:border-stone-800 dark:bg-stone-900">
                     {leaderboardData.leaderboard.map((entry) => (
-                      <LeaderboardRow key={entry.rank} entry={entry} />
+                      <LeaderboardRow
+                        key={entry.rank}
+                        entry={entry}
+                        form={form}
+                      />
                     ))}
                   </div>
                 </>

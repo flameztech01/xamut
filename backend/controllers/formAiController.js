@@ -17,6 +17,8 @@
 //     request, never a generic menu of "survey / quiz / form" defaults.
 //   • The AI fills in EVERYTHING when drafting: validation, options,
 //     scoring, required flags, placeholders. Drafts come out publish-ready.
+//   • Media fields: `image` for photos, `document` for PDFs/CVs/etc,
+//     `file` only when the user wants "any file" and hasn't narrowed it.
 
 import asyncHandler from "express-async-handler";
 import mongoose from "mongoose";
@@ -52,15 +54,23 @@ const frontendUrl = () => (process.env.FRONTEND_URL || "").replace(/\/$/, "");
 const FIELD_TYPES = new Set([
   "short_text", "long_text", "email", "number", "date", "time",
   "url", "phone", "radio", "checkbox", "dropdown", "multi_select",
-  "rating", "scale", "yes_no", "file", "section",
+  "rating", "scale", "yes_no",
+  "file", "image", "document",
+  "section",
 ]);
 
 const CHOICE_TYPES = new Set(["radio", "checkbox", "dropdown", "multi_select"]);
+
+// Media fields collect uploaded files. They need `maxFiles` set so the
+// editor and the respondent UI know how many attachments to allow.
+const MEDIA_TYPES = new Set(["file", "image", "document"]);
 
 const sanitizeFields = (fields) => {
   if (!Array.isArray(fields)) return [];
   return fields.map((f, idx) => {
     const type = FIELD_TYPES.has(f?.type) ? f.type : "short_text";
+    const isMedia = MEDIA_TYPES.has(type);
+
     const field = {
       id: typeof f.id === "string" && f.id ? f.id : genFieldId(),
       type,
@@ -71,7 +81,15 @@ const sanitizeFields = (fields) => {
       order: typeof f.order === "number" ? f.order : idx,
       options: [],
       scoring: { correct: [], points: 0 },
-      validation: { min: null, max: null, minLength: null, maxLength: null, pattern: null },
+      validation: {
+        min: null,
+        max: null,
+        minLength: null,
+        maxLength: null,
+        pattern: null,
+        // Only meaningful for file / image / document. Defaults to 1.
+        maxFiles: isMedia ? 1 : null,
+      },
     };
 
     if (CHOICE_TYPES.has(type) && Array.isArray(f.options)) {
@@ -105,6 +123,11 @@ const sanitizeFields = (fields) => {
         minLength: Number.isFinite(Number(v.minLength)) ? Number(v.minLength) : null,
         maxLength: Number.isFinite(Number(v.maxLength)) ? Number(v.maxLength) : null,
         pattern: typeof v.pattern === "string" ? v.pattern.slice(0, 300) : null,
+        maxFiles: isMedia
+          ? Number.isFinite(Number(v.maxFiles))
+            ? Math.min(10, Math.max(1, Number(v.maxFiles)))
+            : 1
+          : null,
       };
     }
 
@@ -153,7 +176,9 @@ A Field is:
   "type": one of:
       short_text | long_text | email | number | date | time | url |
       phone | radio | checkbox | dropdown | multi_select |
-      rating | scale | yes_no | file | section,
+      rating | scale | yes_no |
+      file | image | document |
+      section,
   "label": "string",
   "description": "string",
   "placeholder": "string",
@@ -167,7 +192,8 @@ A Field is:
     "max": number | null,
     "minLength": number | null,
     "maxLength": number | null,
-    "pattern": string | null
+    "pattern": string | null,
+    "maxFiles": number | null
   },
   "scoring": {
     "correct": ["value", ...],
@@ -205,6 +231,27 @@ Rules for fields:
   "Option A" unless the user explicitly asked for filler.
 - Every field in a draft must be publish-ready. Real content, real
   validation, real options.
+
+Media fields (file | image | document) — read this carefully:
+- "image"   → collect photos, pictures, screenshots, selfies, product
+              shots, artwork, posters, receipts photographed, etc.
+              Set validation.maxFiles (1 for a single upload, up to 10).
+- "document"→ collect PDFs, Word docs, CVs, résumés, spreadsheets,
+              slide decks, essays, invoices, contracts, ID scans, etc.
+              Set validation.maxFiles (1 for a single upload, up to 10).
+- "file"    → generic catch-all. Only use when the user asked for
+              "any file" and hasn't narrowed it down. Set maxFiles.
+- Media fields have NO options, NO scoring, NO min/max/minLength/
+  maxLength. Only validation.maxFiles matters.
+- Add a short, helpful description so respondents know what to upload
+  and any size/format expectations (e.g. "PDF only, max 5MB").
+
+Settings notes:
+- "successRedirectUrl" is where respondents go after submitting. Use
+  it when the user mentions a WhatsApp group, Telegram channel, a
+  thank-you page, a website, or any post-submission destination.
+- "confirmationMessage" is shown briefly before any redirect, so keep
+  it short and warm.
 `;
 
 // ─────────────────────────────────────────────────────────────────────
@@ -219,8 +266,6 @@ export async function askFormAi({
   questionCount = 0,
   forceReady = false,
 }) {
-  // Hard cap on how many clarifying questions the AI may ask across a
-  // whole session. After this, it MUST draft with what it has.
   const MAX_QUESTIONS = 3;
   const questionsLeft = Math.max(0, MAX_QUESTIONS - questionCount);
 
@@ -236,8 +281,8 @@ DEFAULT BEHAVIOUR:
   type, audience, or content, produce the full draft IMMEDIATELY.
 - Fill in every detail yourself: title, description, field labels,
   placeholders, required flags, validation (min, max, minLength,
-  maxLength), options for choice fields, scoring for quizzes,
-  confirmation message, settings. Everything.
+  maxLength, maxFiles for media fields), options for choice fields,
+  scoring for quizzes, confirmation message, settings. Everything.
 - Drafts must be publish-ready. No placeholder text. No "TBD". No
   "Question 1" labels.
 
@@ -261,12 +306,34 @@ WHAT NOT TO ASK ABOUT (already known or inferable):
 - Topic — it's in the message. Do not ask for it back.
 - Anything you were already told in a previous turn of this session.
 
+MEDIA FIELDS — use them when the content calls for them:
+- If the request is about collecting photos (photos of a product, a
+  recipe, a selfie, an artwork, a screenshot, a receipt), use type
+  "image".
+- If the request is about collecting documents (a CV, a résumé, an
+  application form, an assignment, an invoice, an essay, a PDF), use
+  type "document".
+- Use "file" only when the user wants "any file" and hasn't narrowed
+  it down.
+- Set validation.maxFiles (1 for one upload, more if they want
+  several). Add a short description telling the respondent what to
+  attach (e.g. "PDF only, one file, max 5MB").
+
+DO NOT ASK ABOUT:
+- Cover photo. The user adds that from the editor after the form
+  exists. You cannot upload it. Do not ask.
+- Redirect URL. Do not ask about it either — the app handles that
+  in a follow-up message after you draft. If the user's original
+  request ALREADY mentions a destination (WhatsApp group, Telegram,
+  thank-you page, website), set settings.successRedirectUrl directly
+  in the draft. Otherwise leave it empty.
+
 QUESTION QUALITY (when you do ask):
 - Questions must be specific to THIS request. If the user said "sign-up
   sheet for the team BBQ", a good question is "What info should each
-  person provide? (name only / name + dietary / name + dietary +
-  guests / all of that plus phone)". A bad question is "What type of
-  form is this?".
+  person provide? (name only / name + dietary / name + dietary + guests
+  / all of that plus phone)". A bad question is "What type of form is
+  this?".
 - Options must be concrete and tailored, 3-5 of them, with a real
   "other" escape.
 - Never re-ask for information already given.
@@ -286,7 +353,9 @@ RULES:
   stay attached to the right question.
 - Do not drop fields the user didn't ask to remove.
 - Any new field must be fully specified the same way a create draft is
-  (validation, options, required flag, placeholder, etc).
+  (validation, options, required flag, placeholder, etc). This includes
+  media fields: set validation.maxFiles and a good description.
+- If the user asks to add a redirect URL, set settings.successRedirectUrl.
 - Ask a clarifying question ONLY if the request is genuinely ambiguous
   and you cannot pick a sensible default (e.g. "change the colors" with
   no colors named). At most one question, and only if you have
@@ -361,6 +430,9 @@ Draft rules — apply to every single draft:
   Number is context-specific (e.g. age 0-120).
 - Choice fields: 3-6 options with clean lowercase values
   (snake_case or kebab-case, no spaces).
+- Media fields (file / image / document): set validation.maxFiles
+  (1 for one upload, up to 10 if they want several), write a clear
+  description telling the respondent what to attach.
 - Quiz scoring: populate scoring.correct with the correct
   option.value(s) and set points (default 1 per question).
 - Required: true for essential fields, false for clearly optional ones.
@@ -368,13 +440,17 @@ Draft rules — apply to every single draft:
   contact info, allowMultipleSubmissions false for exams, true for
   feedback, showProgressBar true for forms with 5+ fields,
   showScoreImmediately true for quizzes, passPercentage 60 for quizzes
-  unless the user specified one.
+  unless the user specified one. If the user mentioned a destination
+  for after submission (WhatsApp group, Telegram, website, thank-you
+  page), set settings.successRedirectUrl to that URL.
 
 Question rules — apply to every question:
 - Exactly one question.
 - 3-5 concrete options, each referencing the user's actual request.
 - Set allowOther=true unless the options are exhaustive beyond doubt.
 - Never ask about type, audience, or topic — infer them.
+- Never ask about cover photos or redirect URLs — those are handled
+  by the app after the draft.
 `,
     edit: `
 Return STRICT JSON, one of:
@@ -967,6 +1043,10 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
     session.status = "done";
     session.awaitingConfirm = false;
 
+    const mediaCount = (form.fields || []).filter((f) =>
+      ["file", "image", "document"].includes(f.type)
+    ).length;
+
     result = {
       form: {
         _id: form._id,
@@ -975,6 +1055,12 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
         status: form.status,
         publicUrl: `${frontendUrl()}/forms/${form.slug}`,
         editUrl: `/forms/${form._id}/edit`,
+      },
+      hints: {
+        canAddCoverPhoto: !form.coverPhoto,
+        hasRedirect: !!form.settings?.successRedirectUrl,
+        redirectUrl: form.settings?.successRedirectUrl || "",
+        mediaFieldsCount: mediaCount,
       },
     };
   } else if (session.mode === "edit") {
@@ -996,12 +1082,22 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
     session.status = "done";
     session.awaitingConfirm = false;
 
+    const mediaCount = (form.fields || []).filter((f) =>
+      ["file", "image", "document"].includes(f.type)
+    ).length;
+
     result = {
       form: {
         _id: form._id,
         slug: form.slug,
         title: form.title,
         publicUrl: `${frontendUrl()}/forms/${form.slug}`,
+      },
+      hints: {
+        canAddCoverPhoto: !form.coverPhoto,
+        hasRedirect: !!form.settings?.successRedirectUrl,
+        redirectUrl: form.settings?.successRedirectUrl || "",
+        mediaFieldsCount: mediaCount,
       },
     };
   } else if (session.mode === "collaborators") {

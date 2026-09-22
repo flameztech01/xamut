@@ -7,6 +7,11 @@ import mongoose from "mongoose";
 // One entry per question. Types are open-ended enough to cover Google
 // Forms-style basics and quizzes. `scoring` is only used for quiz-type
 // forms. `section` is a layout-only divider with no answer.
+//
+// `image` and `document` are media-collection types: the respondent
+// uploads a file (via /api/forms/public/:slug/upload), gets back a
+// Cloudinary URL, and that URL is what's stored as the answer value.
+// `file` is a generic escape hatch if you don't want to distinguish.
 // ─────────────────────────────────────────────────────────────────────
 const fieldSchema = new mongoose.Schema(
   {
@@ -30,6 +35,8 @@ const fieldSchema = new mongoose.Schema(
         "scale",
         "yes_no",
         "file",
+        "image",     // respondent uploads an image
+        "document",  // respondent uploads a document (pdf/docx/…)
         "section",
       ],
       default: "short_text",
@@ -61,6 +68,9 @@ const fieldSchema = new mongoose.Schema(
       minLength: { type: Number, default: null },
       maxLength: { type: Number, default: null },
       pattern: { type: String, default: null },
+      // Media-only: how many files the respondent can attach.
+      // Ignored for non-media field types. Capped at 10 in the controller.
+      maxFiles: { type: Number, default: null },
     },
   },
   { _id: false }
@@ -154,6 +164,9 @@ const settingsSchema = new mongoose.Schema(
       default: "Thanks, your response has been recorded.",
       maxlength: 1000,
     },
+    // Where to send the respondent after a successful submit.
+    // Can be a WhatsApp group, Telegram link, website, thank-you page, etc.
+    // Empty string = stay on the confirmation screen.
     successRedirectUrl: { type: String, default: "" },
     theme: { type: String, default: "default" },
     primaryColor: { type: String, default: "" },
@@ -177,6 +190,10 @@ const formSchema = new mongoose.Schema(
     },
     title: { type: String, default: "Untitled form", maxlength: 200 },
     description: { type: String, default: "", maxlength: 2000 },
+
+    // Banner / poster image shown at the top of the public form page.
+    // Populated by POST /api/forms/:id/cover (Cloudinary). Optional.
+    coverPhoto: { type: String, default: "" },
 
     // "form" is the default. "quiz" enables scoring. The rest are
     // mostly cosmetic hints the UI can use.

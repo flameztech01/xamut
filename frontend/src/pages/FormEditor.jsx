@@ -7,6 +7,8 @@ import {
   usePublishFormMutation,
   useCloseFormMutation,
   useDeleteFormMutation,
+  useUploadFormCoverMutation,
+  useRemoveFormCoverMutation,
   useAddCollaboratorMutation,
   useListCollaboratorsQuery,
   useRemoveCollaboratorMutation,
@@ -65,11 +67,16 @@ const FIELD_GROUPS = [
     ],
   },
   {
-    label: "Other",
+    label: "Media",
     types: [
-      { id: "file", label: "File upload" },
-      { id: "section", label: "Section header" },
+      { id: "image", label: "Image upload" },
+      { id: "document", label: "Document upload" },
+      { id: "file", label: "Any file" },
     ],
+  },
+  {
+    label: "Other",
+    types: [{ id: "section", label: "Section header" }],
   },
 ];
 
@@ -95,6 +102,7 @@ const TEXT_INPUT_TYPES = new Set([
   "url",
   "number",
 ]);
+const MEDIA_TYPES = new Set(["image", "document", "file"]);
 
 const ROLE_OPTIONS = [
   { value: "editor", label: "Editor" },
@@ -124,6 +132,7 @@ const defaultField = (type = "short_text") => {
       minLength: null,
       maxLength: null,
       pattern: null,
+      maxFiles: MEDIA_TYPES.has(type) ? 1 : null,
     },
   };
 
@@ -143,17 +152,16 @@ const defaultField = (type = "short_text") => {
     base.validation.max = 10;
   }
 
-  return base;
-};
+  if (type === "image") {
+    base.label = "Upload an image";
+    base.description = "JPG, PNG or WEBP. Max 15MB.";
+  }
+  if (type === "document") {
+    base.label = "Upload a document";
+    base.description = "PDF, DOC, DOCX, XLS, PPT, TXT or ZIP. Max 15MB.";
+  }
 
-const formatDate = (iso) => {
-  if (!iso) return "";
-  const d = new Date(iso);
-  return d.toLocaleDateString([], {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
+  return base;
 };
 
 const formatRelative = (iso) => {
@@ -230,6 +238,18 @@ const I = {
       <circle cx="12" cy="12" r="3" />
     </svg>
   ),
+  image: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  upload: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
   settings: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <circle cx="12" cy="12" r="3" />
@@ -304,7 +324,7 @@ const I = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Custom Dropdown — replaces native <select> everywhere
+// Custom Dropdown
 // ─────────────────────────────────────────────────────────────
 const Dropdown = ({
   value,
@@ -422,6 +442,124 @@ const Toggle = ({ checked, onChange, label, hint }) => (
     </span>
   </label>
 );
+
+// ─────────────────────────────────────────────────────────────
+// Cover photo panel
+//
+// Owner/editor uploads a banner / poster image for the form. Stored
+// on Cloudinary; the public form page renders it above the title.
+// ─────────────────────────────────────────────────────────────
+const CoverPhotoPanel = ({ formId, coverPhoto, onChanged }) => {
+  const [uploadCover, { isLoading: uploading }] = useUploadFormCoverMutation();
+  const [removeCover, { isLoading: removing }] = useRemoveFormCoverMutation();
+  const inputRef = useRef(null);
+  const [error, setError] = useState("");
+
+  const pickFile = () => inputRef.current?.click();
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-picking the same file
+    if (!file) return;
+
+    if (!file.type.startsWith("image/")) {
+      setError("Pick an image file (JPG, PNG, WEBP).");
+      return;
+    }
+    if (file.size > 8 * 1024 * 1024) {
+      setError("Image is bigger than 8MB.");
+      return;
+    }
+    setError("");
+    try {
+      const res = await uploadCover({ id: formId, file }).unwrap();
+      onChanged?.(res.coverPhoto || "");
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't upload the cover.");
+    }
+  };
+
+  const handleRemove = async () => {
+    if (!coverPhoto) return;
+    setError("");
+    try {
+      await removeCover(formId).unwrap();
+      onChanged?.("");
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't remove the cover.");
+    }
+  };
+
+  const busy = uploading || removing;
+
+  return (
+    <div className="mb-4 rounded-lg border border-stone-200/80 bg-white dark:border-stone-800 dark:bg-stone-900">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFile}
+        className="hidden"
+      />
+
+      {coverPhoto ? (
+        <div className="relative overflow-hidden rounded-t-lg">
+          <img
+            src={coverPhoto}
+            alt="Form cover"
+            className="h-36 w-full object-cover sm:h-44"
+          />
+          <div className="absolute inset-x-0 bottom-0 flex items-center justify-end gap-1.5 bg-gradient-to-t from-black/60 to-transparent px-3 py-2">
+            <button
+              type="button"
+              onClick={pickFile}
+              disabled={busy}
+              className="rounded-md bg-white/95 px-2.5 py-1.5 text-[11px] font-semibold text-stone-800 shadow-sm transition-colors hover:bg-white disabled:opacity-60"
+            >
+              {uploading ? "Uploading…" : "Replace"}
+            </button>
+            <button
+              type="button"
+              onClick={handleRemove}
+              disabled={busy}
+              className="rounded-md bg-black/50 px-2.5 py-1.5 text-[11px] font-semibold text-white backdrop-blur-sm transition-colors hover:bg-black/70 disabled:opacity-60"
+            >
+              {removing ? "Removing…" : "Remove"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={pickFile}
+          disabled={busy}
+          className="flex w-full items-center gap-3 rounded-lg px-4 py-3.5 text-left transition-colors hover:bg-stone-50 disabled:opacity-60 dark:hover:bg-stone-800/50"
+        >
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-teal-500 to-teal-600 text-white shadow-sm shadow-teal-500/25">
+            {I.image("h-5 w-5")}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
+              {uploading ? "Uploading cover…" : "Add a cover image"}
+            </span>
+            <span className="mt-0.5 block text-[11px] leading-snug text-stone-400 dark:text-stone-500">
+              Add your poster design or a banner. Shows at the top of the form.
+            </span>
+          </span>
+          <span className="shrink-0 text-stone-300 dark:text-stone-600">
+            {I.upload("h-4 w-4")}
+          </span>
+        </button>
+      )}
+
+      {error ? (
+        <p className="border-t border-red-100 bg-red-50/70 px-3 py-1.5 text-[11px] text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
 // Field type picker modal
@@ -680,6 +818,7 @@ const FieldCard = ({
 }) => {
   const [menuOpen, setMenuOpen] = useState(false);
   const isSection = field.type === "section";
+  const isMedia = MEDIA_TYPES.has(field.type);
 
   const patch = (partial) => onChange({ ...field, ...partial });
 
@@ -815,6 +954,44 @@ const FieldCard = ({
                   placeholder="Placeholder text (optional)"
                   className="w-full rounded-md border border-stone-200 bg-stone-50/50 px-3 py-2 text-[12.5px] text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:bg-white focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40 dark:focus:bg-stone-900"
                 />
+              ) : null}
+
+              {/* Media field — max files */}
+              {isMedia ? (
+                <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-stone-500 dark:text-stone-400">
+                  <span>
+                    {field.type === "image"
+                      ? "Images"
+                      : field.type === "document"
+                      ? "Documents"
+                      : "Files"}{" "}
+                    per respondent
+                  </span>
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={field.validation?.maxFiles ?? 1}
+                    onChange={(e) =>
+                      patch({
+                        validation: {
+                          ...field.validation,
+                          maxFiles:
+                            e.target.value === ""
+                              ? 1
+                              : Math.max(
+                                  1,
+                                  Math.min(10, Number(e.target.value) || 1)
+                                ),
+                        },
+                      })
+                    }
+                    className="w-14 rounded-md border border-stone-200 bg-white px-2 py-1 text-center text-[12px] text-stone-800 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
+                  />
+                  <span className="text-stone-400 dark:text-stone-500">
+                    (1–10)
+                  </span>
+                </div>
               ) : null}
 
               {["rating", "scale"].includes(field.type) ? (
@@ -1058,24 +1235,28 @@ const SettingsPanel = ({ form, onChange }) => {
           placeholder="Thanks, your response has been recorded."
           className="w-full resize-none rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] leading-relaxed text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
         />
-        <input
-          type="url"
-          value={settings.successRedirectUrl || ""}
-          onChange={(e) => patch({ successRedirectUrl: e.target.value })}
-          placeholder="Redirect URL (optional)"
-          className="w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
-        />
+
+        <div>
+          <input
+            type="url"
+            value={settings.successRedirectUrl || ""}
+            onChange={(e) => patch({ successRedirectUrl: e.target.value })}
+            placeholder="https://chat.whatsapp.com/…"
+            className="w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
+          />
+          <p className="mt-1 text-[10.5px] leading-snug text-stone-400 dark:text-stone-500">
+            Optional. After submitting, redirect respondents to a WhatsApp
+            group, Telegram link, website, or thank-you page. Leave blank to
+            just show the message above.
+          </p>
+        </div>
       </section>
     </div>
   );
 };
 
 // ─────────────────────────────────────────────────────────────
-// AI edit panel
-//
-// Inline bar above the fields list. User types a natural-language
-// request, the AI returns either a clarifying question or a full
-// draft, and the user confirms or discards.
+// AI edit panel (unchanged)
 // ─────────────────────────────────────────────────────────────
 const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
   const [prompt, setPrompt] = useState("");
@@ -1106,8 +1287,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     const text = prompt.trim();
     if (!text || busy) return;
 
-    // The AI edit path reads the form from the DB, so any unsaved
-    // local edits would be invisible to it. Save first if dirty.
     if (dirty) {
       const ok = await onSaveFirst?.();
       if (!ok) return;
@@ -1195,7 +1374,7 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     try {
       await cancelSession({ sessionId: session._id }).unwrap();
     } catch {
-      /* swallow, we're clearing anyway */
+      /* swallow */
     } finally {
       setSession(null);
       resetLocalInputs();
@@ -1216,7 +1395,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     );
   };
 
-  // ── Idle state ─────────────────────────────────────────────
   if (!session) {
     return (
       <form
@@ -1261,7 +1439,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     );
   }
 
-  // ── Question state ────────────────────────────────────────
   if (session.pendingQuestion) {
     const q = session.pendingQuestion;
     return (
@@ -1360,7 +1537,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     );
   }
 
-  // ── Preview state ─────────────────────────────────────────
   if (session.awaitingConfirm && session.draft) {
     const draft = session.draft;
     const realFields = (draft.fields || []).filter((f) => f.type !== "section");
@@ -1514,7 +1690,7 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Share modal
+// Share modal (unchanged)
 // ─────────────────────────────────────────────────────────────
 const ShareModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListCollaboratorsQuery(formId, { skip: !open });
@@ -1828,7 +2004,7 @@ const ShareModal = ({ open, onClose, formId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Participants modal
+// Participants modal (unchanged)
 // ─────────────────────────────────────────────────────────────
 const ParticipantsModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListParticipantsQuery(formId, { skip: !open });
@@ -2052,7 +2228,7 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Editor header menu
+// Editor header menu (unchanged)
 // ─────────────────────────────────────────────────────────────
 const EditorMenu = ({
   form,
@@ -2255,6 +2431,7 @@ const FormEditor = () => {
         fields: form.fields,
         settings: form.settings,
         isMultipage: form.isMultipage,
+        coverPhoto: form.coverPhoto || "",
       };
       const res = await updateForm({ id, ...payload }).unwrap();
       setForm(res.form);
@@ -2265,6 +2442,13 @@ const FormEditor = () => {
       showToast(err?.data?.message || "Couldn't save.");
       return false;
     }
+  };
+
+  const handleCoverChanged = (newUrl) => {
+    // The cover endpoint already persists on the server; update local
+    // state so the preview reflects it without a full refetch. This
+    // change isn't part of the "dirty" flow.
+    setForm((prev) => (prev ? { ...prev, coverPhoto: newUrl } : prev));
   };
 
   const handlePublish = async () => {
@@ -2478,6 +2662,13 @@ const FormEditor = () => {
         <div className="mx-auto w-full max-w-6xl px-2.5 pb-32 pt-3 sm:px-4 sm:pb-8 sm:pt-5">
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_320px]">
             <div className="min-w-0">
+              {/* Cover photo */}
+              <CoverPhotoPanel
+                formId={id}
+                coverPhoto={form.coverPhoto || ""}
+                onChanged={handleCoverChanged}
+              />
+
               <div className="mb-4 rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900 sm:p-4">
                 <input
                   type="text"

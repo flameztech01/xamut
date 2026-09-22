@@ -14,6 +14,7 @@ import {
   groqJSONFast,
   groqVision,
   runAgentTurn,
+  runSmartTurn,
   runTool,
   webSearch,
   fetchWebsite,
@@ -23,11 +24,48 @@ import {
   extractUserMemories,
   publicImageSources,
   researchPerson,
+  estimateTokens,
 } from "../utils/xamutAI.js";
 
 // ─────────────────────────────────────────────────────────────────────
-// Optional packages
+// Size discipline
+//
+// Free-tier TPM ceilings are small (gpt-oss-120b: 8K, qwen3.8-27b: 7K).
+// The persona alone is ~4K tokens, and the tool schemas another ~3K.
+// That leaves very little room for history + user content + attachments.
+//
+// Everything dynamic that we feed to the model MUST be capped here.
+// The xamutAI.js layer also clamps, but clamping in the controller
+// preserves context (better to send 3 useful messages than 0 useful
+// messages after the AI layer chops history entirely).
 // ─────────────────────────────────────────────────────────────────────
+
+// History: fewer messages, shorter messages.
+const HISTORY_MAX_MESSAGES = 10;
+const HISTORY_MAX_CHARS_PER_MESSAGE = 1000;
+
+// Memory block: cap total characters so a chatty user with 30
+// memories doesn't add 5K tokens to every single turn.
+const MEMORY_BLOCK_MAX_CHARS = 1500;
+
+// Classifier input: the intent/research classifiers only need to see
+// enough of the message to know what the user wants. A 20K-token paste
+// doesn't need to be classified at full length — a 3K-char window is
+// plenty to read "summarize this report" or "make me a quiz".
+const CLASSIFIER_MESSAGE_CHAR_CAP = 3000;
+const CLASSIFIER_HISTORY_TURNS = 4;
+const CLASSIFIER_HISTORY_CHARS = 250;
+
+// Attachments: cap per-doc extracted text and total doc block size.
+const MAX_ATTACHMENTS = 3;
+const MAX_DOC_TEXT_CHARS = 8000;
+const MAX_DOC_BLOCK_CHARS = 18000;
+
+// Form media types — used when phrasing the "draft is ready" reply so
+// we can call out that the form accepts uploads.
+const FORM_MEDIA_TYPES = new Set(["file", "image", "document"]);
+
+// Optional packages
 let mammoth, pdfParse;
 try { mammoth = (await import("mammoth")).default; } catch { mammoth = null; }
 try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null; }
@@ -35,22 +73,15 @@ try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null;
 // ─────────────────────────────────────────────────────────────────────
 // Heuristic guard: does the user's message look like a lookup against
 // their OWN forms rather than a request to create a new one?
-//
-// The intent classifier gets this wrong sometimes ("what's the stats
-// on my attendance form" contains "attendance" and "form" so it reads
-// like a form request). This regex is a belt-and-braces backstop.
 // ─────────────────────────────────────────────────────────────────────
 const FORM_LOOKUP_RE =
   /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded)\b|\bhow many (people )?(filled|finished|completed|submitted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bapplication form\b|\b(my|the)\s+application\b/i;
 
-// Signals that a form-lookup message is asking for stats/response data
-// specifically, so we know whether to chain into get_form_stats after
-// resolving which form is meant.
 const FORM_STATS_INTENT_RE =
   /\b(stats?|statistics|responses?|submissions?|leaderboard|scores?|results?|analytics?|average|pass rate|how many|who (submitted|filled|answered|responded))\b/i;
 
 // ─────────────────────────────────────────────────────────────────────
-// Persona
+// Persona (unchanged — this is deliberate design)
 // ─────────────────────────────────────────────────────────────────────
 const BASE_RULES = `
 You are Xamut. You are not an AI assistant, you are a friend with a
@@ -301,11 +332,27 @@ const makeTitle = (text = "") => {
 
 const stripControl = (s = "") => s.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 
-const toHistory = (messages, limit = 20) =>
+// Cap each history message so a single long reply can't blow the
+// budget for the whole conversation.
+const toHistory = (messages, limit = HISTORY_MAX_MESSAGES) =>
   messages
     .slice(-limit)
     .filter((m) => m.role === "user" || m.role === "assistant")
-    .map((m) => ({ role: m.role, content: m.content || "" }));
+    .map((m) => ({
+      role: m.role,
+      content: String(m.content || "").slice(0, HISTORY_MAX_CHARS_PER_MESSAGE),
+    }));
+
+// Classifier input: cap the message and history. The intent and
+// research classifiers don't need to see a 20K-token paste — the
+// first 3K chars are enough to classify.
+const capForClassifier = (message, history) => ({
+  message: String(message || "").slice(0, CLASSIFIER_MESSAGE_CHAR_CAP),
+  history: history.slice(-CLASSIFIER_HISTORY_TURNS).map((m) => ({
+    role: m.role,
+    content: String(m.content || "").slice(0, CLASSIFIER_HISTORY_CHARS),
+  })),
+});
 
 const uploadBuffer = (buffer, folder, publicId, resourceType = "image") =>
   new Promise((resolve, reject) => {
@@ -345,7 +392,9 @@ async function loadUserMemories(userId, limit = 30) {
   if (byCategory.fact?.length)
     sections.push(`Other facts:\n- ${byCategory.fact.join("\n- ")}`);
 
-  return sections.join("\n\n");
+  // Cap the total size so a chatty user doesn't add thousands of
+  // tokens to every single turn.
+  return sections.join("\n\n").slice(0, MEMORY_BLOCK_MAX_CHARS);
 }
 
 async function saveUserMemories({ userId, conversationId, memories }) {
@@ -378,7 +427,7 @@ async function saveUserMemories({ userId, conversationId, memories }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Colors + templates
+// Colors + templates (unchanged)
 // ─────────────────────────────────────────────────────────────────────
 const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
@@ -449,29 +498,18 @@ function resolveTheme({ type, templateId, primaryColor, secondaryColor }) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Markdown guardrail (documents/slides only)
-// ─────────────────────────────────────────────────────────────────────
 const MARKDOWN_RULES = `Formatting: you may use **bold** and *italics* sparingly. No headers (#), no code fences, no links, no tables, no nested lists.`;
 
 // ─────────────────────────────────────────────────────────────────────
-// CONTENT GENERATORS
+// CONTENT GENERATORS (unchanged)
 // ─────────────────────────────────────────────────────────────────────
 const DOC_SECTION_COUNTS = { short: 3, medium: 5, long: 8 };
 const DOC_TARGET_WORDS = { short: 400, medium: 900, long: 1800 };
 
 async function generateDocumentContent({
-  userId,
-  conversationId,
-  topic,
-  instructions = "",
-  style = "academic",
-  length = "medium",
-  templateId,
-  primaryColor,
-  secondaryColor,
-  sourcePrompt = "",
-  onStatus,
+  userId, conversationId, topic, instructions = "", style = "academic",
+  length = "medium", templateId, primaryColor, secondaryColor,
+  sourcePrompt = "", onStatus,
 }) {
   const report = typeof onStatus === "function" ? onStatus : () => {};
 
@@ -507,14 +545,11 @@ No markdown, no code fences, no commentary.`,
   });
 
   const pages = [];
-
   pages.push({
     role: "cover",
     heading: outline.title || topic,
     subheading: outline.subtitle || "",
-    paragraphs: [],
-    bullets: [],
-    notes: "",
+    paragraphs: [], bullets: [], notes: "",
   });
 
   const sections = outline.sections || [];
@@ -557,14 +592,9 @@ Return JSON with this exact shape:
 
   report("Assembling the document");
 
-  const theme = resolveTheme({
-    type: "document",
-    templateId,
-    primaryColor,
-    secondaryColor,
-  });
+  const theme = resolveTheme({ type: "document", templateId, primaryColor, secondaryColor });
 
-  const doc = await Document.create({
+  return await Document.create({
     user: userId,
     conversation: conversationId || null,
     type: "document",
@@ -576,25 +606,14 @@ Return JSON with this exact shape:
     sourcePrompt,
     status: "ready",
   });
-
-  return doc;
 }
 
 async function generatePresentationContent({
-  userId,
-  conversationId,
-  topic,
-  instructions = "",
-  slides = 10,
-  companyName = "",
-  templateId,
-  primaryColor,
-  secondaryColor,
-  sourcePrompt = "",
-  onStatus,
+  userId, conversationId, topic, instructions = "", slides = 10,
+  companyName = "", templateId, primaryColor, secondaryColor,
+  sourcePrompt = "", onStatus,
 }) {
   const report = typeof onStatus === "function" ? onStatus : () => {};
-
   const count = Math.min(Math.max(Number(slides) || 10, 4), 25);
 
   report("Planning the slide structure");
@@ -624,14 +643,11 @@ Produce exactly ${count} entries. No markdown, no code fences, no commentary.`,
   });
 
   const pages = [];
-
   pages.push({
     role: "cover",
     heading: outline.title || topic,
     subheading: outline.subtitle || "",
-    paragraphs: [],
-    bullets: [],
-    notes: "",
+    paragraphs: [], bullets: [], notes: "",
   });
 
   const slideList = outline.slides || [];
@@ -672,21 +688,14 @@ Return JSON exactly:
     role: "closing",
     heading: "Thank You",
     subheading: companyName || outline.title || topic,
-    paragraphs: [],
-    bullets: [],
-    notes: "",
+    paragraphs: [], bullets: [], notes: "",
   });
 
   report("Assembling the presentation");
 
-  const theme = resolveTheme({
-    type: "presentation",
-    templateId,
-    primaryColor,
-    secondaryColor,
-  });
+  const theme = resolveTheme({ type: "presentation", templateId, primaryColor, secondaryColor });
 
-  const doc = await Document.create({
+  return await Document.create({
     user: userId,
     conversation: conversationId || null,
     type: "presentation",
@@ -699,16 +708,15 @@ Return JSON exactly:
     sourcePrompt,
     status: "ready",
   });
-
-  return doc;
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Intent detection
+// Intent detection — classifier prompts unchanged, inputs capped
 // ─────────────────────────────────────────────────────────────────────
 async function detectGenerationIntent({ message, history, forceType = null }) {
-  const recent = history
-    .slice(-6)
+  const capped = capForClassifier(message, history);
+
+  const recent = capped.history
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
@@ -833,7 +841,7 @@ Return STRICT JSON only.`,
 ${recent || "(none)"}
 
 Latest user message:
-${message}
+${capped.message}
 
 Return JSON exactly:
 {
@@ -868,11 +876,12 @@ Return JSON exactly:
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Research intent detection
+// Research intent detection — classifier prompt unchanged, inputs capped
 // ─────────────────────────────────────────────────────────────────────
 async function detectResearchIntent({ message, history }) {
-  const recent = history
-    .slice(-6)
+  const capped = capForClassifier(message, history);
+
+  const recent = capped.history
     .map((m) => `${m.role.toUpperCase()}: ${m.content}`)
     .join("\n");
 
@@ -913,7 +922,7 @@ Return STRICT JSON only:
 ${recent || "(none)"}
 
 Latest user message:
-${message}`,
+${capped.message}`,
         },
       ],
       temperature: 0,
@@ -935,14 +944,8 @@ ${message}`,
 // Shared turn engine
 // ─────────────────────────────────────────────────────────────────────
 async function executeChatTurn({
-  user,
-  conversationId,
-  message,
-  agent,
-  attachments,
-  context,
-  forceType,
-  onStatus,
+  user, conversationId, message, agent, attachments, context,
+  forceType, onStatus,
 }) {
   const report = typeof onStatus === "function" ? onStatus : () => {};
 
@@ -975,13 +978,16 @@ async function executeChatTurn({
 
   if (conversationId && agent && convo.agent !== agent) convo.agent = agent;
 
-  const cleanAttachments = (attachments || []).map((a) => ({
-    type: a.type,
-    url: a.url || "",
-    name: a.name || "",
-    mimeType: a.mimeType || "",
-    extractedText: (a.extractedText || "").slice(0, 30000),
-  }));
+  // Cap attachments: max 3, per-doc extracted text to MAX_DOC_TEXT_CHARS.
+  const cleanAttachments = (attachments || [])
+    .slice(0, MAX_ATTACHMENTS)
+    .map((a) => ({
+      type: a.type,
+      url: a.url || "",
+      name: a.name || "",
+      mimeType: a.mimeType || "",
+      extractedText: (a.extractedText || "").slice(0, MAX_DOC_TEXT_CHARS),
+    }));
 
   convo.messages.push({
     role: "user",
@@ -1000,21 +1006,23 @@ async function executeChatTurn({
     .filter(Boolean)
     .join("\n");
 
-  const history = toHistory(convo.messages.slice(0, -1), 20);
+  const history = toHistory(convo.messages.slice(0, -1));
 
   const images = cleanAttachments.filter((a) => a.type === "image");
   const docs = cleanAttachments.filter(
     (a) => a.type === "document" && a.extractedText
   );
 
+  // When docs are attached, cap the total doc block so 3 x 8000-char
+  // extracts don't produce a 24K-char prepend.
   let effectiveText = trimmed;
   if (docs.length) {
     const docBlock = docs
-      .map(
-        (d, i) =>
-          `--- Attached document ${i + 1}: ${d.name || "document"} ---\n${d.extractedText}`
+      .map((d, i) =>
+        `--- Attached document ${i + 1}: ${d.name || "document"} ---\n${d.extractedText}`
       )
-      .join("\n\n");
+      .join("\n\n")
+      .slice(0, MAX_DOC_BLOCK_CHARS);
     effectiveText = `${docBlock}\n\nUser question:\n${trimmed || "(summarize the document)"}`;
   }
 
@@ -1027,14 +1035,10 @@ async function executeChatTurn({
   const replyAttachments = [];
 
   try {
-    // Only classify if the message is worth classifying. Two words is
-    // enough — "make exam" and "new survey" are real form requests.
+    // Only classify if the message is worth classifying.
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
     const worthClassifying = trimmed.length >= 6 && wordCount >= 2;
 
-    // Heuristic: does this look like a lookup against the user's own
-    // forms? If so, force the intent classifier's answer to "not a
-    // generation request" regardless of what it says. Belt and braces.
     const looksLikeFormLookup = FORM_LOOKUP_RE.test(trimmed);
 
     let intent = { wantsGeneration: false };
@@ -1052,20 +1056,7 @@ async function executeChatTurn({
     }
 
     // ── Forced, deterministic form lookup ──────────────────────
-    // Don't leave this to the model's judgement — it kept guessing
-    // instead of calling list_user_forms (e.g. treating "the
-    // application form for Obong FC" as a question about a real
-    // football club instead of the user's own "Obong FC Membership
-    // Sign-Up" form). If the message pattern-matches a form lookup,
-    // run list_user_forms ourselves right now and hand the model the
-    // real result as grounding it MUST use, instead of letting it
-    // decide whether to bother calling the tool at all.
-    if (
-      looksLikeFormLookup &&
-      !images.length &&
-      !docs.length &&
-      trimmed
-    ) {
+    if (looksLikeFormLookup && !images.length && !docs.length && trimmed) {
       report("Checking your forms");
       try {
         const lookup = await runTool(
@@ -1133,8 +1124,7 @@ Do not guess which one they mean and do not pick the most recent one. Ask the us
       }
     }
 
-    // Force a real lookup for "who/what is X" style messages instead of
-    // letting the model decide whether to bother searching.
+    // Forced research lookup
     if (
       !intent.wantsGeneration &&
       intent.type !== "form" &&
@@ -1181,7 +1171,7 @@ ${sourceLines || "(none found)"}`;
     }
 
     if (intent.wantsGeneration && intent.readyToGenerate && intent.topic) {
-      // ── FORM ────────────────────────────────────────────────
+      // FORM
       if (intent.type === "form") {
         report("Building your form");
 
@@ -1198,12 +1188,57 @@ ${sourceLines || "(none found)"}`;
               reply += `\n\n${session.pendingQuestion.helper}`;
             }
           } else if (session.awaitingConfirm && session.draft) {
-            const fieldCount = (session.draft.fields || []).filter(
-              (f) => f.type !== "section"
-            ).length;
-            reply = `Built a draft with **${fieldCount}** question${
-              fieldCount === 1 ? "" : "s"
-            }. Look it over. If you want anything changed, just say so. Otherwise tap create.`;
+            const allFields = session.draft.fields || [];
+            const fieldCount = allFields.filter((f) => f.type !== "section").length;
+            const mediaFields = allFields.filter((f) => FORM_MEDIA_TYPES.has(f.type));
+            const redirect = session.draft.settings?.successRedirectUrl || "";
+
+            const lines = [];
+
+            lines.push(
+              `Built a draft with **${fieldCount}** question${
+                fieldCount === 1 ? "" : "s"
+              }. Look it over, then tap create.`
+            );
+
+            if (mediaFields.length) {
+              const kinds = new Set(
+                mediaFields.map((f) =>
+                  f.type === "image"
+                    ? "photos"
+                    : f.type === "document"
+                    ? "documents"
+                    : "files"
+                )
+              );
+              lines.push(
+                `It includes **${mediaFields.length}** upload field${
+                  mediaFields.length === 1 ? "" : "s"
+                } — respondents will be able to attach ${[...kinds].join(
+                  " and "
+                )} directly.`
+              );
+            }
+
+            if (redirect) {
+              lines.push(`Redirect after submit is set to \`${redirect}\`.`);
+            }
+
+            lines.push(
+              [
+                `Two things you can also set up for this form:`,
+                `- **Cover photo** — a poster or banner at the top. Upload it from the editor once the form is created.`,
+                `- **Redirect link** — send people to a WhatsApp group, Telegram, or your website after they submit.`,
+              ].join("\n")
+            );
+
+            lines.push(
+              redirect
+                ? `Want a different redirect URL, or a cover photo? Just say so.`
+                : `Want to add a redirect link? Tell me the URL and I'll set it.`
+            );
+
+            reply = lines.join("\n\n");
           } else if (session.status === "done" && session.createdFormId) {
             reply = "Done. Your form is ready.";
           } else {
@@ -1228,7 +1263,7 @@ ${sourceLines || "(none found)"}`;
         }
       }
 
-      // ── PRESENTATION ────────────────────────────────────────
+      // PRESENTATION
       else if (intent.type === "presentation") {
         const built = await generatePresentationContent({
           userId: user._id,
@@ -1257,7 +1292,7 @@ ${sourceLines || "(none found)"}`;
         usedModel = "xamut-writer";
       }
 
-      // ── DOCUMENT ────────────────────────────────────────────
+      // DOCUMENT
       else if (intent.type === "document") {
         const built = await generateDocumentContent({
           userId: user._id,
@@ -1304,12 +1339,12 @@ ${sourceLines || "(none found)"}`;
         usedModel = await resolveVisionModel();
 
         if (trimmed && reply) {
-          const refine = await runAgentTurn({
+          const refine = await runSmartTurn({
             systemPrompt,
             history,
             userContent: `User question: ${trimmed}\n\nWhat you saw in the image(s):\n${reply}\n\nGive the final answer.`,
             onStatus: report,
-            userId: user._id,   // ← pass user context so form tools work
+            userId: user._id,
           });
           reply = refine.content || reply;
           usedModel = refine.model;
@@ -1318,12 +1353,20 @@ ${sourceLines || "(none found)"}`;
           replyWhereToFind.push(...(refine.whereToFind || []));
         }
       } else {
-        const turn = await runAgentTurn({
+        // Diagnostic — shows the budget breakdown per turn.
+        console.log(
+          `[turn] sys=${estimateTokens(systemPrompt)}t hist=${estimateTokens(history)}t user=${estimateTokens(effectiveText)}t`
+        );
+
+        // runSmartTurn: small turns fall through to runAgentTurn unchanged.
+        // Big single-turn pasted documents get split across the key pool
+        // via map-reduce instead of being clamped down to nothing.
+        const turn = await runSmartTurn({
           systemPrompt,
           history,
           userContent: effectiveText || "(no message)",
           onStatus: report,
-          userId: user._id,     // ← pass user context so form tools work
+          userId: user._id,
         });
         reply = turn.content;
         usedModel = turn.model;
@@ -1501,7 +1544,7 @@ export const uploadAttachment = asyncHandler(async (req, res) => {
       url: uploaded.secure_url,
       name: origName,
       mimeType: mime,
-      extractedText: extractedText.slice(0, 30000),
+      extractedText: extractedText.slice(0, MAX_DOC_TEXT_CHARS),
     },
   });
 });
@@ -1531,12 +1574,8 @@ export const uploadImageAttachment = asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 export const sendMessage = asyncHandler(async (req, res) => {
   const {
-    conversationId,
-    message = "",
-    agent = "chat",
-    attachments = [],
-    context,
-    forceType,
+    conversationId, message = "", agent = "chat",
+    attachments = [], context, forceType,
   } = req.body;
 
   const trimmed = (message || "").trim();
@@ -1606,12 +1645,8 @@ export const sendMessageStream = async (req, res) => {
 
   try {
     const {
-      conversationId,
-      message = "",
-      agent = "chat",
-      attachments = [],
-      context,
-      forceType,
+      conversationId, message = "", agent = "chat",
+      attachments = [], context, forceType,
     } = req.body;
 
     const trimmed = (message || "").trim();
@@ -1657,7 +1692,7 @@ export const sendMessageStream = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Conversations CRUD
+// Conversations CRUD (unchanged)
 // ─────────────────────────────────────────────────────────────────────
 export const listConversations = asyncHandler(async (req, res) => {
   const list = await Conversation.find({ user: req.user._id, isArchived: false })
@@ -1832,9 +1867,6 @@ export const analyzeImage = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, analysis });
 });
 
-// ─────────────────────────────────────────────────────────────────────
-// Public image sources endpoint
-// ─────────────────────────────────────────────────────────────────────
 export const getImageSources = asyncHandler(async (req, res) => {
   const q = (req.query.q || req.body?.q || "").toString().trim();
   if (!q) {

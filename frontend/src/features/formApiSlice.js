@@ -84,6 +84,42 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     // ─────────────────────────────────────────────────────────
+    // COVER PHOTO (Cloudinary)
+    //
+    // Owner / editor only. Pass a File or Blob as `file`; the
+    // endpoint uses multipart/form-data with field name `coverPhoto`.
+    // We deliberately do NOT set Content-Type — the browser adds it
+    // with the correct boundary when the body is a FormData instance.
+    // ─────────────────────────────────────────────────────────
+    uploadFormCover: builder.mutation({
+      query: ({ id, file }) => {
+        const body = new FormData();
+        body.append("coverPhoto", file);
+        return {
+          url: `${FORM_URL}/${id}/cover`,
+          method: "POST",
+          body,
+          formData: true,
+        };
+      },
+      invalidatesTags: (result, error, { id }) => [
+        { type: "Form", id },
+        "FormList",
+      ],
+    }),
+
+    removeFormCover: builder.mutation({
+      query: (id) => ({
+        url: `${FORM_URL}/${id}/cover`,
+        method: "DELETE",
+      }),
+      invalidatesTags: (result, error, id) => [
+        { type: "Form", id },
+        "FormList",
+      ],
+    }),
+
+    // ─────────────────────────────────────────────────────────
     // COLLABORATORS
     //
     // Two kinds of people live here:
@@ -227,6 +263,28 @@ export const formApiSlice = apiSlice.injectEndpoints({
       }),
     }),
 
+    // Respondent uploads an image / document for an `image`,
+    // `document`, or `file` field. Server returns `{ url, ... }`;
+    // that URL is what you then put into the answer value on submit.
+    //
+    // Pass a File/Blob as `file`. For private forms, include the
+    // participant token.
+    uploadFormMedia: builder.mutation({
+      query: ({ slug, file, participantToken }) => {
+        const body = new FormData();
+        body.append("file", file);
+        return {
+          url: `${FORM_URL}/public/${slug}/upload`,
+          method: "POST",
+          body,
+          formData: true,
+          headers: participantToken
+            ? { Authorization: `Bearer ${participantToken}` }
+            : undefined,
+        };
+      },
+    }),
+
     submitResponse: builder.mutation({
       query: ({ slug, participantToken, ...data }) => ({
         url: `${FORM_URL}/public/${slug}/submit`,
@@ -327,6 +385,10 @@ export const {
   usePublishFormMutation,
   useCloseFormMutation,
 
+  // Cover photo (Cloudinary)
+  useUploadFormCoverMutation,
+  useRemoveFormCoverMutation,
+
   // Collaborators
   useAddCollaboratorMutation,
   useListCollaboratorsQuery,
@@ -343,6 +405,7 @@ export const {
   // Public
   useGetPublicFormQuery,
   useParticipantLoginMutation,
+  useUploadFormMediaMutation,
   useSubmitResponseMutation,
 
   // Responses

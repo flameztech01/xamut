@@ -122,6 +122,8 @@ const FIELD_TYPES = new Set([
   "scale",
   "yes_no",
   "file",
+  "image",      // NEW — respondent uploads an image
+  "document",   // NEW — respondent uploads a document (pdf/docx/…)
   "section",
 ]);
 
@@ -131,6 +133,9 @@ const CHOICE_TYPES = new Set([
   "dropdown",
   "multi_select",
 ]);
+
+// Types whose value is one-or-more Cloudinary URLs
+const MEDIA_TYPES = new Set(["file", "image", "document"]);
 
 const sanitizeFields = (fields) => {
   if (!Array.isArray(fields)) return [];
@@ -153,6 +158,7 @@ const sanitizeFields = (fields) => {
         minLength: null,
         maxLength: null,
         pattern: null,
+        maxFiles: type === "image" || type === "document" ? 1 : null,
       },
     };
 
@@ -199,6 +205,10 @@ const sanitizeFields = (fields) => {
           : null,
         pattern:
           typeof v.pattern === "string" ? v.pattern.slice(0, 300) : null,
+        maxFiles:
+          Number.isFinite(Number(v.maxFiles)) && Number(v.maxFiles) > 0
+            ? Math.min(10, Number(v.maxFiles))
+            : field.validation.maxFiles,
       };
     }
 
@@ -272,14 +282,56 @@ const validateAnswer = (field, rawValue) => {
       return { ok: true, value: v };
     }
 
-    case "url":
-    case "file": {
+    case "url": {
       try {
         new URL(String(rawValue));
         return { ok: true, value: String(rawValue) };
       } catch {
         return { ok: false, error: `"${field.label}": invalid URL.` };
       }
+    }
+
+    // file / image / document → one or more Cloudinary URLs
+    case "file":
+    case "image":
+    case "document": {
+      const extractUrl = (item) => {
+        if (item == null) return null;
+        if (typeof item === "string") return item;
+        if (typeof item === "object" && typeof item.url === "string")
+          return item.url;
+        return null;
+      };
+
+      const rawArr = Array.isArray(rawValue) ? rawValue : [rawValue];
+      const maxFiles = Number(field.validation?.maxFiles) || 1;
+      if (rawArr.length > maxFiles) {
+        return {
+          ok: false,
+          error: `"${field.label}": max ${maxFiles} file(s).`,
+        };
+      }
+
+      const cleaned = [];
+      for (const item of rawArr) {
+        const urlStr = extractUrl(item);
+        if (!urlStr) {
+          return {
+            ok: false,
+            error: `"${field.label}": invalid file reference.`,
+          };
+        }
+        try {
+          new URL(urlStr);
+        } catch {
+          return {
+            ok: false,
+            error: `"${field.label}": invalid file URL.`,
+          };
+        }
+        cleaned.push(urlStr);
+      }
+      return { ok: true, value: Array.isArray(rawValue) ? cleaned : cleaned[0] };
     }
 
     case "number":
@@ -555,6 +607,7 @@ export const createForm = asyncHandler(async (req, res) => {
     visibility = "public",
     fields = [],
     settings = {},
+    coverPhoto = "",
   } = req.body || {};
 
   if (!["form", "quiz", "survey", "feedback", "attendance"].includes(type)) {
@@ -570,6 +623,7 @@ export const createForm = asyncHandler(async (req, res) => {
     visibility: visibility === "private" ? "private" : "public",
     status: "draft",
     slug: genSlug(),
+    coverPhoto: typeof coverPhoto === "string" ? coverPhoto.slice(0, 1000) : "",
     fields: sanitizeFields(fields),
     settings: sanitizeSettings(settings),
     sourceConversation:
@@ -604,6 +658,7 @@ export const listForms = asyncHandler(async (req, res) => {
     visibility: f.visibility,
     status: f.status,
     slug: f.slug,
+    coverPhoto: f.coverPhoto || "",
     responseCount: f.responseCount || 0,
     fieldsCount: f.fields?.length || 0,
     collaboratorsCount: f.collaborators?.length || 0,
@@ -655,11 +710,16 @@ export const updateForm = asyncHandler(async (req, res) => {
     settings,
     isMultipage,
     expiresAt,
+    coverPhoto,
   } = req.body || {};
 
   if (typeof title === "string") form.title = title.slice(0, 200);
   if (typeof description === "string")
     form.description = description.slice(0, 2000);
+
+  if (typeof coverPhoto === "string") {
+    form.coverPhoto = coverPhoto.slice(0, 1000);
+  }
 
   if (
     type &&
@@ -719,6 +779,7 @@ export const duplicateForm = asyncHandler(async (req, res) => {
     visibility: form.visibility,
     status: "draft",
     slug: genSlug(),
+    coverPhoto: form.coverPhoto || "",
     fields: form.fields.map((f) => {
       const o = typeof f.toObject === "function" ? f.toObject() : f;
       return {
@@ -772,15 +833,53 @@ export const closeForm = asyncHandler(async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
+// COVER PHOTO (Cloudinary)
+// The multer middleware in formRoutes attaches req.file.
+// ─────────────────────────────────────────────────────────────────────
+
+// POST /api/forms/:id/cover
+export const uploadFormCoverPhoto = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  if (!req.file) {
+    res.status(400);
+    throw new Error("No cover image uploaded.");
+  }
+
+  const imageUrl = req.file.path || req.file.location;
+  if (!imageUrl) {
+    res.status(500);
+    throw new Error("Upload succeeded but no URL was returned.");
+  }
+
+  form.coverPhoto = imageUrl;
+  await form.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Cover photo updated successfully.",
+    coverPhoto: form.coverPhoto,
+  });
+});
+
+// DELETE /api/forms/:id/cover
+export const removeFormCoverPhoto = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  form.coverPhoto = "";
+  await form.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Cover photo removed.",
+    coverPhoto: "",
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────
 // COLLABORATORS
-//
-// Both paths send an email now:
-//   • No account yet → invite email with a signup link.
-//   • Has an account → "you've been added" email with a direct link.
-//
-// The email send is awaited so the response tells the client whether
-// it actually went out. The collaborator record is committed BEFORE
-// the email attempt so a SMTP failure never rolls back the add.
 // ─────────────────────────────────────────────────────────────────────
 
 // POST /api/forms/:id/collaborators
@@ -804,7 +903,6 @@ export const addCollaborator = asyncHandler(async (req, res) => {
     throw new Error("That doesn't look like a valid email.");
   }
 
-  // ── Path 1: they already have a Xamut account ──────────────
   const existingUser = await User.findOne({ email: cleanEmail });
 
   if (existingUser) {
@@ -827,7 +925,6 @@ export const addCollaborator = asyncHandler(async (req, res) => {
       });
     }
 
-    // Clear any stale pending invite for this email.
     form.pendingCollaborators = (form.pendingCollaborators || []).filter(
       (p) => p.email !== cleanEmail
     );
@@ -874,7 +971,6 @@ export const addCollaborator = asyncHandler(async (req, res) => {
     });
   }
 
-  // ── Path 2: no account yet — record a pending invite ──────
   const existingPending = (form.pendingCollaborators || []).find(
     (p) => p.email === cleanEmail
   );
@@ -1054,7 +1150,6 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
     (p) => p.email === email
   );
 
-  // Not pending? Check if they signed up in the meantime.
   if (!pending) {
     const user = await User.findOne({ email });
     if (user) {
@@ -1092,15 +1187,13 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
         );
       }
 
-      return res
-        .status(200)
-        .json({
-          success: true,
-          message: "Added as editor.",
-          added: true,
-          emailSent,
-          emailError,
-        });
+      return res.status(200).json({
+        success: true,
+        message: "Added as editor.",
+        added: true,
+        emailSent,
+        emailError,
+      });
     }
 
     res.status(404);
@@ -1341,6 +1434,7 @@ const buildPublicForm = (form) => {
     visibility: form.visibility,
     status: form.status,
     isMultipage: form.isMultipage,
+    coverPhoto: form.coverPhoto || "",
     fields,
     settings: {
       collectEmail: form.settings.collectEmail,
@@ -1443,6 +1537,53 @@ export const participantLogin = asyncHandler(async (req, res) => {
     token,
     form: buildPublicForm(form),
     participant: { email: participant.email, name: participant.name },
+  });
+});
+
+// POST /api/forms/public/:slug/upload
+// Respondent-uploaded image/document. The returned URL is what the
+// client then puts into the answer value for an `image` / `document` /
+// `file` field. Multer middleware (uploadMedia) attaches req.file.
+export const uploadFormMedia = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+
+  if (!isFormAcceptingResponses(form)) {
+    res.status(410);
+    throw new Error("This form isn't accepting responses.");
+  }
+
+  if (form.visibility === "private") {
+    const token = verifyParticipantToken(readParticipantToken(req));
+    if (!token || String(token.formId) !== String(form._id)) {
+      res.status(401);
+      throw new Error("This form is private. Sign in to upload files.");
+    }
+    const participant = form.participants.find(
+      (p) => p.email === token.email.toLowerCase()
+    );
+    if (!participant) {
+      res.status(403);
+      throw new Error("You are not a participant on this form.");
+    }
+  }
+
+  if (!req.file) {
+    res.status(400);
+    throw new Error("No file uploaded.");
+  }
+
+  const fileUrl = req.file.path || req.file.location;
+  if (!fileUrl) {
+    res.status(500);
+    throw new Error("Upload succeeded but no URL was returned.");
+  }
+
+  res.status(200).json({
+    success: true,
+    url: fileUrl,
+    filename: req.file.originalname || "",
+    mimetype: req.file.mimetype || "",
+    size: req.file.size || 0,
   });
 });
 
@@ -1568,7 +1709,7 @@ export const submitResponse = asyncHandler(async (req, res) => {
     success: true,
     responseId: response._id,
     confirmationMessage: form.settings.confirmationMessage,
-    successRedirectUrl: form.settings.successRedirectUrl,
+    successRedirectUrl: form.settings.successRedirectUrl || "",
     score: showScore ? { totalScore, maxScore, percentage, passed } : null,
   });
 });
@@ -1789,6 +1930,15 @@ export const getStats = asyncHandler(async (req, res) => {
       };
     }
 
+    // image / document / file — just return the latest URLs as samples.
+    if (MEDIA_TYPES.has(f.type)) {
+      const samples = values
+        .slice(-30)
+        .reverse()
+        .map((a) => a.value);
+      return { ...base, samples };
+    }
+
     const samples = values
       .slice(-30)
       .reverse()
@@ -1825,6 +1975,12 @@ export const getStats = asyncHandler(async (req, res) => {
 });
 
 // GET /api/forms/:id/leaderboard
+//
+// `answers` is included in the payload so the client can run the same
+// name/email fallback chain it uses for the responses list — a
+// respondent with no respondentName/respondentEmail but a "Full name"
+// or "Email" field answer still shows their real identity instead of
+// "Anonymous".
 export const getLeaderboard = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -1833,7 +1989,7 @@ export const getLeaderboard = asyncHandler(async (req, res) => {
     .sort({ totalScore: -1, submittedAt: 1 })
     .limit(200)
     .select(
-      "respondentEmail respondentName totalScore maxScore percentage passed submittedAt durationSeconds"
+      "respondentEmail respondentName answers totalScore maxScore percentage passed submittedAt durationSeconds"
     )
     .lean();
 
@@ -1841,6 +1997,7 @@ export const getLeaderboard = asyncHandler(async (req, res) => {
     rank: i + 1,
     email: r.respondentEmail,
     name: r.respondentName,
+    answers: r.answers || [],
     totalScore: r.totalScore,
     maxScore: r.maxScore,
     percentage: r.percentage,
@@ -1898,7 +2055,12 @@ export const exportResponses = asyncHandler(async (req, res) => {
 
   res.status(200).json({
     success: true,
-    form: { _id: form._id, title: form.title, type: form.type },
+    form: {
+      _id: form._id,
+      title: form.title,
+      type: form.type,
+      coverPhoto: form.coverPhoto || "",
+    },
     columns,
     rows,
   });
@@ -1917,6 +2079,9 @@ export default {
   publishForm,
   closeForm,
 
+  uploadFormCoverPhoto,
+  removeFormCoverPhoto,
+
   addCollaborator,
   listCollaborators,
   removeCollaborator,
@@ -1930,6 +2095,7 @@ export default {
 
   getPublicForm,
   participantLogin,
+  uploadFormMedia,
   submitResponse,
 
   listResponses,

@@ -1,9 +1,10 @@
 // pages/PublicForm.jsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 import {
   useGetPublicFormQuery,
   useParticipantLoginMutation,
+  useUploadFormMediaMutation,
   useSubmitResponseMutation,
 } from "../features/formApiSlice";
 import { useDocumentMeta } from "../hooks/useDocumentMeta";
@@ -31,6 +32,28 @@ const writeToken = (slug, token) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Misc helpers
+// ─────────────────────────────────────────────────────────────
+const MEDIA_TYPES = new Set(["image", "document", "file"]);
+
+const mediaNoun = (type) =>
+  type === "image" ? "image" : type === "document" ? "document" : "file";
+
+const mediaAccept = (type) => {
+  if (type === "image") return "image/*";
+  if (type === "document")
+    return ".pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.csv,.zip";
+  return undefined;
+};
+
+const formatBytes = (bytes) => {
+  if (!bytes || bytes < 0) return "";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+};
+
+// ─────────────────────────────────────────────────────────────
 // Brand
 // ─────────────────────────────────────────────────────────────
 const XamutMark = ({ className = "h-9 w-9" }) => (
@@ -53,6 +76,11 @@ const I = {
   check: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={c}>
       <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
+    </svg>
+  ),
+  close: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={c}>
+      <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
     </svg>
   ),
   lock: (c) => (
@@ -101,6 +129,29 @@ const I = {
   spinner: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={`animate-spin ${c}`}>
       <path d="M21 12a9 9 0 1 1-6.2-8.5" strokeLinecap="round" />
+    </svg>
+  ),
+  image: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <circle cx="8.5" cy="8.5" r="1.5" />
+      <path d="M21 15l-5-5L5 21" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  file: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" strokeLinejoin="round" />
+      <path d="M14 2v6h6" strokeLinejoin="round" />
+    </svg>
+  ),
+  upload: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  external: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
 };
@@ -179,9 +230,202 @@ const ScaleInput = ({ value, min, max, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Media input — uploads files to Cloudinary via /upload
+//
+// The stored answer value is either:
+//   • a single { url, filename, size, mimetype } object (maxFiles === 1)
+//   • an array of those objects (maxFiles > 1)
+// The server turns that into a URL string (or array of strings) when
+// the response is saved.
+// ─────────────────────────────────────────────────────────────
+const MediaInput = ({
+  field,
+  value,
+  onChange,
+  slug,
+  participantToken,
+  onUploadingChange,
+  hasError,
+}) => {
+  const [uploadFile, { isLoading }] = useUploadFormMediaMutation();
+  const inputRef = useRef(null);
+  const [error, setError] = useState("");
+
+  const maxFiles = Math.max(1, Number(field.validation?.maxFiles) || 1);
+  const isMulti = maxFiles > 1;
+  const current = value == null ? [] : Array.isArray(value) ? value : [value];
+  const noun = mediaNoun(field.type);
+  const accept = mediaAccept(field.type);
+  const canAdd = current.length < maxFiles;
+
+  useEffect(() => {
+    onUploadingChange?.(field.id, isLoading);
+  }, [isLoading, field.id, onUploadingChange]);
+
+  const handlePick = () => inputRef.current?.click();
+
+  const handleFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (!files.length) return;
+
+    setError("");
+    const remaining = maxFiles - current.length;
+    const toUpload = files.slice(0, remaining);
+    const uploaded = [];
+
+    for (const file of toUpload) {
+      try {
+        const res = await uploadFile({ slug, file, participantToken }).unwrap();
+        uploaded.push({
+          url: res.url,
+          filename: res.filename || file.name,
+          size: res.size || file.size,
+          mimetype: res.mimetype || file.type,
+        });
+      } catch (err) {
+        setError(
+          err?.data?.message || `Couldn't upload ${file.name || "that file"}.`
+        );
+        break;
+      }
+    }
+
+    if (uploaded.length) {
+      if (isMulti) onChange(field.id, [...current, ...uploaded]);
+      else onChange(field.id, uploaded[0]);
+    }
+  };
+
+  const handleRemove = (idx) => {
+    if (isMulti) {
+      onChange(
+        field.id,
+        current.filter((_, i) => i !== idx)
+      );
+    } else {
+      onChange(field.id, null);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <input
+        ref={inputRef}
+        type="file"
+        accept={accept}
+        multiple={isMulti}
+        onChange={handleFiles}
+        className="hidden"
+      />
+
+      {current.map((item, idx) => (
+        <div
+          key={`${item.url}-${idx}`}
+          className="flex items-center gap-3 rounded-md border border-stone-200 bg-stone-50/50 p-2.5 dark:border-stone-700 dark:bg-stone-800/40"
+        >
+          {field.type === "image" ? (
+            <img
+              src={item.url}
+              alt={item.filename || "Upload"}
+              className="h-12 w-12 shrink-0 rounded object-cover ring-1 ring-stone-200 dark:ring-stone-700"
+            />
+          ) : (
+            <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded bg-white text-stone-400 ring-1 ring-stone-200 dark:bg-stone-900 dark:text-stone-500 dark:ring-stone-700">
+              {I.file("h-5 w-5")}
+            </span>
+          )}
+
+          <div className="min-w-0 flex-1">
+            <p className="truncate text-[12.5px] font-medium text-stone-800 dark:text-stone-100">
+              {item.filename || "Uploaded file"}
+            </p>
+            <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
+              {formatBytes(item.size) || "Uploaded"}
+            </p>
+          </div>
+
+          <a
+            href={item.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="shrink-0 rounded-md p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-teal-600 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-teal-400"
+            title="Open in a new tab"
+          >
+            {I.external("h-3.5 w-3.5")}
+          </a>
+
+          <button
+            type="button"
+            onClick={() => handleRemove(idx)}
+            className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+            aria-label="Remove file"
+          >
+            {I.close("h-3.5 w-3.5")}
+          </button>
+        </div>
+      ))}
+
+      {canAdd ? (
+        <button
+          type="button"
+          onClick={handlePick}
+          disabled={isLoading}
+          className={`flex w-full items-center gap-3 rounded-md border-2 border-dashed px-3.5 py-3 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-70 ${
+            hasError
+              ? "border-red-300 bg-red-50/40 hover:bg-red-50 dark:border-red-500/40 dark:bg-red-500/5"
+              : "border-stone-300 bg-white hover:border-teal-400 hover:bg-teal-50/50 dark:border-stone-700 dark:bg-stone-900 dark:hover:border-teal-500/60 dark:hover:bg-teal-500/10"
+          }`}
+        >
+          <span
+            className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-md ${
+              hasError
+                ? "bg-red-100 text-red-500 dark:bg-red-500/20 dark:text-red-400"
+                : "bg-teal-100 text-teal-600 dark:bg-teal-500/20 dark:text-teal-400"
+            }`}
+          >
+            {isLoading ? I.spinner("h-4 w-4") : I.upload("h-4 w-4")}
+          </span>
+          <span className="min-w-0 flex-1">
+            <span className="block text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
+              {isLoading
+                ? "Uploading…"
+                : `Upload ${current.length ? "another " : ""}${noun}`}
+            </span>
+            <span className="mt-0.5 block text-[10.5px] leading-snug text-stone-400 dark:text-stone-500">
+              {isMulti ? `Up to ${maxFiles} ${noun}s. ` : ""}
+              {field.type === "image"
+                ? "JPG, PNG, WEBP, GIF. Max 15MB."
+                : field.type === "document"
+                ? "PDF, DOC, XLS, PPT, TXT or ZIP. Max 15MB."
+                : "Max 15MB."}
+            </span>
+          </span>
+        </button>
+      ) : null}
+
+      {error ? (
+        <p className="flex items-center gap-1.5 text-[11.5px] font-medium text-red-600 dark:text-red-400">
+          {I.alert("h-3.5 w-3.5 shrink-0")}
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Field renderer
 // ─────────────────────────────────────────────────────────────
-const FieldRenderer = ({ field, value, error, onChange }) => {
+const FieldRenderer = ({
+  field,
+  value,
+  error,
+  onChange,
+  slug,
+  participantToken,
+  onUploadingChange,
+}) => {
   const hasError = !!error;
 
   const baseInput =
@@ -215,7 +459,7 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
   }
 
   const setValue = (v) => onChange(field.id, v);
-  const valueStr = value ?? "";
+  const valueStr = value == null ? "" : String(value);
   const arrayValue = Array.isArray(value) ? value : [];
 
   return (
@@ -319,14 +563,16 @@ const FieldRenderer = ({ field, value, error, onChange }) => {
           />
         ) : null}
 
-        {field.type === "file" ? (
-          <input
-            type="url"
-            inputMode="url"
-            value={valueStr}
-            onChange={(e) => setValue(e.target.value)}
-            placeholder="Paste a link to your file (Drive, Dropbox, etc.)"
-            className={inputClass}
+        {/* Media — image / document / file */}
+        {MEDIA_TYPES.has(field.type) ? (
+          <MediaInput
+            field={field}
+            value={value}
+            onChange={onChange}
+            slug={slug}
+            participantToken={participantToken}
+            onUploadingChange={onUploadingChange}
+            hasError={hasError}
           />
         ) : null}
 
@@ -622,15 +868,17 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
 const SubmittedScreen = ({ form, result }) => {
   const showScore =
     result?.score && (form?.settings?.showScoreImmediately || result.score);
+  const redirectUrl = result?.successRedirectUrl || "";
 
+  // Auto-redirect after a short pause so the user can read the
+  // confirmation message. They can also click "Go now" to leave early.
   useEffect(() => {
-    if (result?.successRedirectUrl) {
-      const t = setTimeout(() => {
-        window.location.href = result.successRedirectUrl;
-      }, 1500);
-      return () => clearTimeout(t);
-    }
-  }, [result?.successRedirectUrl]);
+    if (!redirectUrl) return;
+    const t = setTimeout(() => {
+      window.location.href = redirectUrl;
+    }, 2000);
+    return () => clearTimeout(t);
+  }, [redirectUrl]);
 
   return (
     <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
@@ -681,10 +929,24 @@ const SubmittedScreen = ({ form, result }) => {
             </div>
           ) : null}
 
-          {result?.successRedirectUrl ? (
-            <p className="mt-5 text-[11.5px] text-stone-400 dark:text-stone-500">
-              Redirecting…
-            </p>
+          {redirectUrl ? (
+            <div className="mt-5 rounded-md border border-teal-200/70 bg-teal-50/60 px-3.5 py-3 text-left dark:border-teal-500/30 dark:bg-teal-500/10">
+              <p className="text-[12px] leading-relaxed text-teal-800 dark:text-teal-300">
+                Taking you somewhere next…
+              </p>
+              <div className="mt-2 flex items-center gap-2">
+                <a
+                  href={redirectUrl}
+                  className="inline-flex items-center gap-1.5 rounded-md bg-teal-600 px-3 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-colors hover:bg-teal-700 dark:bg-teal-500 dark:hover:bg-teal-400"
+                >
+                  {I.external("h-3.5 w-3.5")}
+                  Go now
+                </a>
+                <span className="text-[10.5px] text-teal-700/70 dark:text-teal-400/80">
+                  Redirecting automatically in a moment.
+                </span>
+              </div>
+            </div>
           ) : null}
 
           <div className="mt-6 flex justify-center">
@@ -771,8 +1033,6 @@ const PublicForm = () => {
 
   const form = formData?.form;
 
-  // Dynamic tab title + description for this form page.
-  // Runs before any early return, no-ops until form data loads.
   useDocumentMeta({
     title: form?.title ? `${form.title} — Xamut` : undefined,
     description: form?.description || undefined,
@@ -799,12 +1059,31 @@ const PublicForm = () => {
   const [submitError, setSubmitError] = useState("");
   const [startedAt] = useState(() => new Date().toISOString());
   const [showJump, setShowJump] = useState(false);
+  const [uploadingFields, setUploadingFields] = useState(() => new Set());
+
+  const anyUploading = uploadingFields.size > 0;
 
   useEffect(() => {
     const onScroll = () => setShowJump(window.scrollY > 600);
     window.addEventListener("scroll", onScroll, { passive: true });
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
+
+  // Stable callback for MediaInput so its effect doesn't loop.
+  const handleUploadingChange = useMemo(
+    () => (fieldId, isUploading) => {
+      setUploadingFields((prev) => {
+        const has = prev.has(fieldId);
+        if (isUploading && has) return prev;
+        if (!isUploading && !has) return prev;
+        const next = new Set(prev);
+        if (isUploading) next.add(fieldId);
+        else next.delete(fieldId);
+        return next;
+      });
+    },
+    []
+  );
 
   const validate = () => {
     if (!form) return true;
@@ -824,16 +1103,21 @@ const PublicForm = () => {
       }
       if (isEmpty) continue;
 
-      if (f.type === "email" && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v))) {
+      if (
+        f.type === "email" &&
+        !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(String(v))
+      ) {
         errs[f.id] = "Enter a valid email.";
       }
-      if (f.type === "url" || f.type === "file") {
+
+      if (f.type === "url") {
         try {
           new URL(String(v));
         } catch {
           errs[f.id] = "Enter a valid URL.";
         }
       }
+
       if (
         (f.type === "short_text" || f.type === "long_text") &&
         f.validation?.minLength &&
@@ -867,10 +1151,18 @@ const PublicForm = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSubmitError("");
+
+    if (anyUploading) {
+      setSubmitError("Please wait for uploads to finish before submitting.");
+      return;
+    }
+
     if (!validate()) {
       const firstErrorId = Object.keys(errors)[0];
       if (firstErrorId) {
-        const el = document.querySelector(`[data-field-id="${firstErrorId}"]`);
+        const el = document.querySelector(
+          `[data-field-id="${firstErrorId}"]`
+        );
         el?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
       return;
@@ -1009,7 +1301,6 @@ const PublicForm = () => {
           ) : null}
         </div>
 
-        {/* Mobile progress bar — real block element, so no stacking/clipping issues. */}
         {showMobileProgress ? (
           <div className="h-1 w-full bg-stone-200 dark:bg-stone-800 lg:hidden">
             <div
@@ -1024,6 +1315,17 @@ const PublicForm = () => {
 
       {/* Content */}
       <div className="mx-auto w-full max-w-5xl flex-1 px-3 pt-4 pb-28 sm:px-6 sm:pt-6 lg:pb-16">
+        {/* Cover photo — banner above the title hero */}
+        {form.coverPhoto ? (
+          <div className="mb-4 overflow-hidden rounded-lg border border-stone-200/80 shadow-sm dark:border-stone-800 sm:mb-5">
+            <img
+              src={form.coverPhoto}
+              alt=""
+              className="block h-36 w-full object-cover sm:h-48 md:h-56"
+            />
+          </div>
+        ) : null}
+
         {/* Title hero */}
         <div className="mb-5 sm:mb-6">
           <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-stone-900 dark:text-stone-100 sm:text-[28px]">
@@ -1082,6 +1384,9 @@ const PublicForm = () => {
                             value={answers[f.id]}
                             error={errors[f.id]}
                             onChange={handleChange}
+                            slug={slug}
+                            participantToken={participantToken}
+                            onUploadingChange={handleUploadingChange}
                           />
                         </div>
                       ) : (
@@ -1091,6 +1396,9 @@ const PublicForm = () => {
                             value={answers[f.id]}
                             error={errors[f.id]}
                             onChange={handleChange}
+                            slug={slug}
+                            participantToken={participantToken}
+                            onUploadingChange={handleUploadingChange}
                           />
                         </div>
                       )}
@@ -1162,13 +1470,18 @@ const PublicForm = () => {
                 <button
                   type="submit"
                   form={FORM_ID}
-                  disabled={submitting}
+                  disabled={submitting || anyUploading}
                   className="flex w-full items-center justify-center gap-2 rounded-md bg-teal-600 px-4 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
                 >
                   {submitting ? (
                     <>
                       {I.spinner("h-3.5 w-3.5")}
                       Submitting…
+                    </>
+                  ) : anyUploading ? (
+                    <>
+                      {I.spinner("h-3.5 w-3.5")}
+                      Uploading…
                     </>
                   ) : (
                     "Submit form"
@@ -1209,13 +1522,18 @@ const PublicForm = () => {
           <button
             type="submit"
             form={FORM_ID}
-            disabled={submitting}
+            disabled={submitting || anyUploading}
             className="w-full max-w-md rounded-md bg-teal-600 px-6 py-3 text-[13.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
           >
             {submitting ? (
               <span className="inline-flex items-center gap-2">
                 {I.spinner("h-3.5 w-3.5")}
                 Submitting…
+              </span>
+            ) : anyUploading ? (
+              <span className="inline-flex items-center gap-2">
+                {I.spinner("h-3.5 w-3.5")}
+                Uploading…
               </span>
             ) : (
               "Submit"

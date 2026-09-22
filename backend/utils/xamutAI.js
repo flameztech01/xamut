@@ -1,55 +1,190 @@
 // utils/xamutAI.js
 //
-// Groq-backed AI service.
-// Env vars are read lazily so nothing depends on dotenv import order.
+// Groq-backed AI service — key pool, size discipline, agent loop, and
+// map-reduce split for big requests, all in one file.
 //
-// Model resolution, TPM budgeting, tool calling, image search, live
-// status streaming.
+// ── Multi-key pooling ─────────────────────────────────────────────
+// Up to 3 API keys from 3 SEPARATE Groq accounts via GROQ_API_KEY_1
+// /2/3. Falls back to legacy GROQ_API_KEY if those are absent.
 //
-// Two model pools:
-//   • TEXT_CANDIDATES  — big models for real chat turns
-//   • FAST_CANDIDATES  — small models for background calls (intent
-//                        detection, memory extraction, JSON parsing)
+// Groq enforces rate limits per-ORGANIZATION, so multiple keys inside
+// ONE account share a single budget and multiply nothing. To actually
+// triple your ceilings you need 3 distinct accounts.
 //
-// Groq gives each model its own daily token budget (TPD). Routing
-// background work to a smaller model keeps the big model's budget
-// free for actual replies, which roughly triples how far one day
-// of free-tier usage goes.
+// Selection: round-robin. On a short-term 429 we cool the specific
+// key; on a daily 429 we park only the (key, model) pair, so other
+// keys still serve the same model.
 //
-// Rate-limit note: 429 backoff is silent. The user's last status
-// ("Thinking", "Searching for X") stays on screen while we sleep
-// and retry. We never surface "waiting N seconds on the rate limit"
-// — that's infrastructure plumbing, not something a user should see.
+// ── Payload-size discipline ──────────────────────────────────────
+// Free-tier TPM ceilings are small (gpt-oss-120b: 8K, qwen3.8-27b:
+// 7K). A request larger than the ceiling is rejected by EVERY key
+// identically — the pool cannot help with 413s. So this module:
 //
-// Tool-choice note: GPT-OSS models (openai/gpt-oss-*) have a native,
-// baked-in impulse to call tools even when none are declared. If we
-// send a request with no tools and no explicit tool_choice, Groq
-// treats that as tool_choice:"none" and rejects the whole thing with
-// a 400 the moment the model reaches for a tool. The fix is to always
-// declare tool_choice:"auto" for models that support tool calling,
-// and to add disable_tool_validation for GPT-OSS so a hallucinated
-// call doesn't blow up the request.
+//   1. Clamps systemPrompt and userContent to a fraction of the
+//      model's TPM budget.
+//   2. Trims the live message array (including tool results added
+//      mid-loop) before every groqChat call, in whole units so we
+//      never orphan a tool_call_id.
+//   3. Caps tool results hard (2.5K chars).
+//   4. On a 413, shrinks the input target and re-trims, rather than
+//      retrying with the same oversized body.
+//   5. Preflights in groqChat: refuses to even send if the payload
+//      exceeds 92% of the model's TPM. Fail local, not remote.
 //
-// Form lookup note: the four tools at the bottom of the TOOLS array
-// (list_user_forms, get_form_stats, get_form_responses,
-// get_form_details) query the user's OWN forms in Mongo. They exist
-// because the model kept trying to web-search for "my attendance form"
-// and hallucinating general-knowledge answers. runAgentTurn passes
-// the userId down through ctx so these tools know whose forms to load.
+// ── Split / map-reduce for big requests ──────────────────────────
+// An LLM cannot be "sharded" mid-inference: you cannot send 1/3 of a
+// prompt to key #1, 1/3 to key #2, 1/3 to key #3 and stitch tokens
+// back. But INDEPENDENT work CAN be split:
 //
-// Fuzzy-match note: list_user_forms used to regex-match the ENTIRE
-// raw user phrase against the title ("application form for obong fc"
-// as one literal substring), which almost never matches a real title
-// like "Obong FC Membership Sign-Up". It now strips filler words and
-// matches on the remaining keywords, ranked by how many hit.
+//   • A long document chunked, each piece summarized in parallel,
+//     then merged.
+//   • Multiple entities researched at once ("compare X, Y, Z").
+//   • Multiple sub-questions, if the caller knows they're independent.
+//
+// runSmartTurn() auto-detects the "big pasted document" case and
+// routes to mapReduceDocument(). Small chat turns go through the
+// normal agent loop. Nothing changes for normal conversation.
+//
+// ── Tool-choice note ─────────────────────────────────────────────
+// GPT-OSS reaches for tools even when none are declared, and Groq
+// rejects that with a 400 ("Tool choice is none, but model called a
+// tool"). Fix: always declare tool_choice:"auto" for GPT-OSS, and
+// pass disable_tool_validation so a hallucinated call doesn't blow
+// up the request.
 
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_URL = `${GROQ_BASE}/chat/completions`;
 const MODELS_URL = `${GROQ_BASE}/models`;
 
-const getGroqKey = () => process.env.GROQ_API_KEY;
+// ═════════════════════════════════════════════════════════════════════
+// KEY POOL
+// ═════════════════════════════════════════════════════════════════════
 
-// Main chat: prefer quality.
+const readEnvKey = (name) => {
+  const v = process.env[name];
+  return typeof v === "string" && v.trim() ? v.trim() : null;
+};
+
+const buildKeyPool = () => {
+  const numbered = [
+    readEnvKey("GROQ_API_KEY_1"),
+    readEnvKey("GROQ_API_KEY_2"),
+    readEnvKey("GROQ_API_KEY_3"),
+  ].filter(Boolean);
+  if (numbered.length) return numbered;
+  const legacy = readEnvKey("GROQ_API_KEY");
+  return legacy ? [legacy] : [];
+};
+
+let _keyPool = null;
+const getKeyPool = () => {
+  if (_keyPool === null) _keyPool = buildKeyPool();
+  return _keyPool;
+};
+
+const _keyCooldown = new Map(); // idx -> resetAt (ms)
+const _dailyExhausted = new Map(); // "idx::model" -> resetAt (ms)
+let _rrCursor = 0;
+
+const markKeyCooldown = (idx, retrySeconds) => {
+  const seconds = Number(retrySeconds);
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 30;
+  _keyCooldown.set(idx, Date.now() + safe * 1000);
+};
+
+const markDailyExhausted = (idx, model, retryAfterSeconds) => {
+  const seconds = Number(retryAfterSeconds);
+  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 60;
+  _dailyExhausted.set(`${idx}::${model}`, Date.now() + safe * 1000);
+};
+
+const isKeyDailyExhausted = (idx, model) => {
+  const k = `${idx}::${model}`;
+  const resetAt = _dailyExhausted.get(k);
+  if (!resetAt) return false;
+  if (Date.now() >= resetAt) {
+    _dailyExhausted.delete(k);
+    return false;
+  }
+  return true;
+};
+
+const isKeyCooling = (idx, now = Date.now()) =>
+  (_keyCooldown.get(idx) || 0) > now;
+
+const isKeyHealthy = (idx, model, now = Date.now()) =>
+  !isKeyCooling(idx, now) && !isKeyDailyExhausted(idx, model);
+
+export const isDailyExhausted = (model) => {
+  const pool = getKeyPool();
+  if (pool.length === 0) return false;
+  for (let i = 0; i < pool.length; i++) {
+    if (!isKeyDailyExhausted(i, model)) return false;
+  }
+  return true;
+};
+
+const hasAvailableKeyForModel = (model) => {
+  const pool = getKeyPool();
+  const now = Date.now();
+  for (let i = 0; i < pool.length; i++) {
+    if (isKeyHealthy(i, model, now)) return true;
+  }
+  return false;
+};
+
+const pickKeyForModel = (model) => {
+  const pool = getKeyPool();
+  const total = pool.length;
+  if (total === 0) return { idx: -1, reason: "no-keys" };
+
+  const now = Date.now();
+
+  for (let i = 0; i < total; i++) {
+    const idx = (_rrCursor + i) % total;
+    if (isKeyHealthy(idx, model, now)) {
+      _rrCursor = (idx + 1) % total;
+      return { idx };
+    }
+  }
+
+  let fallbackIdx = -1;
+  let fallbackCooldown = Infinity;
+  for (let i = 0; i < total; i++) {
+    const idx = (_rrCursor + i) % total;
+    if (isKeyDailyExhausted(idx, model)) continue;
+    const cd = _keyCooldown.get(idx) || 0;
+    if (cd < fallbackCooldown) {
+      fallbackCooldown = cd;
+      fallbackIdx = idx;
+    }
+  }
+  if (fallbackIdx !== -1) {
+    _rrCursor = (fallbackIdx + 1) % total;
+    return { idx: fallbackIdx };
+  }
+
+  return { idx: -1, reason: "daily-exhausted" };
+};
+
+export const getKeyPoolStatus = () => {
+  const pool = getKeyPool();
+  const now = Date.now();
+  return {
+    size: pool.length,
+    cursor: _rrCursor,
+    keys: pool.map((_, i) => ({
+      index: i,
+      coolingMsLeft: Math.max(0, (_keyCooldown.get(i) || 0) - now),
+    })),
+    dailyExhausted: Object.fromEntries(_dailyExhausted),
+  };
+};
+
+// ═════════════════════════════════════════════════════════════════════
+// MODEL POOLS
+// ═════════════════════════════════════════════════════════════════════
+
 const TEXT_CANDIDATES = [
   "openai/gpt-oss-120b",
   "openai/gpt-oss-20b",
@@ -58,7 +193,6 @@ const TEXT_CANDIDATES = [
   "llama-3.3-70b-versatile",
 ];
 
-// Background work: prefer speed and cheaper budget.
 const FAST_CANDIDATES = [
   "openai/gpt-oss-20b",
   "openai/gpt-oss-120b",
@@ -79,9 +213,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const supportsBuiltIns = (model = "") => /^openai\/gpt-oss/.test(model);
 const isCompoundSystem = (model = "") => /^groq\/compound/.test(model);
 
-// ─────────────────────────────────────────────────────────────────────
-// Small helpers
-// ─────────────────────────────────────────────────────────────────────
 const truncate = (s, n) =>
   s.length > n ? s.slice(0, Math.max(0, n - 1)) + "..." : s;
 
@@ -109,9 +240,117 @@ const dedupeByUrl = (list = []) => {
 const escapeRegex = (s) =>
   String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
-// ─────────────────────────────────────────────────────────────────────
-// Form constants (shared between the tools and the executors)
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// TOKEN UTILITIES
+// ═════════════════════════════════════════════════════════════════════
+
+const textOf = (content) => {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content))
+    return content.map((c) => c.text || "").join(" ");
+  return "";
+};
+
+export const estimateTokens = (input) => {
+  if (typeof input === "string") return Math.ceil(input.length / 4) + 4;
+  if (Array.isArray(input))
+    return input.reduce((sum, m) => {
+      if (m && typeof m === "object" && "content" in m)
+        return sum + estimateTokens(textOf(m.content));
+      return sum + estimateTokens(textOf(m));
+    }, 0);
+  if (input && typeof input === "object" && "content" in input)
+    return estimateTokens(textOf(input.content));
+  return 0;
+};
+
+const clampToTokens = (text, maxTokens) => {
+  if (typeof text !== "string") return text;
+  const maxChars = Math.max(200, Math.floor(maxTokens * 4));
+  if (text.length <= maxChars) return text;
+  return text.slice(0, maxChars) + "\n\n[…truncated for length]";
+};
+
+const trimHistoryToBudget = (history, fixedTokens, budget) => {
+  const trimmed = [...history];
+  while (trimmed.length > 0 && fixedTokens + estimateTokens(trimmed) > budget) {
+    trimmed.shift();
+  }
+  return trimmed;
+};
+
+// Group a message list into units so that when we drop messages we
+// never orphan a tool_call_id. A unit is either a single message or
+// an (assistant-with-tool_calls + its following tool responses) cluster.
+const groupIntoUnits = (msgs) => {
+  const units = [];
+  let k = 0;
+  while (k < msgs.length) {
+    const m = msgs[k];
+    if (
+      m.role === "assistant" &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.length
+    ) {
+      const unit = [m];
+      k++;
+      while (k < msgs.length && msgs[k].role === "tool") {
+        unit.push(msgs[k]);
+        k++;
+      }
+      units.push(unit);
+    } else {
+      units.push([m]);
+      k++;
+    }
+  }
+  return units;
+};
+
+// Trim a LIVE message array. Preserves the system prompt (msgs[0])
+// and the message equal by reference to `currentTurnRef`.
+const trimLiveMessages = (msgs, inputBudget, currentTurnRef) => {
+  if (msgs.length <= 2) return msgs;
+  if (estimateTokens(msgs) <= inputBudget) return msgs;
+
+  const head = msgs[0];
+  const turnIdx = currentTurnRef ? msgs.indexOf(currentTurnRef) : -1;
+  const safeTurnIdx = turnIdx >= 0 ? turnIdx : msgs.length - 1;
+
+  const between = msgs.slice(1, safeTurnIdx);
+  const after = msgs.slice(safeTurnIdx + 1);
+
+  const betweenUnits = groupIntoUnits(between);
+  const afterUnits = groupIntoUnits(after);
+
+  const build = (keptBetweenUnits, keptAfterUnits) => [
+    head,
+    ...keptBetweenUnits.flat(),
+    msgs[safeTurnIdx],
+    ...keptAfterUnits.flat(),
+  ];
+
+  let keptBetween = [...betweenUnits];
+  while (keptBetween.length > 0) {
+    const candidate = build(keptBetween, afterUnits);
+    if (estimateTokens(candidate) <= inputBudget) return candidate;
+    keptBetween.shift();
+  }
+
+  let keptAfter = [...afterUnits];
+  while (keptAfter.length > 0) {
+    const candidate = build([], keptAfter);
+    if (estimateTokens(candidate) <= inputBudget) return candidate;
+    keptAfter.shift();
+  }
+
+  return [head, msgs[safeTurnIdx]];
+};
+
+// ═════════════════════════════════════════════════════════════════════
+// FORM CONSTANTS
+// ═════════════════════════════════════════════════════════════════════
+
 const FORM_TYPES = ["form", "quiz", "survey", "feedback", "attendance"];
 
 const CHOICE_TYPES = new Set([
@@ -121,11 +360,6 @@ const CHOICE_TYPES = new Set([
   "multi_select",
 ]);
 
-// Words that carry no identifying signal for a form title. Stripped
-// out before fuzzy-matching a free-text query like "what's the
-// current stats on the application form for obong fc" down to the
-// words that actually distinguish one form from another ("obong",
-// "fc").
 const FORM_QUERY_STOPWORDS = new Set([
   "the", "a", "an", "of", "for", "on", "in", "to", "my", "is", "are",
   "was", "were", "be", "been", "what", "whats", "what's", "which",
@@ -148,33 +382,6 @@ const extractFormKeywords = (text) =>
     .split(/\s+/)
     .filter((w) => w.length > 1 && !FORM_QUERY_STOPWORDS.has(w));
 
-// ─────────────────────────────────────────────────────────────────────
-// Daily budget tracking
-//
-// Groq enforces a tokens-per-day cap per model. When we get a "tokens
-// per day (TPD)" 429, park that model until the retry-after window
-// expires so we stop hammering it. Prevents log spam and pointless
-// retries, and lets the model chain fall through to a model that
-// still has budget.
-// ─────────────────────────────────────────────────────────────────────
-const _dailyExhausted = new Map(); // model -> resetAt (ms epoch)
-
-export const isDailyExhausted = (model) => {
-  const resetAt = _dailyExhausted.get(model);
-  if (!resetAt) return false;
-  if (Date.now() >= resetAt) {
-    _dailyExhausted.delete(model);
-    return false;
-  }
-  return true;
-};
-
-const markDailyExhausted = (model, retryAfterSeconds) => {
-  const seconds = Number(retryAfterSeconds);
-  const safe = Number.isFinite(seconds) && seconds > 0 ? seconds : 60;
-  _dailyExhausted.set(model, Date.now() + safe * 1000);
-};
-
 const isDailyLimitError = (detail = "") => {
   if (typeof detail !== "string") return false;
   return (
@@ -183,108 +390,69 @@ const isDailyLimitError = (detail = "") => {
   );
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// Public image sources
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// PUBLIC IMAGE SOURCES
+// ═════════════════════════════════════════════════════════════════════
+
 export function publicImageSources(query) {
   const q = encodeURIComponent(String(query || "").trim());
   if (!q) return [];
   return [
-    {
-      name: "Wikimedia Commons",
-      url: `https://commons.wikimedia.org/w/index.php?search=${q}`,
-      note: "Free-licensed and public-domain photos.",
-    },
-    {
-      name: "Wikipedia",
-      url: `https://en.wikipedia.org/w/index.php?search=${q}`,
-      note: "Encyclopedic article, usually with a portrait.",
-    },
-    {
-      name: "Getty Images",
-      url: `https://www.gettyimages.com/photos/${q}`,
-      note: "Editorial and press photography.",
-    },
-    {
-      name: "Google Images",
-      url: `https://www.google.com/search?tbm=isch&q=${q}`,
-      note: "Broad web image results.",
-    },
-    {
-      name: "Bing Images",
-      url: `https://www.bing.com/images/search?q=${q}`,
-      note: "Broad web image results.",
-    },
-    {
-      name: "IMDb",
-      url: `https://www.imdb.com/find/?q=${q}`,
-      note: "Headshots for actors and filmmakers.",
-    },
+    { name: "Wikimedia Commons", url: `https://commons.wikimedia.org/w/index.php?search=${q}`, note: "Free-licensed and public-domain photos." },
+    { name: "Wikipedia", url: `https://en.wikipedia.org/w/index.php?search=${q}`, note: "Encyclopedic article, usually with a portrait." },
+    { name: "Getty Images", url: `https://www.gettyimages.com/photos/${q}`, note: "Editorial and press photography." },
+    { name: "Google Images", url: `https://www.google.com/search?tbm=isch&q=${q}`, note: "Broad web image results." },
+    { name: "Bing Images", url: `https://www.bing.com/images/search?q=${q}`, note: "Broad web image results." },
+    { name: "IMDb", url: `https://www.imdb.com/find/?q=${q}`, note: "Headshots for actors and filmmakers." },
   ];
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// TPM budgets
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// TPM BUDGETS
+// ═════════════════════════════════════════════════════════════════════
+
 const DEFAULT_TPM = {
   "openai/gpt-oss-120b": 8000,
   "openai/gpt-oss-20b": 8000,
   "openai/gpt-oss-safeguard-20b": 8000,
-  "qwen/qwen3.8-27b": 8000,
-  "qwen/qwen3.6-27b": 8000,
+  "qwen/qwen3.8-27b": 7000,
+  "qwen/qwen3.6-27b": 7000,
   "groq/compound": 70000,
   "groq/compound-mini": 70000,
   "llama-3.3-70b-versatile": 8000,
 };
+
 const _learnedTpm = new Map();
 const tpmFor = (model) => _learnedTpm.get(model) || DEFAULT_TPM[model] || 8000;
+
 const learnTpm = (model, limit) => {
-  if (limit && Number.isFinite(limit)) _learnedTpm.set(model, limit);
-};
-
-// ─────────────────────────────────────────────────────────────────────
-// Token estimation
-// ─────────────────────────────────────────────────────────────────────
-const textOf = (content) => {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content))
-    return content.map((c) => c.text || "").join(" ");
-  return "";
-};
-
-export const estimateTokens = (input) => {
-  if (typeof input === "string") return Math.ceil(input.length / 4) + 4;
-  if (Array.isArray(input))
-    return input.reduce((sum, m) => sum + estimateTokens(textOf(m.content)), 0);
-  return 0;
-};
-
-const trimHistoryToBudget = (history, fixedTokens, budget) => {
-  let trimmed = [...history];
-  while (
-    trimmed.length > 0 &&
-    fixedTokens + estimateTokens(trimmed) > budget
-  ) {
-    trimmed.shift();
+  if (!limit || !Number.isFinite(limit) || limit < 100) return;
+  const existing = _learnedTpm.get(model);
+  if (existing === undefined || limit < existing) {
+    _learnedTpm.set(model, limit);
   }
-  return trimmed;
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// Model discovery
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// MODEL DISCOVERY
+// ═════════════════════════════════════════════════════════════════════
+
 let _modelCache = null;
 let _modelCachePromise = null;
 
 export async function listAvailableModels({ force = false } = {}) {
-  const GROQ_KEY = getGroqKey();
-  if (!GROQ_KEY)
+  const pool = getKeyPool();
+  if (pool.length === 0)
     throw new Error(
-      "GROQ_API_KEY is not set. Add it to your .env and restart the server."
+      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server."
     );
 
   if (_modelCache && !force) return _modelCache;
   if (_modelCachePromise && !force) return _modelCachePromise;
+
+  const now = Date.now();
+  const keyIdx = pool.findIndex((_, i) => !isKeyCooling(i, now));
+  const GROQ_KEY = pool[keyIdx === -1 ? 0 : keyIdx];
 
   _modelCachePromise = (async () => {
     const res = await fetch(MODELS_URL, {
@@ -324,9 +492,6 @@ async function pickModel(candidates, envOverride) {
     console.warn(`⚠️ "${forced}" not available, falling back.`);
   }
 
-  // Prefer candidates that aren't day-exhausted, but fall back to the
-  // full list if every candidate is exhausted (nothing to gain by
-  // refusing to try).
   const usable = available.filter((m) => !isDailyExhausted(m));
   const pool = usable.length ? usable : available;
 
@@ -335,7 +500,8 @@ async function pickModel(candidates, envOverride) {
 
   const generic = pool.find(
     (m) =>
-      !/whisper|guard|orpheus|tts|embed/i.test(m) && !m.startsWith("groq/compound")
+      !/whisper|guard|orpheus|tts|embed/i.test(m) &&
+      !m.startsWith("groq/compound")
   );
   if (generic) return generic;
 
@@ -355,9 +521,10 @@ export const getFastModel = () =>
 export const getVisionModel = () =>
   process.env.GROQ_VISION_MODEL || VISION_CANDIDATES[0];
 
-// ─────────────────────────────────────────────────────────────────────
-// Core call
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// ERROR PARSERS
+// ═════════════════════════════════════════════════════════════════════
+
 const parseLimitError = (detail = "") => {
   const limit = Number(/Limit (\d+)/i.exec(detail)?.[1]);
   const requested = Number(/Requested (\d+)/i.exec(detail)?.[1]);
@@ -373,12 +540,16 @@ const parseLimitError = (detail = "") => {
   };
 };
 
-// Detect the specific GPT-OSS 400 where the model hallucinated a tool
-// call with no tools declared. This is a model-behaviour issue, not a
-// request issue, and the right recovery is a same-model retry.
 const isToolChoiceMismatchError = (detail = "") =>
   typeof detail === "string" &&
   /tool choice is none,? but model called a tool/i.test(detail);
+
+const isJsonGenerationFailure = (detail = "") =>
+  typeof detail === "string" && /Failed to generate JSON/i.test(detail);
+
+// ═════════════════════════════════════════════════════════════════════
+// CORE CALL
+// ═════════════════════════════════════════════════════════════════════
 
 export async function groqChat({
   messages,
@@ -390,22 +561,45 @@ export async function groqChat({
   toolChoice,
   reasoningEffort,
 }) {
-  const GROQ_KEY = getGroqKey();
-  if (!GROQ_KEY) throw new Error("GROQ_API_KEY is not set.");
+  const pool = getKeyPool();
+  if (pool.length === 0) {
+    throw new Error(
+      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server."
+    );
+  }
 
   const chosenModel = model || (await resolveTextModel());
+  const modelTpm = tpmFor(chosenModel);
 
-  // Short-circuit if we already know this model is parked for the day.
-  if (isDailyExhausted(chosenModel)) {
+  // Pre-flight: refuse to send a payload that every key would reject.
+  const inputTokens = estimateTokens(messages);
+  const hardCap = Math.floor(modelTpm * 0.92);
+  if (inputTokens + maxTokens > hardCap) {
     const err = new Error(
-      `Groq daily token budget for "${chosenModel}" is exhausted. Try again later.`
+      `Payload too large for "${chosenModel}": ~${inputTokens} input + ${maxTokens} output > ${hardCap} token cap (TPM ${modelTpm}). Trim before calling.`
+    );
+    err.status = 413;
+    err.model = chosenModel;
+    err.isLocalOversize = true;
+    err.detail = `local-payload-check: ${inputTokens}+${maxTokens} > ${hardCap}`;
+    throw err;
+  }
+
+  const { idx: keyIdx, reason } = pickKeyForModel(chosenModel);
+  if (keyIdx === -1) {
+    const err = new Error(
+      `Groq daily token budget for "${chosenModel}" is exhausted on all ${pool.length} key(s). Try again later.`
     );
     err.status = 429;
     err.model = chosenModel;
     err.isDailyLimit = true;
-    err.detail = "tokens per day (TPD) exhausted";
+    err.detail = "tokens per day (TPD) exhausted on all keys";
+    err.poolSize = pool.length;
+    err.reason = reason;
     throw err;
   }
+
+  const GROQ_KEY = pool[keyIdx];
 
   const body = {
     model: chosenModel,
@@ -416,20 +610,6 @@ export async function groqChat({
 
   if (jsonMode) body.response_format = { type: "json_object" };
 
-  // ── Tool wiring ────────────────────────────────────────────────
-  // GPT-OSS models reach for tools even when none are declared, and
-  // Groq rejects that with a 400 ("Tool choice is none, but model
-  // called a tool"). The fix is to make the tool contract explicit:
-  //
-  //   • If we have tools to declare, pass them with tool_choice:auto.
-  //   • If we don't, but the model is one that has native tool-calling
-  //     impulses (GPT-OSS), still pass tool_choice:auto + an empty
-  //     tools array + disable_tool_validation. That way if the model
-  //     hallucinates a call, Groq returns it instead of 400-ing, and
-  //     our loop just ignores unknown tools.
-  //   • Never leave tool_choice unset on a model that supports tool
-  //     calling, because "unset" is treated as "none" by the validator.
-  //
   const hasTools = Array.isArray(tools) && tools.length > 0;
   const isBuiltInToolModel = supportsBuiltIns(chosenModel);
 
@@ -441,9 +621,6 @@ export async function groqChat({
     body.tool_choice = "auto";
     body.disable_tool_validation = true;
   }
-  // For non-GPT-OSS models (llama, qwen, compound), leave tools and
-  // tool_choice off entirely. They don't spontaneously call tools, so
-  // omitting the parameters is safe and keeps the request minimal.
 
   if (/gpt-oss|qwen/i.test(chosenModel)) {
     body.reasoning_format = "hidden";
@@ -477,18 +654,18 @@ export async function groqChat({
 
     const daily = isDailyLimitError(detail);
     const toolMismatch = isToolChoiceMismatchError(detail);
+    const jsonFail = isJsonGenerationFailure(detail);
 
-    if (res.status === 429 && daily) {
+    if (res.status === 429) {
       const { retrySeconds, namedModel } = parseLimitError(detail);
-      // Park whichever model the error names, falling back to the one
-      // we called if the error doesn't say.
-      markDailyExhausted(namedModel || chosenModel, retrySeconds || 60);
+      if (daily) {
+        markDailyExhausted(keyIdx, namedModel || chosenModel, retrySeconds || 60);
+      } else {
+        markKeyCooldown(keyIdx, retrySeconds || 30);
+      }
     }
 
     if ((res.status === 413 || res.status === 429) && !daily) {
-      // Only learn per-minute budgets from non-TPD rate limit errors.
-      // A TPD error message also contains "Limit 200000" and if we
-      // learned that as TPM, we'd never trim history again.
       const { limit, namedModel } = parseLimitError(detail);
       if (!namedModel || namedModel === chosenModel) {
         learnTpm(chosenModel, limit);
@@ -496,15 +673,18 @@ export async function groqChat({
     }
 
     const err = new Error(
-      `Groq ${res.status} on "${chosenModel}": ${
+      `Groq ${res.status} on "${chosenModel}" [key #${keyIdx + 1}]: ${
         detail?.slice ? detail.slice(0, 500) : detail || res.statusText
       }`
     );
     err.status = res.status;
     err.model = chosenModel;
+    err.keyIndex = keyIdx;
+    err.poolSize = pool.length;
     err.detail = detail || "";
     err.isDailyLimit = daily;
     err.isToolChoiceMismatch = toolMismatch;
+    err.isJsonGenerationFailure = jsonFail;
     err.failedGeneration = parsedBody?.error?.failed_generation || null;
     throw err;
   }
@@ -519,13 +699,37 @@ export async function groqText(args) {
   return messageText(data?.choices?.[0]?.message);
 }
 
-// Convenience wrappers that default to the fast model. Use these for
-// background work (intent classification, memory extraction) so the
-// big model's daily budget stays free for real replies.
 export async function groqTextFast(args) {
   const model = args.model || (await resolveFastModel());
   return groqText({ ...args, model });
 }
+
+// ═════════════════════════════════════════════════════════════════════
+// JSON CALLS
+// ═════════════════════════════════════════════════════════════════════
+
+const MAX_JSON_INPUT_TOKENS = 3500;
+
+const clampMessagesForJson = (msgs) => {
+  const total = estimateTokens(msgs);
+  if (total <= MAX_JSON_INPUT_TOKENS) return msgs;
+
+  const nonSystem = msgs.filter((m) => m.role !== "system");
+  const share = Math.max(
+    300,
+    Math.floor(MAX_JSON_INPUT_TOKENS / Math.max(1, nonSystem.length))
+  );
+
+  console.warn(
+    `⚠️ JSON call input was ~${total} tokens (cap ${MAX_JSON_INPUT_TOKENS}). Clamping each non-system message to ~${share} tokens.`
+  );
+
+  return msgs.map((m) => {
+    if (m.role === "system") return m;
+    if (typeof m.content !== "string") return m;
+    return { ...m, content: clampToTokens(m.content, share) };
+  });
+};
 
 const extractJson = (raw) => {
   const cleaned = raw
@@ -545,31 +749,35 @@ const extractJson = (raw) => {
 };
 
 export async function groqJSON(args) {
+  const safeMessages = clampMessagesForJson(args.messages);
+
+  const attempt = async (messages, overrides = {}) =>
+    extractJson(
+      await groqText({
+        ...args,
+        ...overrides,
+        messages,
+        jsonMode: true,
+        tools: undefined,
+      })
+    );
+
   try {
-    const raw = await groqText({ ...args, jsonMode: true, tools: undefined });
-    return extractJson(raw);
+    return await attempt(safeMessages);
   } catch (err) {
     const isValidationFailure =
       err.status === 400 && /validate json/i.test(err.detail || "");
     const isParseFailure = !err.status;
+    const recoverable =
+      err.isToolChoiceMismatch ||
+      err.isJsonGenerationFailure ||
+      isValidationFailure ||
+      isParseFailure;
 
-    // A GPT-OSS tool-choice mismatch on a JSON call is recoverable:
-    // just retry the same request. The model's urge to call a tool is
-    // probabilistic, not deterministic, so the second attempt usually
-    // comes back clean.
-    if (err.isToolChoiceMismatch) {
-      const raw = await groqText({
-        ...args,
-        jsonMode: true,
-        tools: undefined,
-      });
-      return extractJson(raw);
-    }
-
-    if (!isValidationFailure && !isParseFailure) throw err;
+    if (!recoverable) throw err;
 
     const retryMessages = [
-      ...args.messages,
+      ...safeMessages,
       {
         role: "user",
         content:
@@ -577,15 +785,10 @@ export async function groqJSON(args) {
       },
     ];
 
-    const raw = await groqText({
-      ...args,
-      messages: retryMessages,
-      jsonMode: true,
-      tools: undefined,
+    return await attempt(clampMessagesForJson(retryMessages), {
       maxTokens: Math.max(args.maxTokens || 0, 800),
       temperature: Math.min(args.temperature ?? 0.6, 0.3),
     });
-    return extractJson(raw);
   }
 }
 
@@ -594,9 +797,10 @@ export async function groqJSONFast(args) {
   return groqJSON({ ...args, model });
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Tools
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// TOOLS
+// ═════════════════════════════════════════════════════════════════════
+
 export const TOOLS = [
   {
     type: "function",
@@ -606,9 +810,7 @@ export const TOOLS = [
         "Search the internet for current information about anything: people, brands, businesses, products, creators, events, prices, tools, code, whatever. Use this whenever you're not 100% sure of the answer or the name is unfamiliar. Returns titles, URLs, and snippets.",
       parameters: {
         type: "object",
-        properties: {
-          query: { type: "string" },
-        },
+        properties: { query: { type: "string" } },
         required: ["query"],
       },
     },
@@ -622,14 +824,8 @@ export const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          query: {
-            type: "string",
-            description: "What to find images of, e.g. 'Cristiano Ronaldo'.",
-          },
-          count: {
-            type: "number",
-            description: "How many images to return. Defaults to 6, max 8.",
-          },
+          query: { type: "string", description: "What to find images of, e.g. 'Cristiano Ronaldo'." },
+          count: { type: "number", description: "How many images to return. Defaults to 6, max 8." },
         },
         required: ["query"],
       },
@@ -643,9 +839,7 @@ export const TOOLS = [
         "Fetch a public website by URL and return its readable text content.",
       parameters: {
         type: "object",
-        properties: {
-          url: { type: "string" },
-        },
+        properties: { url: { type: "string" } },
         required: ["url"],
       },
     },
@@ -658,12 +852,7 @@ export const TOOLS = [
         "Run 3 to 5 web searches at once on different angles of the same topic. Use for comparisons, deep dives, or anything one query can't cover. Returns merged results.",
       parameters: {
         type: "object",
-        properties: {
-          queries: {
-            type: "array",
-            items: { type: "string" },
-          },
-        },
+        properties: { queries: { type: "array", items: { type: "string" } } },
         required: ["queries"],
       },
     },
@@ -677,15 +866,8 @@ export const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          name: {
-            type: "string",
-            description: "The person, brand, or business name.",
-          },
-          context: {
-            type: "string",
-            description:
-              "Optional context like 'frontend developer' or 'Nigerian musician' or 'tech agency'.",
-          },
+          name: { type: "string", description: "The person, brand, or business name." },
+          context: { type: "string", description: "Optional context like 'frontend developer' or 'Nigerian musician' or 'tech agency'." },
         },
         required: ["name"],
       },
@@ -700,16 +882,8 @@ export const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          query: {
-            type: "string",
-            description:
-              "Fuzzy text to match against form titles, or a type name like 'attendance' or 'quiz'. Omit to list every form the user has access to.",
-          },
-          type: {
-            type: "string",
-            enum: ["form", "quiz", "survey", "feedback", "attendance"],
-            description: "Optional form type filter.",
-          },
+          query: { type: "string", description: "Fuzzy text to match against form titles, or a type name like 'attendance' or 'quiz'. Omit to list every form the user has access to." },
+          type: { type: "string", enum: ["form", "quiz", "survey", "feedback", "attendance"], description: "Optional form type filter." },
         },
       },
     },
@@ -722,12 +896,7 @@ export const TOOLS = [
         "Get detailed stats on ONE specific form the user owns: total responses, average completion time, per-field answer breakdowns, quiz scores, pass rate, response rate for private forms. Use this after list_user_forms, when the user's question is about a specific form: 'stats on my attendance form', 'how many responses', 'average score on my quiz', 'pass rate', 'leaderboard', 'who answered what', 'how did people answer question 3'. Requires a formId from list_user_forms.",
       parameters: {
         type: "object",
-        properties: {
-          formId: {
-            type: "string",
-            description: "The form _id returned by list_user_forms.",
-          },
-        },
+        properties: { formId: { type: "string", description: "The form _id returned by list_user_forms." } },
         required: ["formId"],
       },
     },
@@ -742,11 +911,7 @@ export const TOOLS = [
         type: "object",
         properties: {
           formId: { type: "string" },
-          limit: {
-            type: "number",
-            description:
-              "How many recent responses to return. Defaults to 20, max 100.",
-          },
+          limit: { type: "number", description: "How many recent responses to return. Defaults to 20, max 100." },
         },
         required: ["formId"],
       },
@@ -760,9 +925,7 @@ export const TOOLS = [
         "Fetch the full definition of a form the user owns: title, description, type, visibility, and every field with its options, validation, and scoring. Use for 'what's on my form', 'show me the questions', 'list the fields', 'what does my quiz ask'. Requires a formId from list_user_forms.",
       parameters: {
         type: "object",
-        properties: {
-          formId: { type: "string" },
-        },
+        properties: { formId: { type: "string" } },
         required: ["formId"],
       },
     },
@@ -784,9 +947,10 @@ export const toolsFor = (model) => {
   return [...builtInTools(model), ...TOOLS];
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// Local tool executors
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// TOOL EXECUTORS
+// ═════════════════════════════════════════════════════════════════════
+
 export async function webSearch(query, maxResults = 5) {
   const key = process.env.TAVILY_API_KEY;
   if (!key) throw new Error("TAVILY_API_KEY is not set.");
@@ -892,7 +1056,7 @@ export async function fetchWebsite(url) {
     .replace(/\s+/g, " ")
     .trim();
 
-  return text.slice(0, 20000);
+  return text.slice(0, 8000);
 }
 
 export async function deepSearch(queries) {
@@ -906,7 +1070,7 @@ export async function deepSearch(queries) {
 
   const results = await Promise.all(
     capped.map((q) =>
-      webSearch(q.trim(), 5).catch(() => ({ answer: "", results: [] }))
+      webSearch(q.trim(), 4).catch(() => ({ answer: "", results: [] }))
     )
   );
 
@@ -917,14 +1081,14 @@ export async function deepSearch(queries) {
       if (!item.url || seen.has(item.url)) continue;
       seen.add(item.url);
       merged.push({ ...item, fromQuery: capped[i] });
-      if (merged.length >= 20) break;
+      if (merged.length >= 12) break;
     }
-    if (merged.length >= 20) break;
+    if (merged.length >= 12) break;
   }
 
   return {
     queries: capped,
-    answers: results.map((r) => r.answer).filter(Boolean),
+    answers: results.map((r) => r.answer).filter(Boolean).slice(0, 3),
     sources: merged,
   };
 }
@@ -948,10 +1112,10 @@ export async function researchPerson(name, context = "") {
   const [textResults, imageResults] = await Promise.all([
     Promise.all(
       queries.map((q) =>
-        webSearch(q, 4).catch(() => ({ answer: "", results: [] }))
+        webSearch(q, 3).catch(() => ({ answer: "", results: [] }))
       )
     ),
-    imageSearch(base, 6).catch(() => ({
+    imageSearch(base, 4).catch(() => ({
       images: [],
       sources: [],
       whereToFind: [],
@@ -965,9 +1129,9 @@ export async function researchPerson(name, context = "") {
       if (!item.url || seen.has(item.url)) continue;
       seen.add(item.url);
       merged.push(item);
-      if (merged.length >= 18) break;
+      if (merged.length >= 12) break;
     }
-    if (merged.length >= 18) break;
+    if (merged.length >= 12) break;
   }
 
   return {
@@ -977,7 +1141,7 @@ export async function researchPerson(name, context = "") {
       .map((r) => r.answer)
       .filter(Boolean)
       .join(" ")
-      .slice(0, 1500),
+      .slice(0, 1200),
     sources: merged,
     images: imageResults.images || [],
     imageSources: imageResults.sources || [],
@@ -988,18 +1152,7 @@ export async function researchPerson(name, context = "") {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Form lookup executors
-//
-// These query the user's OWN forms in Mongo. They're wired through
-// runTool so the agentic loop can chain them: list → stats, or
-// list → responses. The userId is passed down from runAgentTurn via
-// the ctx argument.
-//
-// Models are imported lazily to avoid a circular import at module load
-// (models/formModel.js imports nothing from here, but keeping the lazy
-// boundary clean makes the dependency direction obvious).
-// ─────────────────────────────────────────────────────────────────────
+// ── Form executors ────────────────────────────────────────────────
 let _formModelsPromise = null;
 const loadFormModels = () => {
   if (!_formModelsPromise) {
@@ -1022,10 +1175,6 @@ const assertFormAccess = (form, userId) => {
   throw new Error("You don't have access to that form.");
 };
 
-// Fuzzy-matches a free-text query ("application form for obong fc")
-// against the user's forms by keyword overlap rather than requiring
-// the whole phrase to appear verbatim in the title. Falls back to a
-// plain substring match if the query is nothing but filler words.
 async function listUserForms({ query, type } = {}, userId) {
   if (!userId) throw new Error("No user context for form lookup.");
   const { Form } = await loadFormModels();
@@ -1045,9 +1194,6 @@ async function listUserForms({ query, type } = {}, userId) {
         ors.push({ title: { $regex: escapeRegex(kw), $options: "i" } });
       }
     } else {
-      // Query was nothing but filler words ("the form", "my forms") —
-      // fall back to matching the raw phrase so we don't accidentally
-      // return every form the user has.
       ors.push({ title: { $regex: escapeRegex(trimmed), $options: "i" } });
     }
 
@@ -1068,10 +1214,6 @@ async function listUserForms({ query, type } = {}, userId) {
     .limit(50)
     .lean();
 
-  // Rank by how many keywords actually appear in the title, so a
-  // close match ("Obong FC Membership Sign-Up" for "obong fc") floats
-  // above a coincidental type-only match, instead of just sorting by
-  // most-recently-updated.
   if (trimmed && keywords.length && forms.length > 1) {
     const lowerTrimmed = trimmed.toLowerCase();
     forms = forms
@@ -1120,7 +1262,9 @@ async function getFormStatsTool({ formId } = {}, userId) {
   if (!form) throw new Error("Form not found.");
   assertFormAccess(form, userId);
 
-  const responses = await FormResponse.find({ form: form._id }).lean();
+  const responses = await FormResponse.find({ form: form._id })
+    .limit(500)
+    .lean();
   const total = responses.length;
 
   const durations = responses
@@ -1150,6 +1294,7 @@ async function getFormStatsTool({ formId } = {}, userId) {
 
   const fields = (form.fields || [])
     .filter((f) => f.type !== "section")
+    .slice(0, 40)
     .map((f) => {
       const values = responses
         .map((r) => (r.answers || []).find((a) => a.fieldId === f.id))
@@ -1170,7 +1315,7 @@ async function getFormStatsTool({ formId } = {}, userId) {
           const arr = Array.isArray(a.value) ? a.value : [a.value];
           for (const v of arr) counts[String(v)] = (counts[String(v)] || 0) + 1;
         }
-        base.options = (f.options || []).map((o) => ({
+        base.options = (f.options || []).slice(0, 20).map((o) => ({
           label: o.label,
           value: o.value,
           count: counts[o.value] || 0,
@@ -1198,9 +1343,9 @@ async function getFormStatsTool({ formId } = {}, userId) {
         base.no = no;
       } else {
         base.samples = values
-          .slice(-10)
+          .slice(-5)
           .reverse()
-          .map((a) => String(a.value).slice(0, 200));
+          .map((a) => String(a.value).slice(0, 120));
       }
       return base;
     });
@@ -1252,7 +1397,7 @@ async function getFormResponsesTool({ formId, limit = 20 } = {}, userId) {
   if (!form) throw new Error("Form not found.");
   assertFormAccess(form, userId);
 
-  const cap = Math.max(1, Math.min(Number(limit) || 20, 100));
+  const cap = Math.max(1, Math.min(Number(limit) || 20, 30));
 
   const responses = await FormResponse.find({ form: form._id })
     .sort({ submittedAt: -1 })
@@ -1278,9 +1423,9 @@ async function getFormResponsesTool({ formId, limit = 20 } = {}, userId) {
       maxScore: r.maxScore,
       percentage: r.percentage,
       passed: r.passed,
-      answers: (r.answers || []).map((a) => ({
+      answers: (r.answers || []).slice(0, 30).map((a) => ({
         label: labelByFieldId.get(a.fieldId) || a.fieldId,
-        value: a.value,
+        value: String(a.value).slice(0, 300),
       })),
     })),
   };
@@ -1304,13 +1449,13 @@ async function getFormDetailsTool({ formId } = {}, userId) {
     slug: form.slug,
     isMultipage: form.isMultipage,
     settings: form.settings,
-    fields: (form.fields || []).map((f) => ({
+    fields: (form.fields || []).slice(0, 60).map((f) => ({
       id: f.id,
       type: f.type,
       label: f.label,
       description: f.description,
       required: f.required,
-      options: (f.options || []).map((o) => ({
+      options: (f.options || []).slice(0, 20).map((o) => ({
         label: o.label,
         value: o.value,
       })),
@@ -1320,12 +1465,6 @@ async function getFormDetailsTool({ formId } = {}, userId) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Tool dispatcher
-//
-// ctx carries per-turn context (currently just userId) so tools that
-// need to scope queries to the current user can do so.
-// ─────────────────────────────────────────────────────────────────────
 export async function runTool(name, args, ctx = {}) {
   switch (name) {
     case "web_search":
@@ -1351,9 +1490,10 @@ export async function runTool(name, args, ctx = {}) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Status text for streaming
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// STATUS TEXT
+// ═════════════════════════════════════════════════════════════════════
+
 const statusForToolCall = (call) => {
   const name = call?.function?.name;
   let args = {};
@@ -1390,9 +1530,14 @@ const statusForToolCall = (call) => {
   return null;
 };
 
-// ─────────────────────────────────────────────────────────────────────
-// Agentic loop
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// AGENT LOOP
+// ═════════════════════════════════════════════════════════════════════
+
+const INPUT_BUDGET_FRACTION = 0.72;
+const SAFETY_MARGIN = 250;
+const MAX_TOOL_RESULT_CHARS = 2500;
+
 export async function runAgentTurn({
   systemPrompt,
   history = [],
@@ -1405,7 +1550,6 @@ export async function runAgentTurn({
   onStatus,
   userId,
 }) {
-  const SAFETY_MARGIN = 250;
   const MAX_SHRINK_ATTEMPTS = 3;
   const MAX_429_WAIT_MS = 15000;
   const MAX_TOOL_CHOICE_RETRIES = 2;
@@ -1430,8 +1574,6 @@ export async function runAgentTurn({
     ...HIGH_BUDGET_MODELS.filter((m) => available.includes(m)),
   ].filter((m, i, arr) => arr.indexOf(m) === i);
 
-  // Prefer models that still have daily budget. If every candidate is
-  // parked, fall through to the full chain so we at least try.
   const usable = fullChain.filter((m) => !isDailyExhausted(m));
   const chain = usable.length ? usable : fullChain;
 
@@ -1447,25 +1589,61 @@ export async function runAgentTurn({
   });
 
   for (const attemptModel of chain) {
-    let outputBudget = maxTokens;
-    let trimmedHistory = [...history];
+    const modelTpm = tpmFor(attemptModel);
 
-    const fixedTokens = () =>
-      estimateTokens(systemPrompt) +
-      estimateTokens(userContent) +
-      SAFETY_MARGIN +
-      outputBudget;
-
-    trimmedHistory = trimHistoryToBudget(
-      trimmedHistory,
-      fixedTokens(),
-      tpmFor(attemptModel)
+    let inputBudget = Math.floor(modelTpm * INPUT_BUDGET_FRACTION);
+    let outputBudget = Math.min(
+      maxTokens,
+      Math.max(400, modelTpm - inputBudget - SAFETY_MARGIN)
     );
 
+    const sysTokens = estimateTokens(systemPrompt);
+    const userTokens = estimateTokens(userContent);
+    const reserveForUser = Math.max(500, Math.floor(inputBudget * 0.45));
+    const reserveForSystem = Math.max(400, Math.floor(inputBudget * 0.35));
+
+    const safeSystem =
+      sysTokens > reserveForSystem
+        ? clampToTokens(systemPrompt, reserveForSystem)
+        : systemPrompt;
+    const safeUser =
+      userTokens > reserveForUser
+        ? clampToTokens(userContent, reserveForUser)
+        : userContent;
+
+    if (sysTokens > reserveForSystem) {
+      console.warn(
+        `⚠️ System prompt (~${sysTokens}t) exceeded budget; clamped to ~${reserveForSystem}t for "${attemptModel}".`
+      );
+    }
+    if (userTokens > reserveForUser) {
+      console.warn(
+        `⚠️ User turn (~${userTokens}t) exceeded budget; clamped to ~${reserveForUser}t for "${attemptModel}".`
+      );
+    }
+
+    const pinnedTokens =
+      estimateTokens(safeSystem) + estimateTokens(safeUser) + SAFETY_MARGIN;
+
+    let trimmedHistory = trimHistoryToBudget(
+      [...history],
+      pinnedTokens + outputBudget,
+      inputBudget
+    );
+    const historyBudget = Math.max(
+      0,
+      inputBudget - pinnedTokens - outputBudget
+    );
+    if (historyBudget < 200 && trimmedHistory.length) {
+      trimmedHistory = [];
+    }
+
+    const currentTurn = { role: "user", content: safeUser };
+
     const buildMessages = () => [
-      { role: "system", content: systemPrompt },
+      { role: "system", content: safeSystem },
       ...trimmedHistory,
-      { role: "user", content: userContent },
+      currentTurn,
     ];
 
     let messages = buildMessages();
@@ -1475,8 +1653,17 @@ export async function runAgentTurn({
 
     for (let i = 0; i < maxIterations; i++) {
       const tools = toolsFor(attemptModel);
-      let data;
 
+      const liveInputBudget = Math.max(600, inputBudget - outputBudget);
+      messages = trimLiveMessages(messages, liveInputBudget, currentTurn);
+
+      const projectedInput = estimateTokens(messages);
+      if (projectedInput + outputBudget > inputBudget) {
+        const reduceBy = projectedInput + outputBudget - inputBudget;
+        outputBudget = Math.max(400, outputBudget - reduceBy - 100);
+      }
+
+      let data;
       try {
         data = await groqChat({
           messages,
@@ -1485,23 +1672,14 @@ export async function runAgentTurn({
           maxTokens: outputBudget,
           reasoningEffort,
           tools: tools.length ? tools : undefined,
-          // Always pass "auto" when we have tools. Never pass "none".
-          // GPT-OSS will reach for tools regardless, and "none" turns
-          // that into a hard 400.
           toolChoice: tools.length ? "auto" : undefined,
         });
       } catch (err) {
         lastErr = err;
+        const isOversize = err.status === 413;
 
-        // Daily budget exhausted. Don't retry, move to the next model
-        // in the chain.
-        if (err.isDailyLimit) {
-          break;
-        }
+        if (err.isDailyLimit) break;
 
-        // GPT-OSS hallucinated a tool call on a request where we
-        // couldn't declare tools. Retry the same model — the impulse
-        // is probabilistic, so a second pass usually comes back clean.
         if (
           err.isToolChoiceMismatch &&
           toolChoiceRetries < MAX_TOOL_CHOICE_RETRIES
@@ -1511,30 +1689,47 @@ export async function runAgentTurn({
           continue;
         }
 
-        if (err.status === 413 && shrinkAttempts < MAX_SHRINK_ATTEMPTS) {
+        if (isOversize && shrinkAttempts < MAX_SHRINK_ATTEMPTS) {
           shrinkAttempts++;
-          outputBudget = Math.max(400, Math.floor(outputBudget * 0.6));
-          trimmedHistory = trimHistoryToBudget(
-            trimmedHistory,
-            fixedTokens(),
-            tpmFor(attemptModel)
-          );
-          messages = buildMessages();
+          inputBudget = Math.max(1500, Math.floor(inputBudget * 0.55));
+          outputBudget = Math.max(400, Math.floor(outputBudget * 0.7));
+
+          const newSysCap = Math.max(400, Math.floor(inputBudget * 0.35));
+          const newUserCap = Math.max(500, Math.floor(inputBudget * 0.45));
+          const sysNow = estimateTokens(safeSystem);
+          const userNow = estimateTokens(safeUser);
+          if (sysNow > newSysCap || userNow > newUserCap) {
+            const rs = sysNow > newSysCap
+              ? clampToTokens(systemPrompt, newSysCap)
+              : safeSystem;
+            const ru = userNow > newUserCap
+              ? clampToTokens(userContent, newUserCap)
+              : safeUser;
+            messages = [
+              { role: "system", content: rs },
+              { role: "user", content: ru },
+            ];
+            currentTurn.content = ru;
+          }
           i--;
           continue;
         }
 
         if (err.status === 429) {
+          if (
+            err.keyIndex !== undefined &&
+            hasAvailableKeyForModel(attemptModel)
+          ) {
+            i--;
+            continue;
+          }
+
           const { retrySeconds } = parseLimitError(err.detail);
           const waitMs = Math.min(
             (retrySeconds || 3) * 1000 + 250,
             MAX_429_WAIT_MS - totalWaitedMs
           );
           if (waitMs > 0 && totalWaitedMs < MAX_429_WAIT_MS) {
-            // Silent backoff. We deliberately do NOT emit a status
-            // here — the user shouldn't see rate-limit plumbing. The
-            // last status text stays on screen while we sleep and
-            // retry, which reads as normal AI latency.
             await sleep(waitMs);
             totalWaitedMs += waitMs;
             i--;
@@ -1571,10 +1766,6 @@ export async function runAgentTurn({
       for (const t of data?.executed_tools || choice?.executed_tools || [])
         executed.push(t.type || t.name);
 
-      // Only act on tool calls we actually know how to run. GPT-OSS
-      // sometimes invents tool names (or returns built-in ones like
-      // browser_search) — those just pass through to the next turn
-      // without us trying to execute them.
       const toolCalls = (choice.tool_calls || []).filter((c) =>
         LOCAL_TOOL_NAMES.has(c.function?.name)
       );
@@ -1602,9 +1793,6 @@ export async function runAgentTurn({
         const statusText = statusForToolCall(call);
         if (statusText) emitStatus(onStatus, statusText);
 
-        // Skip execution for tools we don't recognise — but still
-        // hand back a valid tool message so the conversation can
-        // continue without Groq complaining about a missing reply.
         if (!LOCAL_TOOL_NAMES.has(call.function?.name)) {
           messages.push({
             role: "tool",
@@ -1638,14 +1826,14 @@ export async function runAgentTurn({
           result = { error: err.message };
         }
 
+        const serialized =
+          typeof result === "string" ? result : JSON.stringify(result);
+
         messages.push({
           role: "tool",
           tool_call_id: call.id,
           name: call.function?.name,
-          content:
-            typeof result === "string"
-              ? result
-              : JSON.stringify(result).slice(0, 8000),
+          content: serialized.slice(0, MAX_TOOL_RESULT_CHARS),
         });
       }
     }
@@ -1663,22 +1851,312 @@ export async function runAgentTurn({
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Memory extraction
+// ═════════════════════════════════════════════════════════════════════
+// SPLIT / MAP-REDUCE FOR BIG REQUESTS
+// ═════════════════════════════════════════════════════════════════════
+
+// Split text by character length, then walk back to a paragraph or
+// sentence break. Overlap keeps information that straddles a
+// boundary from being lost.
+export function chunkText(text, targetTokens = 1500, overlapFraction = 0.08) {
+  if (typeof text !== "string" || !text) return [];
+  const targetChars = Math.max(500, targetTokens * 4);
+  const overlapChars = Math.floor(targetChars * overlapFraction);
+  if (text.length <= targetChars) return [text];
+
+  const chunks = [];
+  let i = 0;
+  while (i < text.length) {
+    let end = Math.min(text.length, i + targetChars);
+    if (end < text.length) {
+      const para = text.lastIndexOf("\n\n", end);
+      const sent = text.lastIndexOf(". ", end);
+      const floor = i + Math.floor(targetChars * 0.6);
+      if (para > floor) end = para;
+      else if (sent > floor) end = sent + 1;
+    }
+    chunks.push(text.slice(i, end));
+    if (end >= text.length) break;
+    i = Math.max(end - overlapChars, i + 1);
+  }
+  return chunks;
+}
+
+// Fire N independent prompts concurrently. Each task lands on a
+// different key because groqChat's round-robin cursor advances
+// synchronously before any network I/O starts.
+export async function parallelDispatch(
+  tasks,
+  { model, temperature = 0.3, maxTokens = 1024, systemPrompt } = {}
+) {
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    throw new Error("parallelDispatch requires a non-empty tasks array.");
+  }
+
+  const chosenModel = model || (await resolveTextModel());
+
+  const settled = await Promise.allSettled(
+    tasks.map((t) =>
+      groqChat({
+        messages: [
+          { role: "system", content: t.system || systemPrompt || "" },
+          { role: "user", content: t.content },
+        ],
+        model: chosenModel,
+        temperature,
+        maxTokens,
+      })
+    )
+  );
+
+  return settled.map((r, i) => ({
+    label: tasks[i].label || `task_${i + 1}`,
+    ok: r.status === "fulfilled",
+    content:
+      r.status === "fulfilled"
+        ? messageText(r.value?.choices?.[0]?.message)
+        : null,
+    error: r.status === "rejected" ? r.reason?.message : null,
+  }));
+}
+
+// Split a big document, summarize pieces in parallel, merge the
+// partials into one answer.
+export async function mapReduceDocument({
+  systemPrompt = "You are a helpful assistant.",
+  document,
+  question,
+  model,
+  onStatus,
+  chunkTokens = 1500,
+  maxTokens = 800,
+}) {
+  if (!document || typeof document !== "string") {
+    throw new Error("mapReduceDocument requires a document string.");
+  }
+  if (!question || typeof question !== "string") {
+    throw new Error("mapReduceDocument requires a question string.");
+  }
+
+  const chunks = chunkText(document, chunkTokens);
+  if (chunks.length === 0) throw new Error("Document produced no chunks.");
+
+  // Small enough to handle in one shot.
+  if (chunks.length === 1) {
+    const data = await groqChat({
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: `${question}\n\n---\n\n${document}` },
+      ],
+      model,
+      maxTokens: maxTokens * 2,
+    });
+    return {
+      content: messageText(data?.choices?.[0]?.message),
+      chunks: 1,
+      partials: [],
+      merged: false,
+    };
+  }
+
+  if (typeof onStatus === "function") {
+    onStatus(`Reading ${chunks.length} parts in parallel`);
+  }
+
+  const mapSystem =
+    systemPrompt +
+    "\n\nYou are processing ONE PART of a larger document. " +
+    "Answer the user's question using ONLY information that appears in this part. " +
+    "If this part contains nothing relevant, reply exactly: NOTHING RELEVANT IN THIS PART.";
+
+  const partials = await parallelDispatch(
+    chunks.map((c, i) => ({
+      label: `part_${i + 1}`,
+      system: mapSystem,
+      content: `Question: ${question}\n\n--- Part ${i + 1} of ${chunks.length} ---\n\n${c}`,
+    })),
+    { model, temperature: 0.2, maxTokens }
+  );
+
+  const usable = partials.filter(
+    (p) => p.ok && p.content && !/NOTHING RELEVANT IN THIS PART/i.test(p.content)
+  );
+
+  if (usable.length === 0) {
+    return {
+      content:
+        "None of the document parts contained information relevant to that question.",
+      chunks: chunks.length,
+      partials,
+      merged: false,
+    };
+  }
+
+  if (typeof onStatus === "function") {
+    onStatus("Combining the answers");
+  }
+
+  const mergeBody = usable
+    .map((p) => `### From ${p.label}\n${p.content}`)
+    .join("\n\n");
+
+  const mergeSystem =
+    "You merge partial answers into ONE final answer. " +
+    "Do not mention that the work was split. Do not say 'part 1' or 'the chunks'. " +
+    "Write the answer as if you had read the whole document at once.";
+
+  const merged = await groqChat({
+    messages: [
+      {
+        role: "system",
+        content: `${systemPrompt}\n\n${mergeSystem}`,
+      },
+      {
+        role: "user",
+        content: `Original question: ${question}\n\nPartial answers:\n\n${mergeBody}\n\nWrite the final merged answer.`,
+      },
+    ],
+    model,
+    temperature: 0.3,
+    maxTokens: maxTokens * 2,
+  });
+
+  return {
+    content: messageText(merged?.choices?.[0]?.message),
+    chunks: chunks.length,
+    partials,
+    merged: true,
+  };
+}
+
+// Split a pasted message into document + question.
 //
-// Routed to the fast model. Handles daily budget errors silently —
-// memory is a nice-to-have, it should never spam the log or block a
-// turn.
-// ─────────────────────────────────────────────────────────────────────
+// Heuristic A: explicit separator ("---", "Question:", "Q:")
+// Heuristic B: last question sentence near the tail of the text.
+function splitDocumentAndQuestion(text) {
+  if (typeof text !== "string" || !text) {
+    return { document: "", question: "" };
+  }
+
+  const sepPatterns = [
+    /\n-{3,}\s*\n\s*(?:question|q)\s*[:：]?\s*/i,
+    /\n\s*(?:question|q)\s*[:：]\s*/i,
+  ];
+  for (const re of sepPatterns) {
+    const m = re.exec(text);
+    if (m && m.index > 0) {
+      const document = text.slice(0, m.index).trim();
+      const question = text.slice(m.index + m[0].length).trim();
+      if (document && question) return { document, question };
+    }
+  }
+
+  const tailStart = Math.floor(text.length * 0.8);
+  const tail = text.slice(tailStart);
+  const qMatch = tail.lastIndexOf("?");
+  if (qMatch !== -1) {
+    const beforeQ = tail.slice(0, qMatch);
+    const dotIdx = Math.max(
+      beforeQ.lastIndexOf(". "),
+      beforeQ.lastIndexOf("\n")
+    );
+    const qStart = dotIdx === -1 ? 0 : dotIdx + 1;
+    const question = tail.slice(qStart, qMatch + 1).trim();
+    if (question.length > 5 && question.length < 500) {
+      const absoluteQStart = tailStart + qStart;
+      const document = text.slice(0, absoluteQStart).trim();
+      if (document) return { document, question };
+    }
+  }
+
+  return { document: "", question: "" };
+}
+
+// Drop-in replacement for runAgentTurn. Decides between three paths:
+//   1. Small request      → runAgentTurn (normal agent loop)
+//   2. Big pasted doc     → mapReduceDocument (split + merge)
+//   3. Big non-doc        → runAgentTurn (clamps + trims)
+export async function runSmartTurn({
+  systemPrompt,
+  history = [],
+  userContent,
+  model,
+  onStatus,
+  userId,
+  preferDecomposition = true,
+  documentThresholdTokens = 4000,
+  chunkTokens = 1500,
+  maxTokens = 2048,
+}) {
+  const userTokens = estimateTokens(userContent);
+  const sysTokens = estimateTokens(systemPrompt);
+  const histTokens = estimateTokens(history);
+  const totalInput = userTokens + sysTokens + histTokens;
+
+  const userDominant = userTokens / Math.max(1, totalInput) > 0.5;
+  const isSingleTurn = !history || history.length === 0;
+  const isBig = userTokens > documentThresholdTokens;
+
+  if (preferDecomposition && isSingleTurn && userDominant && isBig) {
+    const { document, question } = splitDocumentAndQuestion(userContent);
+
+    if (document && question && estimateTokens(document) > 1500) {
+      if (typeof onStatus === "function") {
+        onStatus("Big request — splitting into parts");
+      }
+      const r = await mapReduceDocument({
+        systemPrompt,
+        document,
+        question,
+        model,
+        onStatus,
+        chunkTokens,
+        maxTokens: Math.min(1000, Math.floor(maxTokens / 2)),
+      });
+      return {
+        content: r.content,
+        model: model || "decomposed",
+        executed: [],
+        images: [],
+        imageSources: [],
+        whereToFind: [],
+        decomposed: true,
+        chunks: r.chunks,
+      };
+    }
+  }
+
+  return runAgentTurn({
+    systemPrompt,
+    history,
+    userContent,
+    model,
+    onStatus,
+    userId,
+    maxTokens,
+  });
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// MEMORY EXTRACTION
+// ═════════════════════════════════════════════════════════════════════
+
+const MEMORY_CHAR_CAP = 600;
+
 export async function extractUserMemories({
   userMessage,
   assistantReply,
   recentHistory = [],
 }) {
+  const cap = (s) =>
+    typeof s === "string" ? s.slice(0, MEMORY_CHAR_CAP) : "";
+
   const context = [
-    ...recentHistory.slice(-4).map((m) => `${m.role.toUpperCase()}: ${m.content}`),
-    `USER: ${userMessage}`,
-    `ASSISTANT: ${assistantReply}`,
+    ...recentHistory
+      .slice(-3)
+      .map((m) => `${m.role.toUpperCase()}: ${cap(m.content)}`),
+    `USER: ${cap(userMessage)}`,
+    `ASSISTANT: ${cap(assistantReply)}`,
   ]
     .filter(Boolean)
     .join("\n");
@@ -1688,41 +2166,22 @@ export async function extractUserMemories({
       messages: [
         {
           role: "system",
-          content: `You extract durable facts about the USER from a conversation turn.
+          content: `Extract durable facts about the USER from a conversation turn.
 
 Only extract things that are true about the user and worth remembering long-term:
 - name, location, age, school, job, relationship status
-- preferences (how they like responses, tone, format)
-- interests, favourites (teams, celebs, music, shows)
+- preferences (tone, format)
+- interests, favourites
 - projects they're working on
-- important dates or events
+- important dates
 
-Do NOT extract:
-- things the user was just asking about (a question is not a fact)
-- transient info ("I'm tired today")
-- assistant's own statements
-- anything the assistant inferred without the user saying it
+Do NOT extract: questions, transient info, assistant statements, inferences.
 
 Return STRICT JSON only.`,
         },
         {
           role: "user",
-          content: `Conversation turn:
-
-${context}
-
-Return JSON exactly:
-{
-  "memories": [
-    {
-      "category": "identity" | "preference" | "interest" | "project" | "fact",
-      "text": "short statement, e.g. 'Their name is Samuel'",
-      "importance": number between 0 and 1
-    }
-  ]
-}
-
-Return an empty array if there's nothing durable. Max 4 memories per turn.`,
+          content: `Turn:\n${context}\n\nReturn: {"memories":[{"category":"identity"|"preference"|"interest"|"project"|"fact","text":"...","importance":0.0-1.0}]}\nEmpty array if nothing durable. Max 4.`,
         },
       ],
       temperature: 0.2,
@@ -1743,18 +2202,16 @@ Return an empty array if there's nothing durable. Max 4 memories per turn.`,
         importance: Math.min(Math.max(Number(m.importance) || 0.5, 0), 1),
       }));
   } catch (err) {
-    // Daily budget exhausted: skip silently. It'll work tomorrow.
-    if (err?.isDailyLimit || err?.status === 429) {
-      return [];
-    }
+    if (err?.isDailyLimit || err?.status === 429) return [];
     console.warn("⚠️ Memory extraction failed:", err.message);
     return [];
   }
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Vision
-// ─────────────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════
+// VISION
+// ═════════════════════════════════════════════════════════════════════
+
 export async function groqVision({
   system,
   prompt,
@@ -1769,7 +2226,7 @@ export async function groqVision({
     temperature,
     maxTokens: 2048,
     messages: [
-      { role: "system", content: system },
+      { role: "system", content: clampToTokens(system, 800) },
       {
         role: "user",
         content: [
