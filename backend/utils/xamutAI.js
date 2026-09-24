@@ -52,6 +52,11 @@
 // pass disable_tool_validation so a hallucinated call doesn't blow
 // up the request.
 
+import {
+  FORM_TYPE_IDS,
+  CHOICE_FIELD_TYPES,
+} from "../config/formCapabilities.js";
+
 const GROQ_BASE = "https://api.groq.com/openai/v1";
 const GROQ_URL = `${GROQ_BASE}/chat/completions`;
 const MODELS_URL = `${GROQ_BASE}/models`;
@@ -246,8 +251,7 @@ const escapeRegex = (s) =>
 
 const textOf = (content) => {
   if (typeof content === "string") return content;
-  if (Array.isArray(content))
-    return content.map((c) => c.text || "").join(" ");
+  if (Array.isArray(content)) return content.map((c) => c.text || "").join(" ");
   return "";
 };
 
@@ -349,29 +353,101 @@ const trimLiveMessages = (msgs, inputBudget, currentTurnRef) => {
 
 // ═════════════════════════════════════════════════════════════════════
 // FORM CONSTANTS
+//
+// Form types and choice field types come from config/formCapabilities.js.
+// Do not hardcode either list here — add to the registry and it flows
+// through to the tool schemas and executors on next boot.
 // ═════════════════════════════════════════════════════════════════════
 
-const FORM_TYPES = ["form", "quiz", "survey", "feedback", "attendance"];
-
-const CHOICE_TYPES = new Set([
-  "radio",
-  "checkbox",
-  "dropdown",
-  "multi_select",
-]);
+const FORM_TYPES = FORM_TYPE_IDS;
+const CHOICE_TYPES = CHOICE_FIELD_TYPES;
 
 const FORM_QUERY_STOPWORDS = new Set([
-  "the", "a", "an", "of", "for", "on", "in", "to", "my", "is", "are",
-  "was", "were", "be", "been", "what", "whats", "what's", "which",
-  "who", "whom", "how", "when", "where", "why", "current", "latest",
-  "recent", "stat", "stats", "statistic", "statistics", "status",
-  "form", "forms", "quiz", "quizzes", "survey", "surveys", "feedback",
-  "attendance", "application", "please", "show", "tell", "me", "about",
-  "many", "much", "response", "responses", "submission", "submissions",
-  "result", "results", "data", "info", "information", "get", "give",
-  "list", "your", "you", "do", "does", "did", "have", "has", "had",
-  "this", "that", "these", "those", "and", "or", "with", "from",
-  "i", "it", "can", "could", "would", "check", "look", "up",
+  "the",
+  "a",
+  "an",
+  "of",
+  "for",
+  "on",
+  "in",
+  "to",
+  "my",
+  "is",
+  "are",
+  "was",
+  "were",
+  "be",
+  "been",
+  "what",
+  "whats",
+  "what's",
+  "which",
+  "who",
+  "whom",
+  "how",
+  "when",
+  "where",
+  "why",
+  "current",
+  "latest",
+  "recent",
+  "stat",
+  "stats",
+  "statistic",
+  "statistics",
+  "status",
+  "form",
+  "forms",
+  "quiz",
+  "quizzes",
+  "survey",
+  "surveys",
+  "feedback",
+  "attendance",
+  "application",
+  "please",
+  "show",
+  "tell",
+  "me",
+  "about",
+  "many",
+  "much",
+  "response",
+  "responses",
+  "submission",
+  "submissions",
+  "result",
+  "results",
+  "data",
+  "info",
+  "information",
+  "get",
+  "give",
+  "list",
+  "your",
+  "you",
+  "do",
+  "does",
+  "did",
+  "have",
+  "has",
+  "had",
+  "this",
+  "that",
+  "these",
+  "those",
+  "and",
+  "or",
+  "with",
+  "from",
+  "i",
+  "it",
+  "can",
+  "could",
+  "would",
+  "check",
+  "look",
+  "up",
 ]);
 
 const extractFormKeywords = (text) =>
@@ -398,12 +474,36 @@ export function publicImageSources(query) {
   const q = encodeURIComponent(String(query || "").trim());
   if (!q) return [];
   return [
-    { name: "Wikimedia Commons", url: `https://commons.wikimedia.org/w/index.php?search=${q}`, note: "Free-licensed and public-domain photos." },
-    { name: "Wikipedia", url: `https://en.wikipedia.org/w/index.php?search=${q}`, note: "Encyclopedic article, usually with a portrait." },
-    { name: "Getty Images", url: `https://www.gettyimages.com/photos/${q}`, note: "Editorial and press photography." },
-    { name: "Google Images", url: `https://www.google.com/search?tbm=isch&q=${q}`, note: "Broad web image results." },
-    { name: "Bing Images", url: `https://www.bing.com/images/search?q=${q}`, note: "Broad web image results." },
-    { name: "IMDb", url: `https://www.imdb.com/find/?q=${q}`, note: "Headshots for actors and filmmakers." },
+    {
+      name: "Wikimedia Commons",
+      url: `https://commons.wikimedia.org/w/index.php?search=${q}`,
+      note: "Free-licensed and public-domain photos.",
+    },
+    {
+      name: "Wikipedia",
+      url: `https://en.wikipedia.org/w/index.php?search=${q}`,
+      note: "Encyclopedic article, usually with a portrait.",
+    },
+    {
+      name: "Getty Images",
+      url: `https://www.gettyimages.com/photos/${q}`,
+      note: "Editorial and press photography.",
+    },
+    {
+      name: "Google Images",
+      url: `https://www.google.com/search?tbm=isch&q=${q}`,
+      note: "Broad web image results.",
+    },
+    {
+      name: "Bing Images",
+      url: `https://www.bing.com/images/search?q=${q}`,
+      note: "Broad web image results.",
+    },
+    {
+      name: "IMDb",
+      url: `https://www.imdb.com/find/?q=${q}`,
+      note: "Headshots for actors and filmmakers.",
+    },
   ];
 }
 
@@ -444,7 +544,7 @@ export async function listAvailableModels({ force = false } = {}) {
   const pool = getKeyPool();
   if (pool.length === 0)
     throw new Error(
-      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server."
+      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server.",
     );
 
   if (_modelCache && !force) return _modelCache;
@@ -461,7 +561,7 @@ export async function listAvailableModels({ force = false } = {}) {
     if (!res.ok) {
       const body = await res.text().catch(() => "");
       throw new Error(
-        `Could not list Groq models (${res.status}): ${body.slice(0, 300)}`
+        `Could not list Groq models (${res.status}): ${body.slice(0, 300)}`,
       );
     }
     const data = await res.json();
@@ -501,7 +601,7 @@ async function pickModel(candidates, envOverride) {
   const generic = pool.find(
     (m) =>
       !/whisper|guard|orpheus|tts|embed/i.test(m) &&
-      !m.startsWith("groq/compound")
+      !m.startsWith("groq/compound"),
   );
   if (generic) return generic;
 
@@ -529,7 +629,7 @@ const parseLimitError = (detail = "") => {
   const limit = Number(/Limit (\d+)/i.exec(detail)?.[1]);
   const requested = Number(/Requested (\d+)/i.exec(detail)?.[1]);
   const retrySeconds = Number(
-    /(?:try again in|retry.{0,3}after)\s*([\d.]+)\s*s/i.exec(detail)?.[1]
+    /(?:try again in|retry.{0,3}after)\s*([\d.]+)\s*s/i.exec(detail)?.[1],
   );
   const namedModel = /model `([^`]+)`/i.exec(detail)?.[1] || null;
   return {
@@ -564,7 +664,7 @@ export async function groqChat({
   const pool = getKeyPool();
   if (pool.length === 0) {
     throw new Error(
-      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server."
+      "No Groq API key set. Add GROQ_API_KEY_1/2/3 (or GROQ_API_KEY) to your .env and restart the server.",
     );
   }
 
@@ -576,7 +676,7 @@ export async function groqChat({
   const hardCap = Math.floor(modelTpm * 0.92);
   if (inputTokens + maxTokens > hardCap) {
     const err = new Error(
-      `Payload too large for "${chosenModel}": ~${inputTokens} input + ${maxTokens} output > ${hardCap} token cap (TPM ${modelTpm}). Trim before calling.`
+      `Payload too large for "${chosenModel}": ~${inputTokens} input + ${maxTokens} output > ${hardCap} token cap (TPM ${modelTpm}). Trim before calling.`,
     );
     err.status = 413;
     err.model = chosenModel;
@@ -588,7 +688,7 @@ export async function groqChat({
   const { idx: keyIdx, reason } = pickKeyForModel(chosenModel);
   if (keyIdx === -1) {
     const err = new Error(
-      `Groq daily token budget for "${chosenModel}" is exhausted on all ${pool.length} key(s). Try again later.`
+      `Groq daily token budget for "${chosenModel}" is exhausted on all ${pool.length} key(s). Try again later.`,
     );
     err.status = 429;
     err.model = chosenModel;
@@ -659,7 +759,11 @@ export async function groqChat({
     if (res.status === 429) {
       const { retrySeconds, namedModel } = parseLimitError(detail);
       if (daily) {
-        markDailyExhausted(keyIdx, namedModel || chosenModel, retrySeconds || 60);
+        markDailyExhausted(
+          keyIdx,
+          namedModel || chosenModel,
+          retrySeconds || 60,
+        );
       } else {
         markKeyCooldown(keyIdx, retrySeconds || 30);
       }
@@ -675,7 +779,7 @@ export async function groqChat({
     const err = new Error(
       `Groq ${res.status} on "${chosenModel}" [key #${keyIdx + 1}]: ${
         detail?.slice ? detail.slice(0, 500) : detail || res.statusText
-      }`
+      }`,
     );
     err.status = res.status;
     err.model = chosenModel;
@@ -717,11 +821,11 @@ const clampMessagesForJson = (msgs) => {
   const nonSystem = msgs.filter((m) => m.role !== "system");
   const share = Math.max(
     300,
-    Math.floor(MAX_JSON_INPUT_TOKENS / Math.max(1, nonSystem.length))
+    Math.floor(MAX_JSON_INPUT_TOKENS / Math.max(1, nonSystem.length)),
   );
 
   console.warn(
-    `⚠️ JSON call input was ~${total} tokens (cap ${MAX_JSON_INPUT_TOKENS}). Clamping each non-system message to ~${share} tokens.`
+    `⚠️ JSON call input was ~${total} tokens (cap ${MAX_JSON_INPUT_TOKENS}). Clamping each non-system message to ~${share} tokens.`,
   );
 
   return msgs.map((m) => {
@@ -759,7 +863,7 @@ export async function groqJSON(args) {
         messages,
         jsonMode: true,
         tools: undefined,
-      })
+      }),
     );
 
   try {
@@ -799,6 +903,10 @@ export async function groqJSONFast(args) {
 
 // ═════════════════════════════════════════════════════════════════════
 // TOOLS
+//
+// The `type` enum on list_user_forms reads from FORM_TYPE_IDS, so a
+// new form type added to config/formCapabilities.js is instantly
+// callable by the model — no edit needed here.
 // ═════════════════════════════════════════════════════════════════════
 
 export const TOOLS = [
@@ -824,8 +932,14 @@ export const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "What to find images of, e.g. 'Cristiano Ronaldo'." },
-          count: { type: "number", description: "How many images to return. Defaults to 6, max 8." },
+          query: {
+            type: "string",
+            description: "What to find images of, e.g. 'Cristiano Ronaldo'.",
+          },
+          count: {
+            type: "number",
+            description: "How many images to return. Defaults to 6, max 8.",
+          },
         },
         required: ["query"],
       },
@@ -866,8 +980,15 @@ export const TOOLS = [
       parameters: {
         type: "object",
         properties: {
-          name: { type: "string", description: "The person, brand, or business name." },
-          context: { type: "string", description: "Optional context like 'frontend developer' or 'Nigerian musician' or 'tech agency'." },
+          name: {
+            type: "string",
+            description: "The person, brand, or business name.",
+          },
+          context: {
+            type: "string",
+            description:
+              "Optional context like 'frontend developer' or 'Nigerian musician' or 'tech agency'.",
+          },
         },
         required: ["name"],
       },
@@ -878,12 +999,20 @@ export const TOOLS = [
     function: {
       name: "list_user_forms",
       description:
-        "List the current user's own forms. Use this ANY time the user asks about their own forms: 'my forms', 'my quiz', 'my attendance form', 'the survey I made', 'how many forms have I made', 'do I have a feedback form', 'list my surveys', 'show me my forms'. Supports fuzzy title matching and type filtering. Returns an array of forms with id, title, type, status, response count, and field count. If the user's reference is ambiguous (they have three attendance forms), this returns ALL matches so you can ask which one they mean. NEVER web search for the user's own forms — this is the tool for that.",
+        "List the current user's own forms. Use this ANY time the user asks about their own forms: 'my forms', 'my quiz', 'my attendance form', 'my election', 'the survey I made', 'how many forms have I made', 'do I have a feedback form', 'list my surveys', 'show me my forms'. Supports fuzzy title matching and type filtering. Returns an array of forms with id, title, type, status, response count, and field count. If the user's reference is ambiguous (they have three attendance forms), this returns ALL matches so you can ask which one they mean. NEVER web search for the user's own forms — this is the tool for that.",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "Fuzzy text to match against form titles, or a type name like 'attendance' or 'quiz'. Omit to list every form the user has access to." },
-          type: { type: "string", enum: ["form", "quiz", "survey", "feedback", "attendance"], description: "Optional form type filter." },
+          query: {
+            type: "string",
+            description:
+              "Fuzzy text to match against form titles, or a type name like 'attendance' or 'election'. Omit to list every form the user has access to.",
+          },
+          type: {
+            type: "string",
+            enum: FORM_TYPE_IDS,
+            description: "Optional form type filter.",
+          },
         },
       },
     },
@@ -893,10 +1022,15 @@ export const TOOLS = [
     function: {
       name: "get_form_stats",
       description:
-        "Get detailed stats on ONE specific form the user owns: total responses, average completion time, per-field answer breakdowns, quiz scores, pass rate, response rate for private forms. Use this after list_user_forms, when the user's question is about a specific form: 'stats on my attendance form', 'how many responses', 'average score on my quiz', 'pass rate', 'leaderboard', 'who answered what', 'how did people answer question 3'. Requires a formId from list_user_forms.",
+        "Get detailed stats on ONE specific form the user owns: total responses, average completion time, per-field answer breakdowns, quiz scores, pass rate, election vote counts per candidate and position, response rate for private forms. Use this after list_user_forms, when the user's question is about a specific form: 'stats on my attendance form', 'how many responses', 'average score on my quiz', 'pass rate', 'leaderboard', 'who is winning the election', 'how many votes did X get', 'how did people answer question 3'. Requires a formId from list_user_forms.",
       parameters: {
         type: "object",
-        properties: { formId: { type: "string", description: "The form _id returned by list_user_forms." } },
+        properties: {
+          formId: {
+            type: "string",
+            description: "The form _id returned by list_user_forms.",
+          },
+        },
         required: ["formId"],
       },
     },
@@ -906,12 +1040,16 @@ export const TOOLS = [
     function: {
       name: "get_form_responses",
       description:
-        "List recent submissions to one of the user's forms, with each respondent's answers. Use for 'show me the responses', 'who filled it out', 'recent submissions', 'list the answers', 'what did people say'. Requires a formId from list_user_forms.",
+        "List recent submissions to one of the user's forms, with each respondent's answers. Use for 'show me the responses', 'who filled it out', 'recent submissions', 'list the answers', 'what did people say', 'who voted for who'. Requires a formId from list_user_forms.",
       parameters: {
         type: "object",
         properties: {
           formId: { type: "string" },
-          limit: { type: "number", description: "How many recent responses to return. Defaults to 20, max 100." },
+          limit: {
+            type: "number",
+            description:
+              "How many recent responses to return. Defaults to 20, max 100.",
+          },
         },
         required: ["formId"],
       },
@@ -922,7 +1060,7 @@ export const TOOLS = [
     function: {
       name: "get_form_details",
       description:
-        "Fetch the full definition of a form the user owns: title, description, type, visibility, and every field with its options, validation, and scoring. Use for 'what's on my form', 'show me the questions', 'list the fields', 'what does my quiz ask'. Requires a formId from list_user_forms.",
+        "Fetch the full definition of a form the user owns: title, description, type, visibility, every field with its options/validation/scoring, and — for elections — every position with its candidates. Use for 'what's on my form', 'show me the questions', 'list the fields', 'what does my quiz ask', 'who are the candidates in my election', 'what positions are being voted on'. Requires a formId from list_user_forms.",
       parameters: {
         type: "object",
         properties: { formId: { type: "string" } },
@@ -1005,7 +1143,9 @@ export async function imageSearch(query, count = 6) {
   });
   if (!res.ok) {
     const err = await res.text().catch(() => "");
-    throw new Error(`Image search failed (${res.status}): ${err.slice(0, 200)}`);
+    throw new Error(
+      `Image search failed (${res.status}): ${err.slice(0, 200)}`,
+    );
   }
   const data = await res.json();
 
@@ -1014,7 +1154,7 @@ export async function imageSearch(query, count = 6) {
     .map((img) =>
       typeof img === "string"
         ? { url: img, description: "" }
-        : { url: img.url || img, description: img.description || "" }
+        : { url: img.url || img, description: img.description || "" },
     )
     .filter((img) => img.url)
     .slice(0, limit);
@@ -1033,7 +1173,8 @@ export async function imageSearch(query, count = 6) {
 }
 
 export async function fetchWebsite(url) {
-  if (!/^https?:\/\//i.test(url)) throw new Error("URL must start with http(s).");
+  if (!/^https?:\/\//i.test(url))
+    throw new Error("URL must start with http(s).");
 
   const res = await fetch(url, {
     headers: {
@@ -1070,8 +1211,8 @@ export async function deepSearch(queries) {
 
   const results = await Promise.all(
     capped.map((q) =>
-      webSearch(q.trim(), 4).catch(() => ({ answer: "", results: [] }))
-    )
+      webSearch(q.trim(), 4).catch(() => ({ answer: "", results: [] })),
+    ),
   );
 
   const seen = new Set();
@@ -1088,7 +1229,10 @@ export async function deepSearch(queries) {
 
   return {
     queries: capped,
-    answers: results.map((r) => r.answer).filter(Boolean).slice(0, 3),
+    answers: results
+      .map((r) => r.answer)
+      .filter(Boolean)
+      .slice(0, 3),
     sources: merged,
   };
 }
@@ -1112,8 +1256,8 @@ export async function researchPerson(name, context = "") {
   const [textResults, imageResults] = await Promise.all([
     Promise.all(
       queries.map((q) =>
-        webSearch(q, 3).catch(() => ({ answer: "", results: [] }))
-      )
+        webSearch(q, 3).catch(() => ({ answer: "", results: [] })),
+      ),
     ),
     imageSearch(base, 4).catch(() => ({
       images: [],
@@ -1145,10 +1289,9 @@ export async function researchPerson(name, context = "") {
     sources: merged,
     images: imageResults.images || [],
     imageSources: imageResults.sources || [],
-    whereToFind:
-      imageResults.whereToFind?.length
-        ? imageResults.whereToFind
-        : publicImageSources(base),
+    whereToFind: imageResults.whereToFind?.length
+      ? imageResults.whereToFind
+      : publicImageSources(base),
   };
 }
 
@@ -1175,13 +1318,93 @@ const assertFormAccess = (form, userId) => {
   throw new Error("You don't have access to that form.");
 };
 
+// Read a single position's vote out of a response document. The
+// response schema may store election votes in one of a few places;
+// try them in order and return the first that hits.
+const extractPositionVote = (response, positionId) => {
+  // Shape A: response.votes is an array of { positionId, candidateIds }
+  if (Array.isArray(response?.votes)) {
+    const v = response.votes.find(
+      (x) => String(x.positionId) === String(positionId),
+    );
+    if (v) return v.candidateIds || v.value || v.candidateId || null;
+  }
+  // Shape B: response.votes is an object keyed by positionId
+  if (response?.votes && typeof response.votes === "object") {
+    const v = response.votes[String(positionId)];
+    if (v != null) return v;
+  }
+  // Shape C: votes ride along in answers[] with fieldId === position.id
+  const answer = (response?.answers || []).find(
+    (a) => String(a.fieldId) === String(positionId),
+  );
+  if (answer) return answer.value;
+  return null;
+};
+
+// Turn a form + its responses into per-position vote tallies.
+const summarizeElectionPositions = (form, responses) => {
+  const positions = form.positions || [];
+  if (!positions.length) return [];
+
+  return positions.slice(0, 20).map((p) => {
+    const counts = new Map();
+    for (const c of p.candidates || []) counts.set(String(c.id), 0);
+
+    for (const r of responses) {
+      const value = extractPositionVote(r, p.id);
+      if (value == null) continue;
+      const arr = Array.isArray(value) ? value : [value];
+      for (const v of arr) {
+        const k = String(v);
+        counts.set(k, (counts.get(k) || 0) + 1);
+      }
+    }
+
+    const totalVotes = [...counts.values()].reduce((a, b) => a + b, 0);
+
+    const candidates = (p.candidates || [])
+      .map((c) => {
+        const votes = counts.get(String(c.id)) || 0;
+        return {
+          id: c.id,
+          name: c.name || "(unnamed candidate)",
+          slogan: c.slogan || "",
+          votes,
+          percentage: totalVotes
+            ? Number(((votes / totalVotes) * 100).toFixed(1))
+            : 0,
+        };
+      })
+      .sort((a, b) => b.votes - a.votes);
+
+    const leaders = candidates.filter(
+      (c) => c.votes === (candidates[0]?.votes || 0),
+    );
+
+    return {
+      id: p.id,
+      title: p.title || "(untitled position)",
+      description: p.description || "",
+      maxSelections: p.maxSelections || 1,
+      required: p.required !== false,
+      totalVotes,
+      winner:
+        candidates.length && candidates[0].votes > 0
+          ? leaders.length > 1
+            ? `tie: ${leaders.map((c) => c.name).join(" / ")}`
+            : candidates[0].name
+          : null,
+      candidates,
+    };
+  });
+};
+
 async function listUserForms({ query, type } = {}, userId) {
   if (!userId) throw new Error("No user context for form lookup.");
   const { Form } = await loadFormModels();
 
-  const and = [
-    { $or: [{ owner: userId }, { "collaborators.user": userId }] },
-  ];
+  const and = [{ $or: [{ owner: userId }, { "collaborators.user": userId }] }];
   if (type && FORM_TYPES.includes(type)) and.push({ type });
 
   const trimmed = String(query || "").trim();
@@ -1199,7 +1422,7 @@ async function listUserForms({ query, type } = {}, userId) {
 
     const lower = trimmed.toLowerCase();
     const typeMatches = FORM_TYPES.filter(
-      (t) => lower.includes(t) || t.includes(lower)
+      (t) => lower.includes(t) || t.includes(lower),
     );
     if (typeMatches.length) ors.push({ type: { $in: typeMatches } });
 
@@ -1208,7 +1431,7 @@ async function listUserForms({ query, type } = {}, userId) {
 
   let forms = await Form.find({ $and: and })
     .select(
-      "owner title type status visibility responseCount fields collaborators createdAt updatedAt"
+      "owner title type status visibility responseCount fields positions collaborators createdAt updatedAt",
     )
     .sort({ updatedAt: -1 })
     .limit(50)
@@ -1234,23 +1457,32 @@ async function listUserForms({ query, type } = {}, userId) {
     count: forms.length,
     ambiguous: forms.length > 1,
     filter: { query: trimmed || null, type: type || null },
-    forms: forms.map((f) => ({
-      id: String(f._id),
-      title: f.title,
-      type: f.type,
-      status: f.status,
-      visibility: f.visibility,
-      responseCount: f.responseCount || 0,
-      fieldCount: (f.fields || []).filter((x) => x.type !== "section").length,
-      owned: String(f.owner) === uid,
-      updatedAt: f.updatedAt,
-    })),
+    forms: forms.map((f) => {
+      const isElection = f.type === "election";
+      const itemCount = isElection
+        ? (f.positions || []).length
+        : (f.fields || []).filter((x) => x.type !== "section").length;
+      return {
+        id: String(f._id),
+        title: f.title,
+        type: f.type,
+        status: f.status,
+        visibility: f.visibility,
+        responseCount: f.responseCount || 0,
+        fieldCount: (f.fields || []).filter((x) => x.type !== "section").length,
+        positionCount: (f.positions || []).length,
+        itemCount,
+        itemNoun: isElection ? "position" : "question",
+        owned: String(f.owner) === uid,
+        updatedAt: f.updatedAt,
+      };
+    }),
     hint:
       forms.length === 0
         ? "No forms matched. Offer to list all the user's forms instead."
         : forms.length === 1
-        ? "Exactly one match. Use this form's id for follow-up tool calls."
-        : "Multiple matches. Ask the user which one they mean before calling any form-specific tool. Show the titles.",
+          ? "Exactly one match. Use this form's id for follow-up tool calls."
+          : "Multiple matches. Ask the user which one they mean before calling any form-specific tool. Show the titles.",
   };
 }
 
@@ -1274,13 +1506,25 @@ async function getFormStatsTool({ formId } = {}, userId) {
     ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
     : 0;
 
+  const isElection = form.type === "election";
+
+  // ── Election path ────────────────────────────────────────────
+  const positions = isElection
+    ? summarizeElectionPositions(form, responses)
+    : [];
+
+  // ── Non-election path ────────────────────────────────────────
   const isQuiz =
-    form.type === "quiz" ||
-    (form.fields || []).some((f) => (f.scoring?.points || 0) > 0);
-  const maxScore = (form.fields || []).reduce(
-    (sum, f) => sum + (f.scoring?.points || 0),
-    0
-  );
+    !isElection &&
+    (form.type === "quiz" ||
+      (form.fields || []).some((f) => (f.scoring?.points || 0) > 0));
+
+  const maxScore = isQuiz
+    ? (form.fields || []).reduce(
+        (sum, f) => sum + (f.scoring?.points || 0),
+        0,
+      )
+    : 0;
 
   const scores = responses.map((r) => r.totalScore || 0);
   const percentages = responses.map((r) => r.percentage || 0);
@@ -1292,63 +1536,68 @@ async function getFormStatsTool({ formId } = {}, userId) {
     : 0;
   const passedCount = responses.filter((r) => r.passed === true).length;
 
-  const fields = (form.fields || [])
-    .filter((f) => f.type !== "section")
-    .slice(0, 40)
-    .map((f) => {
-      const values = responses
-        .map((r) => (r.answers || []).find((a) => a.fieldId === f.id))
-        .filter((a) => a && a.value !== null && a.value !== undefined);
+  const fields = isElection
+    ? []
+    : (form.fields || [])
+        .filter((f) => f.type !== "section")
+        .slice(0, 40)
+        .map((f) => {
+          const values = responses
+            .map((r) => (r.answers || []).find((a) => a.fieldId === f.id))
+            .filter((a) => a && a.value !== null && a.value !== undefined);
 
-      const base = {
-        id: f.id,
-        label: f.label,
-        type: f.type,
-        answered: values.length,
-        skipped: total - values.length,
-      };
+          const base = {
+            id: f.id,
+            label: f.label,
+            type: f.type,
+            answered: values.length,
+            skipped: total - values.length,
+          };
 
-      if (CHOICE_TYPES.has(f.type)) {
-        const counts = {};
-        for (const o of f.options || []) counts[o.value] = 0;
-        for (const a of values) {
-          const arr = Array.isArray(a.value) ? a.value : [a.value];
-          for (const v of arr) counts[String(v)] = (counts[String(v)] || 0) + 1;
-        }
-        base.options = (f.options || []).slice(0, 20).map((o) => ({
-          label: o.label,
-          value: o.value,
-          count: counts[o.value] || 0,
-        }));
-        base.mostChosen =
-          base.options.slice().sort((a, b) => b.count - a.count)[0]?.label ||
-          null;
-      } else if (["number", "rating", "scale"].includes(f.type)) {
-        const nums = values.map((a) => Number(a.value)).filter(Number.isFinite);
-        if (nums.length) {
-          base.min = Math.min(...nums);
-          base.max = Math.max(...nums);
-          base.avg = Number(
-            (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2)
-          );
-        }
-      } else if (f.type === "yes_no") {
-        let yes = 0;
-        let no = 0;
-        for (const a of values) {
-          if (a.value === true) yes++;
-          else if (a.value === false) no++;
-        }
-        base.yes = yes;
-        base.no = no;
-      } else {
-        base.samples = values
-          .slice(-5)
-          .reverse()
-          .map((a) => String(a.value).slice(0, 120));
-      }
-      return base;
-    });
+          if (CHOICE_TYPES.has(f.type)) {
+            const counts = {};
+            for (const o of f.options || []) counts[o.value] = 0;
+            for (const a of values) {
+              const arr = Array.isArray(a.value) ? a.value : [a.value];
+              for (const v of arr)
+                counts[String(v)] = (counts[String(v)] || 0) + 1;
+            }
+            base.options = (f.options || []).slice(0, 20).map((o) => ({
+              label: o.label,
+              value: o.value,
+              count: counts[o.value] || 0,
+            }));
+            base.mostChosen =
+              base.options.slice().sort((a, b) => b.count - a.count)[0]
+                ?.label || null;
+          } else if (["number", "rating", "scale"].includes(f.type)) {
+            const nums = values
+              .map((a) => Number(a.value))
+              .filter(Number.isFinite);
+            if (nums.length) {
+              base.min = Math.min(...nums);
+              base.max = Math.max(...nums);
+              base.avg = Number(
+                (nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2),
+              );
+            }
+          } else if (f.type === "yes_no") {
+            let yes = 0;
+            let no = 0;
+            for (const a of values) {
+              if (a.value === true) yes++;
+              else if (a.value === false) no++;
+            }
+            base.yes = yes;
+            base.no = no;
+          } else {
+            base.samples = values
+              .slice(-5)
+              .reverse()
+              .map((a) => String(a.value).slice(0, 120));
+          }
+          return base;
+        });
 
   const responseRate =
     form.visibility === "private" && (form.participants || []).length
@@ -1363,6 +1612,17 @@ async function getFormStatsTool({ formId } = {}, userId) {
         })()
       : null;
 
+  const electionSummary = isElection
+    ? {
+        positionCount: positions.length,
+        totalVotesCast: positions.reduce((sum, p) => sum + p.totalVotes, 0),
+        turnoutPerPosition: positions.map((p) => ({
+          position: p.title,
+          votes: p.totalVotes,
+        })),
+      }
+    : null;
+
   return {
     formId: String(form._id),
     title: form.title,
@@ -1374,6 +1634,7 @@ async function getFormStatsTool({ formId } = {}, userId) {
     updatedAt: form.updatedAt,
     totalResponses: total,
     averageDurationSeconds: avgDuration,
+    isElection,
     isQuiz,
     quiz: isQuiz
       ? {
@@ -1384,8 +1645,10 @@ async function getFormStatsTool({ formId } = {}, userId) {
           passPercentage: form.settings?.passPercentage || 0,
         }
       : null,
-    responseRate,
+    election: electionSummary,
+    positions,
     fields,
+    responseRate,
   };
 }
 
@@ -1404,13 +1667,40 @@ async function getFormResponsesTool({ formId, limit = 20 } = {}, userId) {
     .limit(cap)
     .lean();
 
+  // Merge field labels and position labels into one lookup so votes
+  // against positions render with the position title, not the raw id.
   const labelByFieldId = new Map(
-    (form.fields || []).map((f) => [f.id, f.label])
+    (form.fields || []).map((f) => [f.id, f.label]),
   );
+  const labelByPositionId = new Map(
+    (form.positions || []).map((p) => [p.id, `${p.title} — vote`]),
+  );
+  const labelFor = (id) =>
+    labelByFieldId.get(id) || labelByPositionId.get(id) || id;
+
+  const isElection = form.type === "election";
+
+  // Candidate-id → name lookup, so election answers read as names.
+  const candidateNames = new Map();
+  for (const p of form.positions || []) {
+    for (const c of p.candidates || []) {
+      candidateNames.set(String(c.id), c.name || "(unnamed)");
+    }
+  }
+
+  const prettifyVote = (value) => {
+    const arr = Array.isArray(value) ? value : [value];
+    return arr
+      .map((v) => candidateNames.get(String(v)) || String(v))
+      .join(", ")
+      .slice(0, 300);
+  };
 
   return {
     formId: String(form._id),
     title: form.title,
+    type: form.type,
+    isElection,
     returned: responses.length,
     totalResponses: form.responseCount || 0,
     responses: responses.map((r) => ({
@@ -1424,8 +1714,10 @@ async function getFormResponsesTool({ formId, limit = 20 } = {}, userId) {
       percentage: r.percentage,
       passed: r.passed,
       answers: (r.answers || []).slice(0, 30).map((a) => ({
-        label: labelByFieldId.get(a.fieldId) || a.fieldId,
-        value: String(a.value).slice(0, 300),
+        label: labelFor(a.fieldId),
+        value: isElection
+          ? prettifyVote(a.value)
+          : String(a.value).slice(0, 300),
       })),
     })),
   };
@@ -1439,6 +1731,8 @@ async function getFormDetailsTool({ formId } = {}, userId) {
   if (!form) throw new Error("Form not found.");
   assertFormAccess(form, userId);
 
+  const isElection = form.type === "election";
+
   return {
     formId: String(form._id),
     title: form.title,
@@ -1449,6 +1743,7 @@ async function getFormDetailsTool({ formId } = {}, userId) {
     slug: form.slug,
     isMultipage: form.isMultipage,
     settings: form.settings,
+    isElection,
     fields: (form.fields || []).slice(0, 60).map((f) => ({
       id: f.id,
       type: f.type,
@@ -1461,6 +1756,21 @@ async function getFormDetailsTool({ formId } = {}, userId) {
       })),
       validation: f.validation,
       scoring: f.scoring,
+    })),
+    positions: (form.positions || []).slice(0, 20).map((p) => ({
+      id: p.id,
+      title: p.title,
+      description: p.description,
+      maxSelections: p.maxSelections || 1,
+      required: p.required !== false,
+      order: p.order,
+      candidates: (p.candidates || []).slice(0, 20).map((c) => ({
+        id: c.id,
+        name: c.name || "",
+        slogan: c.slogan || "",
+        bio: c.bio || "",
+        hasPhoto: Boolean(c.photoUrl),
+      })),
     })),
   };
 }
@@ -1569,7 +1879,7 @@ export async function runAgentTurn({
   const fullChain = [
     preferred,
     ...TEXT_CANDIDATES.filter(
-      (m) => available.includes(m) && m !== preferred && !isCompoundSystem(m)
+      (m) => available.includes(m) && m !== preferred && !isCompoundSystem(m),
     ),
     ...HIGH_BUDGET_MODELS.filter((m) => available.includes(m)),
   ].filter((m, i, arr) => arr.indexOf(m) === i);
@@ -1594,7 +1904,7 @@ export async function runAgentTurn({
     let inputBudget = Math.floor(modelTpm * INPUT_BUDGET_FRACTION);
     let outputBudget = Math.min(
       maxTokens,
-      Math.max(400, modelTpm - inputBudget - SAFETY_MARGIN)
+      Math.max(400, modelTpm - inputBudget - SAFETY_MARGIN),
     );
 
     const sysTokens = estimateTokens(systemPrompt);
@@ -1613,12 +1923,12 @@ export async function runAgentTurn({
 
     if (sysTokens > reserveForSystem) {
       console.warn(
-        `⚠️ System prompt (~${sysTokens}t) exceeded budget; clamped to ~${reserveForSystem}t for "${attemptModel}".`
+        `⚠️ System prompt (~${sysTokens}t) exceeded budget; clamped to ~${reserveForSystem}t for "${attemptModel}".`,
       );
     }
     if (userTokens > reserveForUser) {
       console.warn(
-        `⚠️ User turn (~${userTokens}t) exceeded budget; clamped to ~${reserveForUser}t for "${attemptModel}".`
+        `⚠️ User turn (~${userTokens}t) exceeded budget; clamped to ~${reserveForUser}t for "${attemptModel}".`,
       );
     }
 
@@ -1628,11 +1938,11 @@ export async function runAgentTurn({
     let trimmedHistory = trimHistoryToBudget(
       [...history],
       pinnedTokens + outputBudget,
-      inputBudget
+      inputBudget,
     );
     const historyBudget = Math.max(
       0,
-      inputBudget - pinnedTokens - outputBudget
+      inputBudget - pinnedTokens - outputBudget,
     );
     if (historyBudget < 200 && trimmedHistory.length) {
       trimmedHistory = [];
@@ -1699,12 +2009,14 @@ export async function runAgentTurn({
           const sysNow = estimateTokens(safeSystem);
           const userNow = estimateTokens(safeUser);
           if (sysNow > newSysCap || userNow > newUserCap) {
-            const rs = sysNow > newSysCap
-              ? clampToTokens(systemPrompt, newSysCap)
-              : safeSystem;
-            const ru = userNow > newUserCap
-              ? clampToTokens(userContent, newUserCap)
-              : safeUser;
+            const rs =
+              sysNow > newSysCap
+                ? clampToTokens(systemPrompt, newSysCap)
+                : safeSystem;
+            const ru =
+              userNow > newUserCap
+                ? clampToTokens(userContent, newUserCap)
+                : safeUser;
             messages = [
               { role: "system", content: rs },
               { role: "user", content: ru },
@@ -1727,7 +2039,7 @@ export async function runAgentTurn({
           const { retrySeconds } = parseLimitError(err.detail);
           const waitMs = Math.min(
             (retrySeconds || 3) * 1000 + 250,
-            MAX_429_WAIT_MS - totalWaitedMs
+            MAX_429_WAIT_MS - totalWaitedMs,
           );
           if (waitMs > 0 && totalWaitedMs < MAX_429_WAIT_MS) {
             await sleep(waitMs);
@@ -1767,7 +2079,7 @@ export async function runAgentTurn({
         executed.push(t.type || t.name);
 
       const toolCalls = (choice.tool_calls || []).filter((c) =>
-        LOCAL_TOOL_NAMES.has(c.function?.name)
+        LOCAL_TOOL_NAMES.has(c.function?.name),
       );
 
       if (toolCalls.length === 0) {
@@ -1811,7 +2123,8 @@ export async function runAgentTurn({
 
           if (call.function.name === "image_search") {
             for (const img of result?.images || []) collectedImages.push(img);
-            for (const s of result?.sources || []) collectedImageSources.push(s);
+            for (const s of result?.sources || [])
+              collectedImageSources.push(s);
             for (const s of result?.whereToFind || [])
               collectedWhereToFind.push(s);
           }
@@ -1841,7 +2154,7 @@ export async function runAgentTurn({
     console.warn(
       `⚠️ "${attemptModel}" could not complete this turn (${
         lastErr?.message || "ran out of iterations"
-      }), trying next model.`
+      }), trying next model.`,
     );
   }
 
@@ -1887,7 +2200,7 @@ export function chunkText(text, targetTokens = 1500, overlapFraction = 0.08) {
 // synchronously before any network I/O starts.
 export async function parallelDispatch(
   tasks,
-  { model, temperature = 0.3, maxTokens = 1024, systemPrompt } = {}
+  { model, temperature = 0.3, maxTokens = 1024, systemPrompt } = {},
 ) {
   if (!Array.isArray(tasks) || tasks.length === 0) {
     throw new Error("parallelDispatch requires a non-empty tasks array.");
@@ -1905,8 +2218,8 @@ export async function parallelDispatch(
         model: chosenModel,
         temperature,
         maxTokens,
-      })
-    )
+      }),
+    ),
   );
 
   return settled.map((r, i) => ({
@@ -1975,11 +2288,12 @@ export async function mapReduceDocument({
       system: mapSystem,
       content: `Question: ${question}\n\n--- Part ${i + 1} of ${chunks.length} ---\n\n${c}`,
     })),
-    { model, temperature: 0.2, maxTokens }
+    { model, temperature: 0.2, maxTokens },
   );
 
   const usable = partials.filter(
-    (p) => p.ok && p.content && !/NOTHING RELEVANT IN THIS PART/i.test(p.content)
+    (p) =>
+      p.ok && p.content && !/NOTHING RELEVANT IN THIS PART/i.test(p.content),
   );
 
   if (usable.length === 0) {
@@ -2058,7 +2372,7 @@ function splitDocumentAndQuestion(text) {
     const beforeQ = tail.slice(0, qMatch);
     const dotIdx = Math.max(
       beforeQ.lastIndexOf(". "),
-      beforeQ.lastIndexOf("\n")
+      beforeQ.lastIndexOf("\n"),
     );
     const qStart = dotIdx === -1 ? 0 : dotIdx + 1;
     const question = tail.slice(qStart, qMatch + 1).trim();
@@ -2148,8 +2462,7 @@ export async function extractUserMemories({
   assistantReply,
   recentHistory = [],
 }) {
-  const cap = (s) =>
-    typeof s === "string" ? s.slice(0, MEMORY_CHAR_CAP) : "";
+  const cap = (s) => (typeof s === "string" ? s.slice(0, MEMORY_CHAR_CAP) : "");
 
   const context = [
     ...recentHistory
@@ -2193,9 +2506,13 @@ Return STRICT JSON only.`,
       .filter((m) => m?.text && typeof m.text === "string")
       .slice(0, 4)
       .map((m) => ({
-        category: ["identity", "preference", "interest", "project", "fact"].includes(
-          m.category
-        )
+        category: [
+          "identity",
+          "preference",
+          "interest",
+          "project",
+          "fact",
+        ].includes(m.category)
           ? m.category
           : "fact",
         text: m.text.trim().slice(0, 300),

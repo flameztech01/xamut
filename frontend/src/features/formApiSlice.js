@@ -85,11 +85,6 @@ export const formApiSlice = apiSlice.injectEndpoints({
 
     // ─────────────────────────────────────────────────────────
     // COVER PHOTO (Cloudinary)
-    //
-    // Owner / editor only. Pass a File or Blob as `file`; the
-    // endpoint uses multipart/form-data with field name `coverPhoto`.
-    // We deliberately do NOT set Content-Type — the browser adds it
-    // with the correct boundary when the body is a FormData instance.
     // ─────────────────────────────────────────────────────────
     uploadFormCover: builder.mutation({
       query: ({ id, file }) => {
@@ -120,14 +115,29 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     // ─────────────────────────────────────────────────────────
-    // COLLABORATORS
+    // EDITOR MEDIA (candidate photos for elections, etc.)
     //
-    // Two kinds of people live here:
-    //   • Real collaborators — Xamut users with a userId.
-    //   • Pending collaborators — invited by email but not signed
-    //     up yet. They don't have a userId; they're keyed on email
-    //     and are promoted to real collaborators automatically
-    //     when they sign up.
+    // Returns { url, filename, mimetype, size }. The client puts
+    // `url` into positions[].candidates[].photoUrl and then PUTs
+    // the whole form.
+    // ─────────────────────────────────────────────────────────
+    uploadFormMediaEditor: builder.mutation({
+      query: ({ id, file }) => {
+        const body = new FormData();
+        body.append("file", file);
+        return {
+          url: `${FORM_URL}/${id}/media`,
+          method: "POST",
+          body,
+          formData: true,
+        };
+      },
+      // No invalidations — the form isn't changed server-side by
+      // this call; the client must still PUT the new URL onto it.
+    }),
+
+    // ─────────────────────────────────────────────────────────
+    // COLLABORATORS
     // ─────────────────────────────────────────────────────────
     addCollaborator: builder.mutation({
       query: ({ id, email, role, name }) => ({
@@ -163,9 +173,6 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     removeCollaborator: builder.mutation({
-      // Pass `userId` for real collaborators, or `email` for pending
-      // invites. The URL ends up the same shape either way — the
-      // controller sniffs whether the segment is a Mongo ObjectId.
       query: ({ id, userId, email }) => ({
         url: `${FORM_URL}/${id}/collaborators/${encodeURIComponent(
           userId ?? email
@@ -237,13 +244,126 @@ export const formApiSlice = apiSlice.injectEndpoints({
     }),
 
     // ─────────────────────────────────────────────────────────
-    // PUBLIC / RESPONDENT
+    // ACCESS REQUESTS (private forms — self-serve password requests)
+    // ─────────────────────────────────────────────────────────
+    requestAccess: builder.mutation({
+      // Public — no Xamut auth needed.
+      // body: { email, name?, note?, extraInfo? }
+      query: ({ slug, ...body }) => ({
+        url: `${FORM_URL}/public/${slug}/request-access`,
+        method: "POST",
+        body,
+      }),
+    }),
+
+    listAccessRequests: builder.query({
+      // Optional filter: ?status=pending|approved|rejected
+      query: ({ id, status }) => ({
+        url: `${FORM_URL}/${id}/access-requests`,
+        method: "GET",
+        params: status ? { status } : undefined,
+      }),
+      providesTags: (result, error, { id }) => [
+        { type: "FormAccessRequests", id },
+      ],
+    }),
+
+    approveAccessRequest: builder.mutation({
+      query: ({ id, requestId, note }) => ({
+        url: `${FORM_URL}/${id}/access-requests/${requestId}/approve`,
+        method: "POST",
+        body: { note },
+      }),
+      invalidatesTags: (result, error, { id }) => [
+        { type: "FormAccessRequests", id },
+        { type: "FormParticipants", id },
+        { type: "Form", id },
+      ],
+    }),
+
+    rejectAccessRequest: builder.mutation({
+      query: ({ id, requestId, note }) => ({
+        url: `${FORM_URL}/${id}/access-requests/${requestId}/reject`,
+        method: "POST",
+        body: { note },
+      }),
+      invalidatesTags: (result, error, { id }) => [
+        { type: "FormAccessRequests", id },
+      ],
+    }),
+
+    bulkReviewAccessRequests: builder.mutation({
+      // action: "approve" | "reject"
+      query: ({ id, ids, action, note }) => ({
+        url: `${FORM_URL}/${id}/access-requests/bulk`,
+        method: "POST",
+        body: { ids, action, note },
+      }),
+      invalidatesTags: (result, error, { id }) => [
+        { type: "FormAccessRequests", id },
+        { type: "FormParticipants", id },
+        { type: "Form", id },
+      ],
+    }),
+
+    // ─────────────────────────────────────────────────────────
+    // DRAFTS (autosave in-progress answers)
     //
-    // These do NOT require Xamut auth. For private forms, pass the
-    // participant token via `participantToken` and RTK Query will
-    // send it as `Authorization: Bearer <token>`. It's separate from
-    // the user's own auth token, so it doesn't collide with anything
-    // the base query already attaches.
+    // Pass `participantToken` for private forms; the API slice's
+    // base query also attaches the logged-in user's token if any,
+    // so signed-in drafts are scoped to the user, anonymous drafts
+    // are scoped to `sessionKey`.
+    //
+    // Provide a `sessionKey` (client-generated, stable per tab or
+    // device) for anonymous drafts. Without one, only signed-in
+    // users can save drafts.
+    // ─────────────────────────────────────────────────────────
+    saveDraft: builder.mutation({
+      // body: { answers, sessionKey?, startedAt?, email?, name? }
+      query: ({ slug, participantToken, ...body }) => ({
+        url: `${FORM_URL}/public/${slug}/draft`,
+        method: "POST",
+        body,
+        headers: participantToken
+          ? { Authorization: `Bearer ${participantToken}` }
+          : undefined,
+      }),
+    }),
+
+    getDraft: builder.query({
+      // params: { sessionKey?, participantToken? }
+      query: ({ slug, sessionKey, participantToken }) => ({
+        url: `${FORM_URL}/public/${slug}/draft`,
+        method: "GET",
+        params: sessionKey ? { sessionKey } : undefined,
+        headers: participantToken
+          ? { Authorization: `Bearer ${participantToken}` }
+          : undefined,
+      }),
+    }),
+
+    clearDraft: builder.mutation({
+      query: ({ slug, sessionKey, participantToken }) => ({
+        url: `${FORM_URL}/public/${slug}/draft`,
+        method: "DELETE",
+        body: sessionKey ? { sessionKey } : undefined,
+        headers: participantToken
+          ? { Authorization: `Bearer ${participantToken}` }
+          : undefined,
+      }),
+    }),
+
+    // Logged-in user's own unfinished submissions.
+    listMyPendingForms: builder.query({
+      query: () => ({
+        url: `${FORM_URL}/drafts/pending`,
+        method: "GET",
+      }),
+      providesTags: ["MyPendingForms"],
+    }),
+
+    // ─────────────────────────────────────────────────────────
+    // PUBLIC / RESPONDENT
     // ─────────────────────────────────────────────────────────
     getPublicForm: builder.query({
       query: ({ slug, participantToken }) => ({
@@ -263,12 +383,6 @@ export const formApiSlice = apiSlice.injectEndpoints({
       }),
     }),
 
-    // Respondent uploads an image / document for an `image`,
-    // `document`, or `file` field. Server returns `{ url, ... }`;
-    // that URL is what you then put into the answer value on submit.
-    //
-    // Pass a File/Blob as `file`. For private forms, include the
-    // participant token.
     uploadFormMedia: builder.mutation({
       query: ({ slug, file, participantToken }) => {
         const body = new FormData();
@@ -300,8 +414,40 @@ export const formApiSlice = apiSlice.injectEndpoints({
               { type: "FormResponses", id: formId },
               { type: "FormStats", id: formId },
               { type: "Form", id: formId },
+              "MyPendingForms",
             ]
-          : [],
+          : ["MyPendingForms"],
+    }),
+
+    // ─────────────────────────────────────────────────────────
+    // ELECTION RESULTS
+    //
+    // getOwnerElectionResults — authenticated, owner/collaborator,
+    // always allowed regardless of `settings.showLiveResults`.
+    //
+    // getPublicElectionResults — public but requires the
+    // `resultsToken` that was returned by submitResponse. Pass it
+    // as `resultsToken`; it's sent as `?rt=...`.
+    // ─────────────────────────────────────────────────────────
+    getOwnerElectionResults: builder.query({
+      query: (id) => ({
+        url: `${FORM_URL}/${id}/election-results`,
+        method: "GET",
+      }),
+      providesTags: (result, error, id) => [
+        { type: "FormElectionResults", id },
+      ],
+    }),
+
+    getPublicElectionResults: builder.query({
+      query: ({ slug, resultsToken }) => ({
+        url: `${FORM_URL}/public/${slug}/results`,
+        method: "GET",
+        params: { rt: resultsToken },
+      }),
+      providesTags: (result, error, { slug }) => [
+        { type: "PublicElectionResults", slug },
+      ],
     }),
 
     // ─────────────────────────────────────────────────────────
@@ -336,6 +482,7 @@ export const formApiSlice = apiSlice.injectEndpoints({
       invalidatesTags: (result, error, { id }) => [
         { type: "FormResponses", id },
         { type: "FormStats", id },
+        { type: "FormElectionResults", id },
         { type: "Form", id },
       ],
     }),
@@ -385,9 +532,12 @@ export const {
   usePublishFormMutation,
   useCloseFormMutation,
 
-  // Cover photo (Cloudinary)
+  // Cover photo
   useUploadFormCoverMutation,
   useRemoveFormCoverMutation,
+
+  // Editor media (candidate photos, etc.)
+  useUploadFormMediaEditorMutation,
 
   // Collaborators
   useAddCollaboratorMutation,
@@ -402,11 +552,28 @@ export const {
   useRemoveParticipantMutation,
   useResendParticipantCredentialsMutation,
 
+  // Access requests
+  useRequestAccessMutation,
+  useListAccessRequestsQuery,
+  useApproveAccessRequestMutation,
+  useRejectAccessRequestMutation,
+  useBulkReviewAccessRequestsMutation,
+
+  // Drafts
+  useSaveDraftMutation,
+  useGetDraftQuery,
+  useClearDraftMutation,
+  useListMyPendingFormsQuery,
+
   // Public
   useGetPublicFormQuery,
   useParticipantLoginMutation,
   useUploadFormMediaMutation,
   useSubmitResponseMutation,
+
+  // Election results
+  useGetOwnerElectionResultsQuery,
+  useGetPublicElectionResultsQuery,
 
   // Responses
   useListResponsesQuery,

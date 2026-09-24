@@ -9,6 +9,7 @@ import {
   useDeleteFormMutation,
   useUploadFormCoverMutation,
   useRemoveFormCoverMutation,
+  useUploadFormMediaEditorMutation,
   useAddCollaboratorMutation,
   useListCollaboratorsQuery,
   useRemoveCollaboratorMutation,
@@ -18,6 +19,10 @@ import {
   useListParticipantsQuery,
   useRemoveParticipantMutation,
   useResendParticipantCredentialsMutation,
+  useListAccessRequestsQuery,
+  useApproveAccessRequestMutation,
+  useRejectAccessRequestMutation,
+  useBulkReviewAccessRequestsMutation,
 } from "../features/formApiSlice";
 import {
   useStartFormAiSessionMutation,
@@ -109,6 +114,25 @@ const ROLE_OPTIONS = [
   { value: "viewer", label: "Viewer" },
 ];
 
+const FORM_TYPES = [
+  { id: "form", label: "Form" },
+  { id: "quiz", label: "Quiz" },
+  { id: "survey", label: "Survey" },
+  { id: "feedback", label: "Feedback" },
+  { id: "attendance", label: "Attendance" },
+  { id: "election", label: "Election" },
+];
+
+const REQUEST_FIELD_TYPES = [
+  { id: "short_text", label: "Short text" },
+  { id: "long_text", label: "Paragraph" },
+  { id: "email", label: "Email" },
+  { id: "number", label: "Number" },
+  { id: "phone", label: "Phone" },
+  { id: "url", label: "URL" },
+  { id: "date", label: "Date" },
+];
+
 // ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
@@ -142,7 +166,6 @@ const defaultField = (type = "short_text") => {
       { id: genId("o"), label: "Option 2", value: "Option 2" },
     ];
   }
-
   if (type === "rating") {
     base.validation.min = 1;
     base.validation.max = 5;
@@ -151,7 +174,6 @@ const defaultField = (type = "short_text") => {
     base.validation.min = 1;
     base.validation.max = 10;
   }
-
   if (type === "image") {
     base.label = "Upload an image";
     base.description = "JPG, PNG or WEBP. Max 15MB.";
@@ -160,9 +182,38 @@ const defaultField = (type = "short_text") => {
     base.label = "Upload a document";
     base.description = "PDF, DOC, DOCX, XLS, PPT, TXT or ZIP. Max 15MB.";
   }
-
   return base;
 };
+
+const defaultCandidate = (order = 0) => ({
+  id: genId("c"),
+  name: "",
+  bio: "",
+  manifesto: "",
+  photoUrl: "",
+  slogan: "",
+  metadata: {},
+  order,
+});
+
+const defaultPosition = (order = 0) => ({
+  id: genId("p"),
+  title: "",
+  description: "",
+  maxSelections: 1,
+  required: true,
+  order,
+  candidates: [defaultCandidate(0), defaultCandidate(1)],
+});
+
+const defaultRequestField = (order = 0) => ({
+  id: genId("rf"),
+  label: "",
+  type: "short_text",
+  required: false,
+  placeholder: "",
+  order,
+});
 
 const formatRelative = (iso) => {
   if (!iso) return "";
@@ -178,6 +229,22 @@ const formatRelative = (iso) => {
   const day = Math.floor(hr / 24);
   if (day < 7) return `${day}d ago`;
   return new Date(iso).toLocaleDateString([], { month: "short", day: "numeric" });
+};
+
+const toLocalInputValue = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const off = d.getTimezoneOffset();
+  const local = new Date(d.getTime() - off * 60000);
+  return local.toISOString().slice(0, 16);
+};
+
+const fromLocalInputValue = (value) => {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toISOString();
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -321,10 +388,33 @@ const I = {
       />
     </svg>
   ),
+  ballot: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M4 20h16M6 20V10h12v10M10 6l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  clock: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v4l3 2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  lock: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <rect x="4" y="10" width="16" height="10" rx="2" />
+      <path d="M8 10V7a4 4 0 0 1 8 0v3" strokeLinecap="round" />
+    </svg>
+  ),
+  inbox: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M22 12h-6l-2 3h-4l-2-3H2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M5.5 5.5L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.5A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.5z" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
 };
 
 // ─────────────────────────────────────────────────────────────
-// Custom Dropdown
+// Dropdown
 // ─────────────────────────────────────────────────────────────
 const Dropdown = ({
   value,
@@ -340,9 +430,7 @@ const Dropdown = ({
   useEffect(() => {
     if (!open) return;
     const onDocClick = (e) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target)) {
-        setOpen(false);
-      }
+      if (wrapRef.current && !wrapRef.current.contains(e.target)) setOpen(false);
     };
     const onKey = (e) => {
       if (e.key === "Escape") setOpen(false);
@@ -365,8 +453,6 @@ const Dropdown = ({
         type="button"
         onClick={() => !disabled && setOpen((v) => !v)}
         disabled={disabled}
-        aria-haspopup="listbox"
-        aria-expanded={open}
         className="flex w-full items-center justify-between gap-2 rounded-md border border-stone-200 bg-white px-2.5 py-2 text-[12px] font-medium text-stone-700 transition-colors hover:border-stone-300 focus:border-teal-400 focus:outline-none focus:ring-2 focus:ring-teal-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:border-stone-600 dark:focus:border-teal-500/60"
       >
         <span className="truncate">{selected?.label ?? "Select"}</span>
@@ -445,9 +531,6 @@ const Toggle = ({ checked, onChange, label, hint }) => (
 
 // ─────────────────────────────────────────────────────────────
 // Cover photo panel
-//
-// Owner/editor uploads a banner / poster image for the form. Stored
-// on Cloudinary; the public form page renders it above the title.
 // ─────────────────────────────────────────────────────────────
 const CoverPhotoPanel = ({ formId, coverPhoto, onChanged }) => {
   const [uploadCover, { isLoading: uploading }] = useUploadFormCoverMutation();
@@ -459,9 +542,8 @@ const CoverPhotoPanel = ({ formId, coverPhoto, onChanged }) => {
 
   const handleFile = async (e) => {
     const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-picking the same file
+    e.target.value = "";
     if (!file) return;
-
     if (!file.type.startsWith("image/")) {
       setError("Pick an image file (JPG, PNG, WEBP).");
       return;
@@ -832,10 +914,7 @@ const FieldCard = ({
     >
       <div className="flex items-start gap-2 p-3.5 sm:p-4">
         <div className="hidden shrink-0 flex-col items-center pt-0.5 sm:flex">
-          <span
-            className="text-stone-300 dark:text-stone-600"
-            title="Reorder with the arrows"
-          >
+          <span className="text-stone-300 dark:text-stone-600" title="Reorder with the arrows">
             {I.drag("h-4 w-4")}
           </span>
           <span className="mt-1 text-[10px] font-semibold text-stone-300 dark:text-stone-600">
@@ -885,11 +964,7 @@ const FieldCard = ({
                 </button>
                 {menuOpen ? (
                   <>
-                    <div
-                      className="fixed inset-0 z-40"
-                      onClick={() => setMenuOpen(false)}
-                      aria-hidden
-                    />
+                    <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} aria-hidden />
                     <div className="absolute right-0 top-full z-50 mt-1 w-40 overflow-hidden rounded-md border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10 dark:border-stone-700/80 dark:bg-stone-900 dark:shadow-black/40">
                       <button
                         type="button"
@@ -926,9 +1001,7 @@ const FieldCard = ({
             onChange={(e) => patch({ label: e.target.value })}
             placeholder={isSection ? "Section title" : "Question"}
             className={`w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-stone-900 outline-none transition-all placeholder:text-stone-300 focus:border-teal-200 focus:bg-teal-50/30 focus:ring-2 focus:ring-teal-500/5 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus:border-teal-500/40 dark:focus:bg-teal-500/5 ${
-              isSection
-                ? "text-[15px] font-semibold"
-                : "text-[14px] font-medium"
+              isSection ? "text-[15px] font-semibold" : "text-[14px] font-medium"
             }`}
           />
 
@@ -956,7 +1029,6 @@ const FieldCard = ({
                 />
               ) : null}
 
-              {/* Media field — max files */}
               {isMedia ? (
                 <div className="flex flex-wrap items-center gap-2 text-[11.5px] text-stone-500 dark:text-stone-400">
                   <span>
@@ -979,18 +1051,13 @@ const FieldCard = ({
                           maxFiles:
                             e.target.value === ""
                               ? 1
-                              : Math.max(
-                                  1,
-                                  Math.min(10, Number(e.target.value) || 1)
-                                ),
+                              : Math.max(1, Math.min(10, Number(e.target.value) || 1)),
                         },
                       })
                     }
                     className="w-14 rounded-md border border-stone-200 bg-white px-2 py-1 text-center text-[12px] text-stone-800 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
                   />
-                  <span className="text-stone-400 dark:text-stone-500">
-                    (1–10)
-                  </span>
+                  <span className="text-stone-400 dark:text-stone-500">(1–10)</span>
                 </div>
               ) : null}
 
@@ -1004,8 +1071,7 @@ const FieldCard = ({
                       patch({
                         validation: {
                           ...field.validation,
-                          min:
-                            e.target.value === "" ? null : Number(e.target.value),
+                          min: e.target.value === "" ? null : Number(e.target.value),
                         },
                       })
                     }
@@ -1020,8 +1086,7 @@ const FieldCard = ({
                       patch({
                         validation: {
                           ...field.validation,
-                          max:
-                            e.target.value === "" ? null : Number(e.target.value),
+                          max: e.target.value === "" ? null : Number(e.target.value),
                         },
                       })
                     }
@@ -1088,29 +1153,513 @@ const FieldCard = ({
 };
 
 // ─────────────────────────────────────────────────────────────
+// Candidate photo picker — small circular avatar
+// ─────────────────────────────────────────────────────────────
+const CandidatePhotoButton = ({ formId, candidate, onUploaded }) => {
+  const [upload, { isLoading }] = useUploadFormMediaEditorMutation();
+  const inputRef = useRef(null);
+  const [error, setError] = useState("");
+
+  const pick = () => inputRef.current?.click();
+
+  const handleFile = async (e) => {
+    const file = e.target.files?.[0];
+    e.target.value = "";
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Pick an image.");
+      return;
+    }
+    if (file.size > 12 * 1024 * 1024) {
+      setError("Image is bigger than 12MB.");
+      return;
+    }
+    setError("");
+    try {
+      const res = await upload({ id: formId, file }).unwrap();
+      onUploaded(res.url);
+    } catch (err) {
+      setError(err?.data?.message || "Upload failed.");
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-center">
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        onChange={handleFile}
+        className="hidden"
+      />
+      <button
+        type="button"
+        onClick={pick}
+        disabled={isLoading}
+        title={candidate.photoUrl ? "Replace photo" : "Upload photo"}
+        className="group relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-full border-2 border-dashed border-stone-300 bg-stone-50 transition-colors hover:border-teal-400 hover:bg-teal-50/50 disabled:opacity-60 dark:border-stone-700 dark:bg-stone-800 dark:hover:border-teal-500/60 dark:hover:bg-teal-500/10"
+      >
+        {candidate.photoUrl ? (
+          <>
+            <img
+              src={candidate.photoUrl}
+              alt=""
+              className="h-full w-full object-cover"
+            />
+            <span className="absolute inset-0 flex items-center justify-center bg-black/0 text-white opacity-0 transition-all group-hover:bg-black/40 group-hover:opacity-100">
+              {I.upload("h-4 w-4")}
+            </span>
+          </>
+        ) : (
+          <span className="text-stone-400 dark:text-stone-500">
+            {I.image("h-5 w-5")}
+          </span>
+        )}
+        {isLoading ? (
+          <span className="absolute inset-0 flex items-center justify-center bg-white/70 dark:bg-stone-900/70">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500" />
+          </span>
+        ) : null}
+      </button>
+      {error ? (
+        <p className="mt-1 text-[10px] text-red-500 dark:text-red-400">{error}</p>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Candidate row
+// ─────────────────────────────────────────────────────────────
+const CandidateRow = ({ formId, candidate, index, total, onChange, onDelete, onMoveUp, onMoveDown }) => {
+  const [expanded, setExpanded] = useState(false);
+  const patch = (partial) => onChange({ ...candidate, ...partial });
+
+  return (
+    <div className="rounded-lg border border-stone-200/80 bg-stone-50/40 p-3 dark:border-stone-800 dark:bg-stone-800/30">
+      <div className="flex items-start gap-3">
+        <CandidatePhotoButton
+          formId={formId}
+          candidate={candidate}
+          onUploaded={(url) => patch({ photoUrl: url })}
+        />
+
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={candidate.name}
+              onChange={(e) => patch({ name: e.target.value })}
+              placeholder={`Candidate ${index + 1} name`}
+              className="min-w-0 flex-1 rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] font-medium text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500"
+            />
+            <div className="flex shrink-0 items-center gap-0.5">
+              <button
+                type="button"
+                onClick={onMoveUp}
+                disabled={index === 0}
+                className="rounded-md p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+                title="Move up"
+              >
+                {I.chevUp("h-3 w-3")}
+              </button>
+              <button
+                type="button"
+                onClick={onMoveDown}
+                disabled={index === total - 1}
+                className="rounded-md p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+                title="Move down"
+              >
+                {I.chevDown("h-3 w-3")}
+              </button>
+              <button
+                type="button"
+                onClick={onDelete}
+                disabled={total <= 1}
+                className="rounded-md p-1 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-30 disabled:hover:bg-transparent dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                title="Remove candidate"
+              >
+                {I.trash("h-3.5 w-3.5")}
+              </button>
+            </div>
+          </div>
+
+          <input
+            type="text"
+            value={candidate.slogan}
+            onChange={(e) => patch({ slogan: e.target.value })}
+            placeholder="Slogan (optional)"
+            className="mt-1.5 w-full rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
+          />
+
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="mt-1.5 inline-flex items-center gap-1 text-[11px] font-semibold text-teal-600 hover:text-teal-700 dark:text-teal-400 dark:hover:text-teal-300"
+          >
+            {expanded ? I.chevUp("h-3 w-3") : I.chevDown("h-3 w-3")}
+            {expanded ? "Hide details" : "Bio & manifesto"}
+          </button>
+        </div>
+      </div>
+
+      {expanded ? (
+        <div className="mt-3 space-y-2 border-t border-stone-200/80 pt-3 dark:border-stone-800">
+          <textarea
+            rows={2}
+            value={candidate.bio}
+            onChange={(e) => patch({ bio: e.target.value })}
+            placeholder="Short bio — who they are, what they've done."
+            className="w-full resize-none rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12.5px] leading-relaxed text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
+          />
+          <textarea
+            rows={3}
+            value={candidate.manifesto}
+            onChange={(e) => patch({ manifesto: e.target.value })}
+            placeholder="Manifesto — what they promise to do."
+            className="w-full resize-none rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12.5px] leading-relaxed text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
+          />
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Position card
+// ─────────────────────────────────────────────────────────────
+const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMoveUp, onMoveDown }) => {
+  const patch = (partial) => onChange({ ...position, ...partial });
+
+  const addCandidate = () => {
+    const order = position.candidates.length;
+    patch({
+      candidates: [...position.candidates, defaultCandidate(order)],
+    });
+  };
+
+  const updateCandidate = (idx, next) => {
+    const candidates = [...position.candidates];
+    candidates[idx] = next;
+    patch({ candidates });
+  };
+
+  const deleteCandidate = (idx) => {
+    if (position.candidates.length <= 1) return;
+    patch({ candidates: position.candidates.filter((_, i) => i !== idx) });
+  };
+
+  const moveCandidate = (idx, dir) => {
+    const target = idx + dir;
+    if (target < 0 || target >= position.candidates.length) return;
+    const candidates = [...position.candidates];
+    [candidates[idx], candidates[target]] = [candidates[target], candidates[idx]];
+    patch({ candidates });
+  };
+
+  return (
+    <div className="rounded-lg border border-rose-200/70 bg-white dark:border-rose-500/20 dark:bg-stone-900">
+      <div className="border-b border-stone-100 p-3.5 dark:border-stone-800 sm:p-4">
+        <div className="mb-2 flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="inline-flex h-5 items-center gap-1 rounded bg-rose-50 px-1.5 text-[9.5px] font-bold uppercase tracking-wider text-rose-600 dark:bg-rose-500/15 dark:text-rose-400">
+              {I.ballot("h-2.5 w-2.5")}
+              Position #{index + 1}
+            </span>
+            <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
+              {position.candidates.length}{" "}
+              {position.candidates.length === 1 ? "candidate" : "candidates"}
+            </span>
+          </div>
+          <div className="flex shrink-0 items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onMoveUp}
+              disabled={index === 0}
+              className="rounded-md p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+              title="Move up"
+            >
+              {I.chevUp("h-3.5 w-3.5")}
+            </button>
+            <button
+              type="button"
+              onClick={onMoveDown}
+              disabled={index === total - 1}
+              className="rounded-md p-1.5 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+              title="Move down"
+            >
+              {I.chevDown("h-3.5 w-3.5")}
+            </button>
+            <button
+              type="button"
+              onClick={onDelete}
+              className="rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+              title="Delete position"
+            >
+              {I.trash("h-3.5 w-3.5")}
+            </button>
+          </div>
+        </div>
+
+        <input
+          type="text"
+          value={position.title}
+          onChange={(e) => patch({ title: e.target.value })}
+          placeholder="Position title — e.g. President, Director of Socials"
+          className="w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[15px] font-semibold text-stone-900 outline-none transition-all placeholder:text-stone-300 focus:border-rose-200 focus:bg-rose-50/30 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus:border-rose-500/40 dark:focus:bg-rose-500/5"
+        />
+        <input
+          type="text"
+          value={position.description}
+          onChange={(e) => patch({ description: e.target.value })}
+          placeholder="Optional description shown to voters"
+          className="mt-0.5 w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[12px] text-stone-500 outline-none transition-all placeholder:text-stone-300 focus:border-rose-200 focus:bg-rose-50/30 dark:text-stone-400 dark:placeholder:text-stone-600 dark:focus:border-rose-500/40 dark:focus:bg-rose-500/5"
+        />
+
+        <div className="mt-2.5 flex flex-wrap items-center gap-3 text-[11.5px] text-stone-500 dark:text-stone-400">
+          <label className="flex items-center gap-1.5">
+            <span>Voters pick</span>
+            <input
+              type="number"
+              min="1"
+              max="20"
+              value={position.maxSelections}
+              onChange={(e) =>
+                patch({
+                  maxSelections: Math.max(
+                    1,
+                    Math.min(20, Number(e.target.value) || 1)
+                  ),
+                })
+              }
+              className="w-14 rounded-md border border-stone-200 bg-white px-2 py-1 text-center text-[12px] text-stone-800 outline-none focus:border-rose-300 focus:ring-2 focus:ring-rose-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
+            />
+            <span>{position.maxSelections === 1 ? "candidate" : "candidates"}</span>
+          </label>
+          <label className="flex cursor-pointer select-none items-center gap-1.5">
+            <input
+              type="checkbox"
+              checked={!!position.required}
+              onChange={(e) => patch({ required: e.target.checked })}
+              className="h-3.5 w-3.5 rounded border-stone-300 text-rose-500 focus:ring-rose-500/30 dark:border-stone-600"
+            />
+            <span>Required</span>
+          </label>
+        </div>
+      </div>
+
+      <div className="space-y-2 p-3.5 sm:p-4">
+        {position.candidates.map((c, i) => (
+          <CandidateRow
+            key={c.id}
+            formId={formId}
+            candidate={c}
+            index={i}
+            total={position.candidates.length}
+            onChange={(next) => updateCandidate(i, next)}
+            onDelete={() => deleteCandidate(i)}
+            onMoveUp={() => moveCandidate(i, -1)}
+            onMoveDown={() => moveCandidate(i, 1)}
+          />
+        ))}
+
+        <button
+          type="button"
+          onClick={addCandidate}
+          className="flex w-full items-center justify-center gap-1.5 rounded-md border border-dashed border-stone-300 bg-white/50 py-2 text-[11.5px] font-semibold text-stone-500 transition-colors hover:border-rose-300 hover:bg-rose-50/40 hover:text-rose-600 dark:border-stone-700 dark:bg-stone-900/40 dark:text-stone-400 dark:hover:border-rose-500/50 dark:hover:bg-rose-500/10 dark:hover:text-rose-400"
+        >
+          {I.plus("h-3.5 w-3.5")}
+          Add candidate
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Positions editor (election mode)
+// ─────────────────────────────────────────────────────────────
+const PositionsEditor = ({ formId, positions, onChange }) => {
+  const add = () => {
+    onChange([...positions, defaultPosition(positions.length)]);
+  };
+
+  const update = (idx, next) => {
+    const copy = [...positions];
+    copy[idx] = next;
+    onChange(copy);
+  };
+
+  const remove = (idx) => {
+    onChange(positions.filter((_, i) => i !== idx));
+  };
+
+  const move = (idx, dir) => {
+    const target = idx + dir;
+    if (target < 0 || target >= positions.length) return;
+    const copy = [...positions];
+    [copy[idx], copy[target]] = [copy[target], copy[idx]];
+    onChange(copy);
+  };
+
+  return (
+    <div className="space-y-3">
+      {positions.map((p, i) => (
+        <PositionCard
+          key={p.id}
+          formId={formId}
+          position={p}
+          index={i}
+          total={positions.length}
+          onChange={(next) => update(i, next)}
+          onDelete={() => remove(i)}
+          onMoveUp={() => move(i, -1)}
+          onMoveDown={() => move(i, 1)}
+        />
+      ))}
+
+      <button
+        type="button"
+        onClick={add}
+        className="flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-rose-300 bg-rose-50/30 py-3.5 text-[12.5px] font-semibold text-rose-600 transition-colors hover:border-rose-400 hover:bg-rose-50/60 dark:border-rose-500/40 dark:bg-rose-500/5 dark:text-rose-400 dark:hover:border-rose-500/60 dark:hover:bg-rose-500/10"
+      >
+        {I.plus("h-4 w-4")}
+        Add position
+      </button>
+
+      {positions.length === 0 ? (
+        <p className="mt-1 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
+          Add at least one position with candidates before publishing.
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Request fields editor — owner-defined extra fields
+// ─────────────────────────────────────────────────────────────
+const RequestFieldsEditor = ({ fields, onChange }) => {
+  const add = () =>
+    onChange([...fields, defaultRequestField(fields.length)]);
+
+  const update = (idx, next) => {
+    const copy = [...fields];
+    copy[idx] = next;
+    onChange(copy);
+  };
+
+  const remove = (idx) => onChange(fields.filter((_, i) => i !== idx));
+
+  const move = (idx, dir) => {
+    const target = idx + dir;
+    if (target < 0 || target >= fields.length) return;
+    const copy = [...fields];
+    [copy[idx], copy[target]] = [copy[target], copy[idx]];
+    onChange(copy);
+  };
+
+  return (
+    <div className="space-y-2">
+      {fields.map((rf, i) => (
+        <div
+          key={rf.id}
+          className="flex items-start gap-2 rounded-md border border-stone-200 bg-white p-2 dark:border-stone-700 dark:bg-stone-800"
+        >
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <input
+              type="text"
+              value={rf.label}
+              onChange={(e) => update(i, { ...rf, label: e.target.value })}
+              placeholder="Field label — e.g. Matric number, Department"
+              className="w-full rounded-md border border-transparent bg-stone-50 px-2 py-1.5 text-[12px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:bg-white focus:ring-2 focus:ring-teal-500/10 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500"
+            />
+            <div className="flex items-center gap-1.5">
+              <Dropdown
+                value={rf.type}
+                onChange={(v) => update(i, { ...rf, type: v })}
+                options={REQUEST_FIELD_TYPES.map((t) => ({
+                  value: t.id,
+                  label: t.label,
+                }))}
+                className="w-32"
+              />
+              <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-stone-600 dark:text-stone-300">
+                <input
+                  type="checkbox"
+                  checked={!!rf.required}
+                  onChange={(e) =>
+                    update(i, { ...rf, required: e.target.checked })
+                  }
+                  className="h-3.5 w-3.5 rounded border-stone-300 text-teal-500 focus:ring-teal-500/30 dark:border-stone-600"
+                />
+                Required
+              </label>
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-col items-center gap-0.5 pt-1">
+            <button
+              type="button"
+              onClick={() => move(i, -1)}
+              disabled={i === 0}
+              className="rounded p-0.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+              title="Move up"
+            >
+              {I.chevUp("h-3 w-3")}
+            </button>
+            <button
+              type="button"
+              onClick={() => move(i, 1)}
+              disabled={i === fields.length - 1}
+              className="rounded p-0.5 text-stone-400 hover:bg-stone-100 hover:text-stone-700 disabled:opacity-30 dark:text-stone-500 dark:hover:bg-stone-800"
+              title="Move down"
+            >
+              {I.chevDown("h-3 w-3")}
+            </button>
+            <button
+              type="button"
+              onClick={() => remove(i)}
+              className="rounded p-0.5 text-stone-300 hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+              title="Remove"
+            >
+              {I.trash("h-3 w-3")}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      <button
+        type="button"
+        onClick={add}
+        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[11.5px] font-semibold text-teal-600 transition-colors hover:bg-teal-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
+      >
+        {I.plus("h-3 w-3")}
+        Add request field
+      </button>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Settings panel
 // ─────────────────────────────────────────────────────────────
 const SettingsPanel = ({ form, onChange }) => {
   const settings = form.settings || {};
   const isQuiz =
     form.type === "quiz" || form.fields.some((f) => f.scoring?.points > 0);
+  const isElection = form.type === "election";
+  const isPrivate = form.visibility === "private";
 
   const patch = (partial) => onChange({ settings: { ...settings, ...partial } });
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-6">
       <section>
         <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           Form type
         </p>
         <div className="grid grid-cols-2 gap-2">
-          {[
-            { id: "form", label: "Form" },
-            { id: "quiz", label: "Quiz" },
-            { id: "survey", label: "Survey" },
-            { id: "feedback", label: "Feedback" },
-            { id: "attendance", label: "Attendance" },
-          ].map((t) => (
+          {FORM_TYPES.map((t) => (
             <button
               key={t.id}
               type="button"
@@ -1125,6 +1674,11 @@ const SettingsPanel = ({ form, onChange }) => {
             </button>
           ))}
         </div>
+        {isElection ? (
+          <p className="mt-1.5 text-[11px] leading-snug text-rose-600 dark:text-rose-400">
+            Election mode uses positions and candidates instead of fields.
+          </p>
+        ) : null}
       </section>
 
       <section>
@@ -1150,18 +1704,140 @@ const SettingsPanel = ({ form, onChange }) => {
             </button>
           ))}
         </div>
-        {form.visibility === "private" ? (
-          <p className="mt-1.5 text-[11px] leading-snug text-stone-400 dark:text-stone-500">
-            Add participants from the menu. Each one gets a unique password by email.
-          </p>
-        ) : null}
       </section>
 
+      {/* Time window */}
+      <section>
+        <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+          {I.clock("h-3.5 w-3.5")}
+          Time window
+        </p>
+        <p className="mb-2 text-[11px] leading-snug text-stone-400 dark:text-stone-500">
+          Optional. Opens at the start time and closes at the end time
+          automatically — even if it's still "published".
+        </p>
+        <div className="space-y-2">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-stone-600 dark:text-stone-300">
+              Starts
+            </span>
+            <input
+              type="datetime-local"
+              value={toLocalInputValue(form.startAt)}
+              onChange={(e) =>
+                onChange({ startAt: fromLocalInputValue(e.target.value) })
+              }
+              className="w-full rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] text-stone-800 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:[color-scheme:dark]"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-stone-600 dark:text-stone-300">
+              Ends
+            </span>
+            <input
+              type="datetime-local"
+              value={toLocalInputValue(form.expiresAt)}
+              onChange={(e) =>
+                onChange({ expiresAt: fromLocalInputValue(e.target.value) })
+              }
+              className="w-full rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] text-stone-800 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:[color-scheme:dark]"
+            />
+          </label>
+          {form.startAt || form.expiresAt ? (
+            <button
+              type="button"
+              onClick={() => onChange({ startAt: null, expiresAt: null })}
+              className="text-[11px] font-semibold text-stone-500 underline-offset-2 hover:text-stone-800 hover:underline dark:text-stone-400 dark:hover:text-stone-100"
+            >
+              Clear window
+            </button>
+          ) : null}
+        </div>
+      </section>
+
+      {/* Access requests (private only) */}
+      {isPrivate ? (
+        <section className="rounded-lg border border-teal-200/70 bg-teal-50/40 p-3 dark:border-teal-500/30 dark:bg-teal-500/10">
+          <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-teal-700 dark:text-teal-400">
+            {I.lock("h-3.5 w-3.5")}
+            Access requests
+          </p>
+          <div className="space-y-3">
+            <Toggle
+              checked={!!settings.allowAccessRequests}
+              onChange={(v) => patch({ allowAccessRequests: v })}
+              label="Let visitors request access"
+              hint="They submit their email (plus any fields below) and wait for your approval."
+            />
+            {settings.allowAccessRequests ? (
+              <>
+                <Toggle
+                  checked={!!settings.autoApproveAccess}
+                  onChange={(v) => patch({ autoApproveAccess: v })}
+                  label="Auto-approve requests"
+                  hint="Skip manual review — credentials are emailed the moment they ask."
+                />
+
+                <div className="border-t border-teal-200/60 pt-3 dark:border-teal-500/20">
+                  <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-teal-700/80 dark:text-teal-400/80">
+                    Extra info to collect
+                  </p>
+                  <p className="mb-2 text-[11px] leading-snug text-teal-700/70 dark:text-teal-400/70">
+                    Ask for anything else you need to approve — matric number, department,
+                    roll number, anything.
+                  </p>
+                  <RequestFieldsEditor
+                    fields={settings.requestFields || []}
+                    onChange={(rf) => patch({ requestFields: rf })}
+                  />
+                </div>
+              </>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {/* Election-specific */}
+      {isElection ? (
+        <section className="rounded-lg border border-rose-200/70 bg-rose-50/40 p-3 dark:border-rose-500/30 dark:bg-rose-500/10">
+          <p className="mb-2 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-rose-700 dark:text-rose-400">
+            {I.ballot("h-3.5 w-3.5")}
+            Election
+          </p>
+          <div className="space-y-3">
+            <Toggle
+              checked={!!settings.shufflePositions}
+              onChange={(v) => patch({ shufflePositions: v })}
+              label="Shuffle positions"
+              hint="Randomise the order for each voter"
+            />
+            <Toggle
+              checked={!!settings.allowAbstain}
+              onChange={(v) => patch({ allowAbstain: v })}
+              label="Allow abstaining"
+              hint="Voters can skip a position even if it's marked required"
+            />
+            <Toggle
+              checked={!!settings.requireAllPositions}
+              onChange={(v) => patch({ requireAllPositions: v })}
+              label="Require every position"
+              hint="Only applies when abstaining is off"
+            />
+            <Toggle
+              checked={!!settings.showLiveResults}
+              onChange={(v) => patch({ showLiveResults: v })}
+              label="Show live results to voters"
+              hint="Voters see standings after they vote. Off = only you and your collaborators see them."
+            />
+          </div>
+        </section>
+      ) : null}
+
+      {/* Behaviour */}
       <section className="space-y-3">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           Behaviour
         </p>
-
         <Toggle
           checked={!!settings.collectEmail}
           onChange={(v) => patch({ collectEmail: v })}
@@ -1174,12 +1850,14 @@ const SettingsPanel = ({ form, onChange }) => {
           label="Allow multiple submissions"
           hint="Let the same person submit more than once"
         />
-        <Toggle
-          checked={!!settings.shuffleQuestions}
-          onChange={(v) => patch({ shuffleQuestions: v })}
-          label="Shuffle questions"
-          hint="Randomise the order for each respondent"
-        />
+        {!isElection ? (
+          <Toggle
+            checked={!!settings.shuffleQuestions}
+            onChange={(v) => patch({ shuffleQuestions: v })}
+            label="Shuffle questions"
+            hint="Randomise the order for each respondent"
+          />
+        ) : null}
         <Toggle
           checked={settings.showProgressBar !== false}
           onChange={(v) => patch({ showProgressBar: v })}
@@ -1187,7 +1865,8 @@ const SettingsPanel = ({ form, onChange }) => {
         />
       </section>
 
-      {isQuiz ? (
+      {/* Quiz scoring */}
+      {isQuiz && !isElection ? (
         <section className="space-y-3 rounded-lg border border-purple-200/70 bg-purple-50/40 p-3 dark:border-purple-500/30 dark:bg-purple-500/10">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-purple-700 dark:text-purple-400">
             Quiz
@@ -1224,6 +1903,7 @@ const SettingsPanel = ({ form, onChange }) => {
         </section>
       ) : null}
 
+      {/* After submitting */}
       <section className="space-y-2">
         <p className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
           After submitting
@@ -1232,7 +1912,11 @@ const SettingsPanel = ({ form, onChange }) => {
           rows={2}
           value={settings.confirmationMessage || ""}
           onChange={(e) => patch({ confirmationMessage: e.target.value })}
-          placeholder="Thanks, your response has been recorded."
+          placeholder={
+            isElection
+              ? "Thanks for voting!"
+              : "Thanks, your response has been recorded."
+          }
           className="w-full resize-none rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] leading-relaxed text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
         />
 
@@ -1245,9 +1929,8 @@ const SettingsPanel = ({ form, onChange }) => {
             className="w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
           />
           <p className="mt-1 text-[10.5px] leading-snug text-stone-400 dark:text-stone-500">
-            Optional. After submitting, redirect respondents to a WhatsApp
-            group, Telegram link, website, or thank-you page. Leave blank to
-            just show the message above.
+            Optional. After submitting, redirect respondents to a WhatsApp group,
+            Telegram link, website, or thank-you page.
           </p>
         </div>
       </section>
@@ -1256,7 +1939,7 @@ const SettingsPanel = ({ form, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// AI edit panel (unchanged)
+// AI edit panel (unchanged — hidden for elections)
 // ─────────────────────────────────────────────────────────────
 const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
   const [prompt, setPrompt] = useState("");
@@ -1286,20 +1969,14 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
     e?.preventDefault?.();
     const text = prompt.trim();
     if (!text || busy) return;
-
     if (dirty) {
       const ok = await onSaveFirst?.();
       if (!ok) return;
     }
-
     setBusy(true);
     setError("");
     try {
-      const res = await startSession({
-        prompt: text,
-        mode: "edit",
-        formId,
-      }).unwrap();
+      const res = await startSession({ prompt: text, mode: "edit", formId }).unwrap();
       setSession(res.session);
       resetLocalInputs();
       setPrompt("");
@@ -1389,9 +2066,7 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
       return;
     }
     setPicked((prev) =>
-      prev.includes(opt.id)
-        ? prev.filter((x) => x !== opt.id)
-        : [...prev, opt.id]
+      prev.includes(opt.id) ? prev.filter((x) => x !== opt.id) : [...prev, opt.id]
     );
   };
 
@@ -1457,7 +2132,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
             onClick={handleCancel}
             disabled={busy}
             className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40 dark:text-stone-500 dark:hover:bg-stone-800/70 dark:hover:text-stone-200"
-            aria-label="Cancel AI edit"
           >
             {I.close("h-3.5 w-3.5")}
           </button>
@@ -1561,7 +2235,6 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
             onClick={handleCancel}
             disabled={busy}
             className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-stone-400 transition-colors hover:bg-white/70 hover:text-stone-700 disabled:opacity-40 dark:text-stone-500 dark:hover:bg-stone-800/70 dark:hover:text-stone-200"
-            aria-label="Discard AI proposal"
           >
             {I.close("h-3.5 w-3.5")}
           </button>
@@ -1596,27 +2269,13 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
                       </span>
                       {f.label || `Question ${i + 1}`}
                       {f.required ? (
-                        <span className="ml-1 text-teal-500 dark:text-teal-400">
-                          *
-                        </span>
+                        <span className="ml-1 text-teal-500 dark:text-teal-400">*</span>
                       ) : null}
                     </p>
                     <span className="shrink-0 rounded-full bg-stone-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
                       {FIELD_LABEL[f.type] || f.type}
                     </span>
                   </div>
-                  {f.options?.length ? (
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                      {f.options.slice(0, 8).map((o) => (
-                        <span
-                          key={o.id}
-                          className="rounded-md border border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] text-stone-600 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300"
-                        >
-                          {o.label}
-                        </span>
-                      ))}
-                    </div>
-                  ) : null}
                 </div>
               ))
             )}
@@ -1629,7 +2288,7 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
               rows={2}
               value={tweak}
               onChange={(e) => setTweak(e.target.value)}
-              placeholder="What should change? e.g. 'make Q3 required' or 'add a phone field'"
+              placeholder="What should change? e.g. 'make Q3 required'"
               autoFocus
               disabled={busy}
               className="w-full resize-none rounded-md border border-stone-200 bg-white px-3 py-2 text-[12.5px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 disabled:opacity-60 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
@@ -1690,6 +2349,262 @@ const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Access requests modal
+// ─────────────────────────────────────────────────────────────
+const AccessRequestsModal = ({ open, onClose, formId, requestFields }) => {
+  const { data, isLoading } = useListAccessRequestsQuery(
+    { id: formId, status: "pending" },
+    { skip: !open }
+  );
+  const [approve, { isLoading: approving }] = useApproveAccessRequestMutation();
+  const [reject, { isLoading: rejecting }] = useRejectAccessRequestMutation();
+  const [bulkReview, { isLoading: bulking }] = useBulkReviewAccessRequestsMutation();
+
+  const [note, setNote] = useState("");
+  const [busyId, setBusyId] = useState(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!open) {
+      setNote("");
+      setError("");
+      setBusyId(null);
+    }
+  }, [open]);
+
+  if (!open) return null;
+
+  const requests = data?.requests || [];
+
+  const handleApprove = async (id) => {
+    setError("");
+    setBusyId(id);
+    try {
+      await approve({ id: formId, requestId: id, note }).unwrap();
+      setNote("");
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't approve.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleReject = async (id) => {
+    setError("");
+    setBusyId(id);
+    try {
+      await reject({ id: formId, requestId: id, note }).unwrap();
+      setNote("");
+    } catch (err) {
+      setError(err?.data?.message || "Couldn't reject.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleBulk = async (action) => {
+    if (!requests.length) return;
+    setError("");
+    setBusyId("bulk");
+    try {
+      await bulkReview({
+        id: formId,
+        ids: requests.map((r) => r._id),
+        action,
+        note,
+      }).unwrap();
+      setNote("");
+    } catch (err) {
+      setError(err?.data?.message || "Bulk action failed.");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const busy = approving || rejecting || bulking;
+
+  return (
+    <div className="fixed inset-0 z-[75] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
+      <div className="absolute inset-0" onClick={onClose} aria-hidden />
+      <div className="relative z-10 flex max-h-[92dvh] w-full max-w-lg flex-col overflow-hidden rounded-t-xl bg-white shadow-2xl dark:bg-stone-900 sm:rounded-xl">
+        <div
+          className="flex items-center justify-between border-b border-stone-100 px-4 pb-3 dark:border-stone-800 sm:px-5"
+          style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}
+        >
+          <div>
+            <h2 className="flex items-center gap-1.5 text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+              {I.inbox("h-4 w-4")}
+              Access requests
+            </h2>
+            <p className="mt-0.5 text-[11.5px] text-stone-400 dark:text-stone-500">
+              Approve to send credentials by email, or decline with an optional reason.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-8 w-8 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+            aria-label="Close"
+          >
+            {I.close("h-4 w-4")}
+          </button>
+        </div>
+
+        <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-4 sm:px-5">
+          {isLoading ? (
+            <div className="space-y-2">
+              {[1, 2].map((i) => (
+                <div
+                  key={i}
+                  className="h-20 animate-pulse rounded-md bg-stone-100 dark:bg-stone-800/60"
+                />
+              ))}
+            </div>
+          ) : requests.length === 0 ? (
+            <div className="py-10 text-center">
+              <p className="text-[13px] font-medium text-stone-700 dark:text-stone-200">
+                All caught up 🎉
+              </p>
+              <p className="mt-1 text-[11.5px] text-stone-400 dark:text-stone-500">
+                No pending requests right now.
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {requests.map((r) => {
+                const isBusy = busyId === r._id;
+                return (
+                  <div
+                    key={r._id}
+                    className="rounded-lg border border-stone-200 bg-white p-3 dark:border-stone-800 dark:bg-stone-900"
+                  >
+                    <div className="flex items-start gap-2.5">
+                      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 text-[12px] font-semibold text-amber-700 dark:bg-amber-500/20 dark:text-amber-300">
+                        {(r.name || r.email || "?").charAt(0).toUpperCase()}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
+                          {r.name || r.email.split("@")[0]}
+                        </p>
+                        <p className="truncate text-[11px] text-stone-400 dark:text-stone-500">
+                          {r.email} · {formatRelative(r.requestedAt)}
+                        </p>
+
+                        {r.note ? (
+                          <p className="mt-1.5 rounded-md bg-stone-50 px-2 py-1.5 text-[11.5px] leading-snug text-stone-600 dark:bg-stone-800/60 dark:text-stone-300">
+                            "{r.note}"
+                          </p>
+                        ) : null}
+
+                        {requestFields?.length && r.extraInfo ? (
+                          <div className="mt-1.5 space-y-0.5">
+                            {requestFields.map((rf) => {
+                              const v = r.extraInfo?.[rf.id];
+                              if (v == null || v === "") return null;
+                              return (
+                                <p
+                                  key={rf.id}
+                                  className="text-[11px] leading-snug text-stone-500 dark:text-stone-400"
+                                >
+                                  <span className="font-medium text-stone-600 dark:text-stone-300">
+                                    {rf.label}:
+                                  </span>{" "}
+                                  {String(v)}
+                                </p>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+
+                    <div className="mt-2 flex items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleReject(r._id)}
+                        disabled={busy}
+                        className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-stone-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300 dark:hover:border-red-500/40 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                      >
+                        {isBusy && rejecting ? "…" : "Decline"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleApprove(r._id)}
+                        disabled={busy}
+                        className="rounded-md bg-teal-600 px-3 py-1 text-[11px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-colors hover:bg-teal-700 disabled:opacity-50 dark:bg-teal-500 dark:hover:bg-teal-400"
+                      >
+                        {isBusy && approving ? "…" : "Approve"}
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+
+              {requests.length > 1 ? (
+                <div className="mt-3 rounded-md border border-stone-200 bg-stone-50/60 p-2.5 dark:border-stone-700 dark:bg-stone-800/40">
+                  <p className="mb-1.5 text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                    Bulk · {requests.length} pending
+                  </p>
+                  <div className="flex items-center justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => handleBulk("reject")}
+                      disabled={busy}
+                      className="rounded-md border border-stone-200 bg-white px-2.5 py-1 text-[11px] font-semibold text-stone-600 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:opacity-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-300 dark:hover:border-red-500/40 dark:hover:bg-red-500/10 dark:hover:text-red-400"
+                    >
+                      Decline all
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleBulk("approve")}
+                      disabled={busy}
+                      className="rounded-md bg-teal-600 px-3 py-1 text-[11px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-colors hover:bg-teal-700 disabled:opacity-50 dark:bg-teal-500 dark:hover:bg-teal-400"
+                    >
+                      Approve all
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          )}
+        </div>
+
+        <div className="border-t border-stone-100 px-4 py-3 dark:border-stone-800 sm:px-5">
+          <label className="mb-1 block text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+            Note (optional)
+          </label>
+          <input
+            type="text"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Included in the email — 'see you at the polling unit' etc."
+            className="w-full rounded-md border border-stone-200 bg-white px-3 py-2 text-[12px] text-stone-800 outline-none focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500"
+          />
+          {error ? (
+            <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-400">
+              {error}
+            </p>
+          ) : null}
+        </div>
+
+        <div
+          className="flex items-center justify-end border-t border-stone-100 px-4 py-3 dark:border-stone-800 sm:px-5"
+          style={{ paddingBottom: "max(env(safe-area-inset-bottom), 0.75rem)" }}
+        >
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md bg-stone-900 px-4 py-2 text-[12.5px] font-semibold text-white transition-colors hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
+          >
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Share modal (unchanged)
 // ─────────────────────────────────────────────────────────────
 const ShareModal = ({ open, onClose, formId }) => {
@@ -1697,8 +2612,7 @@ const ShareModal = ({ open, onClose, formId }) => {
   const [addCollaborator, { isLoading: adding }] = useAddCollaboratorMutation();
   const [removeCollaborator] = useRemoveCollaboratorMutation();
   const [updateRole] = useUpdateCollaboratorRoleMutation();
-  const [resendInvite, { isLoading: resending }] =
-    useResendCollaboratorInviteMutation();
+  const [resendInvite, { isLoading: resending }] = useResendCollaboratorInviteMutation();
 
   const [email, setEmail] = useState("");
   const [role, setRole] = useState("editor");
@@ -1759,8 +2673,7 @@ const ShareModal = ({ open, onClose, formId }) => {
               Share form
             </h2>
             <p className="mt-0.5 text-[11.5px] text-stone-400 dark:text-stone-500">
-              Invite people to help edit or view responses. No account
-              needed — we'll email them a link.
+              Invite people to help edit or view responses.
             </p>
           </div>
           <button
@@ -1804,31 +2717,22 @@ const ShareModal = ({ open, onClose, formId }) => {
             </div>
 
             {error ? (
-              <p className="text-[11.5px] text-red-600 dark:text-red-400">
-                {error}
-              </p>
+              <p className="text-[11.5px] text-red-600 dark:text-red-400">{error}</p>
             ) : null}
 
             {lastResult ? (
               <div className="flex items-start gap-2 rounded-md bg-teal-50 px-2.5 py-2 text-[11.5px] leading-snug text-teal-700 dark:bg-teal-500/10 dark:text-teal-300">
-                <span className="mt-0.5 shrink-0">
-                  {I.mail("h-3.5 w-3.5")}
-                </span>
+                <span className="mt-0.5 shrink-0">{I.mail("h-3.5 w-3.5")}</span>
                 <span>
                   {lastResult.invited ? (
                     <>
                       Invite sent to{" "}
-                      <span className="font-semibold">
-                        {lastResult.email}
-                      </span>
-                      . They'll get access as soon as they sign up.
+                      <span className="font-semibold">{lastResult.email}</span>.
                     </>
                   ) : (
                     <>
                       Added{" "}
-                      <span className="font-semibold">
-                        {lastResult.email}
-                      </span>{" "}
+                      <span className="font-semibold">{lastResult.email}</span>{" "}
                       as a collaborator.
                     </>
                   )}
@@ -1855,9 +2759,7 @@ const ShareModal = ({ open, onClose, formId }) => {
                   </p>
                   <div className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-stone-50/70 px-3 py-2.5 dark:border-stone-800 dark:bg-stone-800/40">
                     <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-900 text-[11px] font-semibold text-white dark:bg-stone-100 dark:text-stone-900">
-                      {(owner.name || owner.email || "?")
-                        .charAt(0)
-                        .toUpperCase()}
+                      {(owner.name || owner.email || "?").charAt(0).toUpperCase()}
                     </span>
                     <div className="min-w-0 flex-1">
                       <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
@@ -1883,9 +2785,7 @@ const ShareModal = ({ open, onClose, formId }) => {
                         className="flex items-center gap-2.5 rounded-md border border-stone-200 bg-white px-3 py-2.5 dark:border-stone-800 dark:bg-stone-900"
                       >
                         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
-                          {(c.name || c.email || "?")
-                            .charAt(0)
-                            .toUpperCase()}
+                          {(c.name || c.email || "?").charAt(0).toUpperCase()}
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
@@ -1898,11 +2798,7 @@ const ShareModal = ({ open, onClose, formId }) => {
                         <Dropdown
                           value={c.role}
                           onChange={(next) =>
-                            updateRole({
-                              id: formId,
-                              userId: c.user,
-                              role: next,
-                            })
+                            updateRole({ id: formId, userId: c.user, role: next })
                           }
                           options={ROLE_OPTIONS}
                           className="w-24 shrink-0"
@@ -1936,17 +2832,15 @@ const ShareModal = ({ open, onClose, formId }) => {
                         className="flex items-center gap-2.5 rounded-md border border-dashed border-stone-300 bg-stone-50/60 px-3 py-2.5 dark:border-stone-700 dark:bg-stone-900/60"
                       >
                         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-stone-200 text-[11px] font-semibold text-stone-600 dark:bg-stone-700 dark:text-stone-300">
-                          {(p.name || p.email || "?")
-                            .charAt(0)
-                            .toUpperCase()}
+                          {(p.name || p.email || "?").charAt(0).toUpperCase()}
                         </span>
                         <div className="min-w-0 flex-1">
                           <p className="truncate text-[12.5px] font-semibold text-stone-800 dark:text-stone-100">
                             {p.name || p.email}
                           </p>
                           <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
-                            {p.role === "editor" ? "Editor" : "Viewer"} ·
-                            invited {formatRelative(p.lastInvitedAt || p.invitedAt)}
+                            {p.role === "editor" ? "Editor" : "Viewer"} · invited{" "}
+                            {formatRelative(p.lastInvitedAt || p.invitedAt)}
                           </p>
                         </div>
                         <button
@@ -1954,20 +2848,15 @@ const ShareModal = ({ open, onClose, formId }) => {
                           onClick={() => handleResend(p.email)}
                           disabled={resendingFor === p.email || resending}
                           className="shrink-0 rounded-md px-2 py-1 text-[10.5px] font-semibold text-teal-600 transition-colors hover:bg-teal-50 disabled:opacity-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
-                          title="Resend invite email"
                         >
                           {resendingFor === p.email ? "Sending…" : "Resend"}
                         </button>
                         <button
                           type="button"
                           onClick={() =>
-                            removeCollaborator({
-                              id: formId,
-                              email: p.email,
-                            })
+                            removeCollaborator({ id: formId, email: p.email })
                           }
                           className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-                          aria-label="Cancel invite"
                         >
                           {I.trash("h-3.5 w-3.5")}
                         </button>
@@ -1975,12 +2864,6 @@ const ShareModal = ({ open, onClose, formId }) => {
                     ))}
                   </div>
                 </div>
-              ) : null}
-
-              {!owner && !collabs.length && !pending.length ? (
-                <p className="py-6 text-center text-[12px] text-stone-400 dark:text-stone-500">
-                  No collaborators yet.
-                </p>
               ) : null}
             </div>
           )}
@@ -2098,9 +2981,7 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
               className="w-full resize-none rounded-md border border-stone-200 bg-white px-3 py-2.5 text-[13px] leading-relaxed text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/40"
             />
             {error ? (
-              <p className="text-[11.5px] text-red-600 dark:text-red-400">
-                {error}
-              </p>
+              <p className="text-[11.5px] text-red-600 dark:text-red-400">{error}</p>
             ) : null}
             <button
               type="submit"
@@ -2115,9 +2996,6 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
             <div className="mb-4 rounded-md border border-emerald-200 bg-emerald-50/60 p-3 dark:border-emerald-500/30 dark:bg-emerald-500/10">
               <p className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-emerald-700 dark:text-emerald-400">
                 Just added · passwords below
-              </p>
-              <p className="mb-2 text-[10.5px] leading-snug text-emerald-700/80 dark:text-emerald-400/80">
-                Invite emails were sent. Save the passwords here too in case delivery fails.
               </p>
               <div className="space-y-1.5">
                 {created.map((p) => (
@@ -2135,7 +3013,6 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
                       type="button"
                       onClick={() => copyCreds(p)}
                       className="shrink-0 rounded p-1 text-emerald-600 hover:bg-emerald-100 dark:text-emerald-400 dark:hover:bg-emerald-500/20"
-                      title="Copy credentials"
                     >
                       {copied === p.email ? (
                         <span className="text-[10px] font-semibold">Copied</span>
@@ -2190,7 +3067,6 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
                     type="button"
                     onClick={() => resend({ id: formId, participantId: p._id })}
                     className="shrink-0 rounded-md px-2 py-1 text-[10.5px] font-semibold text-teal-600 transition-colors hover:bg-teal-50 dark:text-teal-400 dark:hover:bg-teal-500/10"
-                    title="Send a new password"
                   >
                     Resend
                   </button>
@@ -2200,7 +3076,6 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
                       removeParticipant({ id: formId, participantId: p._id })
                     }
                     className="shrink-0 rounded-md p-1.5 text-stone-300 transition-colors hover:bg-red-50 hover:text-red-500 dark:text-stone-600 dark:hover:bg-red-500/10 dark:hover:text-red-400"
-                    aria-label="Remove"
                   >
                     {I.trash("h-3.5 w-3.5")}
                   </button>
@@ -2228,7 +3103,7 @@ const ParticipantsModal = ({ open, onClose, formId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Editor header menu (unchanged)
+// Editor menu
 // ─────────────────────────────────────────────────────────────
 const EditorMenu = ({
   form,
@@ -2240,8 +3115,10 @@ const EditorMenu = ({
   onPreview,
   onResponses,
   onDelete,
+  onAccessRequests,
   publishing,
   deleting,
+  pendingRequestsCount,
 }) => {
   const [open, setOpen] = useState(false);
 
@@ -2260,6 +3137,16 @@ const EditorMenu = ({
       label: "Manage participants",
       icon: I.users,
       handler: onParticipants,
+      hidden: form.visibility !== "private",
+    },
+    {
+      id: "access-requests",
+      label:
+        pendingRequestsCount > 0
+          ? `Access requests (${pendingRequestsCount})`
+          : "Access requests",
+      icon: I.inbox,
+      handler: onAccessRequests,
       hidden: form.visibility !== "private",
     },
     { id: "copy-link", label: "Copy public link", icon: I.link, handler: onCopyLink },
@@ -2292,16 +3179,21 @@ const EditorMenu = ({
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
+        className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-md text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
         aria-label="More actions"
       >
         {I.dots("h-4 w-4")}
+        {pendingRequestsCount > 0 ? (
+          <span className="absolute right-1 top-1 flex h-4 min-w-[16px] items-center justify-center rounded-full bg-amber-500 px-1 text-[9px] font-bold text-white">
+            {pendingRequestsCount > 9 ? "9+" : pendingRequestsCount}
+          </span>
+        ) : null}
       </button>
 
       {open ? (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} aria-hidden />
-          <div className="absolute right-0 top-full z-50 mt-1.5 w-56 overflow-hidden rounded-md border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10 dark:border-stone-700/80 dark:bg-stone-900 dark:shadow-black/40">
+          <div className="absolute right-0 top-full z-50 mt-1.5 w-60 overflow-hidden rounded-md border border-stone-200/80 bg-white py-1 shadow-xl shadow-stone-900/10 dark:border-stone-700/80 dark:bg-stone-900 dark:shadow-black/40">
             {items
               .filter((it) => !it.hidden)
               .map((it) => (
@@ -2319,7 +3211,13 @@ const EditorMenu = ({
                       : "text-stone-700 hover:bg-stone-50 dark:text-stone-200 dark:hover:bg-stone-800"
                   }`}
                 >
-                  <span className={it.danger ? "text-red-500 dark:text-red-400" : "text-stone-400 dark:text-stone-500"}>
+                  <span
+                    className={
+                      it.danger
+                        ? "text-red-500 dark:text-red-400"
+                        : "text-stone-400 dark:text-stone-500"
+                    }
+                  >
                     {it.icon("h-3.5 w-3.5")}
                   </span>
                   <span className="min-w-0 flex-1 truncate">{it.label}</span>
@@ -2353,6 +3251,7 @@ const FormEditor = () => {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [participantsOpen, setParticipantsOpen] = useState(false);
+  const [accessOpen, setAccessOpen] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
 
   const loadedRef = useRef(false);
@@ -2380,13 +3279,11 @@ const FormEditor = () => {
     setDirty(true);
   };
 
+  // ── Field ops (non-election) ─────────────────────────────
   const addField = (type) => {
     const field = defaultField(type);
     patchForm({
-      fields: [
-        ...(form.fields || []),
-        { ...field, order: form.fields?.length || 0 },
-      ],
+      fields: [...(form.fields || []), { ...field, order: form.fields?.length || 0 }],
     });
   };
 
@@ -2420,6 +3317,7 @@ const FormEditor = () => {
     patchForm({ fields });
   };
 
+  // ── Save / publish / close ───────────────────────────────
   const handleSave = async () => {
     if (!form) return false;
     try {
@@ -2429,9 +3327,12 @@ const FormEditor = () => {
         type: form.type,
         visibility: form.visibility,
         fields: form.fields,
+        positions: form.positions || [],
         settings: form.settings,
         isMultipage: form.isMultipage,
         coverPhoto: form.coverPhoto || "",
+        startAt: form.startAt || null,
+        expiresAt: form.expiresAt || null,
       };
       const res = await updateForm({ id, ...payload }).unwrap();
       setForm(res.form);
@@ -2445,9 +3346,6 @@ const FormEditor = () => {
   };
 
   const handleCoverChanged = (newUrl) => {
-    // The cover endpoint already persists on the server; update local
-    // state so the preview reflects it without a full refetch. This
-    // change isn't part of the "dirty" flow.
     setForm((prev) => (prev ? { ...prev, coverPhoto: newUrl } : prev));
   };
 
@@ -2481,9 +3379,8 @@ const FormEditor = () => {
       !window.confirm(
         "Delete this form and all its responses? This can't be undone."
       )
-    ) {
+    )
       return;
-    }
     try {
       await deleteForm(id).unwrap();
       navigate("/forms");
@@ -2522,28 +3419,35 @@ const FormEditor = () => {
       form?.type === "quiz" || form?.fields?.some((f) => f.scoring?.points > 0),
     [form]
   );
+  const isElection = form?.type === "election";
 
-  const statusMeta = {
-    draft: {
+  const pendingRequestsCount = useMemo(() => {
+    if (!form?.participantRequests) return 0;
+    return form.participantRequests.filter((r) => r.status === "pending").length;
+  }, [form]);
+
+  const statusMeta =
+    {
+      draft: {
+        label: "Draft",
+        dot: "bg-stone-400 dark:bg-stone-500",
+        text: "text-stone-500 dark:text-stone-400",
+      },
+      open: {
+        label: "Open",
+        dot: "bg-emerald-500",
+        text: "text-emerald-600 dark:text-emerald-400",
+      },
+      closed: {
+        label: "Closed",
+        dot: "bg-red-400",
+        text: "text-red-500 dark:text-red-400",
+      },
+    }[form?.status] || {
       label: "Draft",
       dot: "bg-stone-400 dark:bg-stone-500",
       text: "text-stone-500 dark:text-stone-400",
-    },
-    open: {
-      label: "Open",
-      dot: "bg-emerald-500",
-      text: "text-emerald-600 dark:text-emerald-400",
-    },
-    closed: {
-      label: "Closed",
-      dot: "bg-red-400",
-      text: "text-red-500 dark:text-red-400",
-    },
-  }[form?.status] || {
-    label: "Draft",
-    dot: "bg-stone-400 dark:bg-stone-500",
-    text: "text-stone-500 dark:text-stone-400",
-  };
+    };
 
   if (isLoading || !form) {
     return (
@@ -2603,12 +3507,15 @@ const FormEditor = () => {
               className="w-full truncate rounded-md border border-transparent bg-transparent px-1 py-0.5 text-[14.5px] font-semibold tracking-tight text-stone-900 outline-none transition-all placeholder:text-stone-300 focus:border-teal-200 focus:bg-teal-50/30 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus:border-teal-500/40 dark:focus:bg-teal-500/5"
             />
             <div className="mt-0.5 flex items-center gap-1.5 px-1">
-              <span
-                className={`inline-flex items-center gap-1 text-[10px] font-semibold ${statusMeta.text}`}
-              >
+              <span className={`inline-flex items-center gap-1 text-[10px] font-semibold ${statusMeta.text}`}>
                 <span className={`h-1.5 w-1.5 rounded-full ${statusMeta.dot}`} />
                 {statusMeta.label}
               </span>
+              {isElection ? (
+                <span className="inline-flex items-center gap-1 text-[10px] font-semibold text-rose-600 dark:text-rose-400">
+                  · Election
+                </span>
+              ) : null}
               {dirty ? (
                 <span className="text-[10px] font-medium text-teal-600 dark:text-teal-400">
                   · unsaved
@@ -2644,16 +3551,16 @@ const FormEditor = () => {
             form={form}
             onShare={() => setShareOpen(true)}
             onParticipants={() => setParticipantsOpen(true)}
+            onAccessRequests={() => setAccessOpen(true)}
             onCopyLink={handleCopyLink}
             onPublish={handlePublish}
             onClose={() => setConfirmClose(true)}
-            onPreview={() =>
-              window.open(`/forms/${form.slug}`, "_blank", "noopener")
-            }
+            onPreview={() => window.open(`/forms/${form.slug}`, "_blank", "noopener")}
             onResponses={() => navigate(`/forms/${id}/responses`)}
             onDelete={handleDelete}
             publishing={publishing}
             deleting={deleting}
+            pendingRequestsCount={pendingRequestsCount}
           />
         </div>
       </header>
@@ -2662,7 +3569,6 @@ const FormEditor = () => {
         <div className="mx-auto w-full max-w-6xl px-2.5 pb-32 pt-3 sm:px-4 sm:pb-8 sm:pt-5">
           <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_320px]">
             <div className="min-w-0">
-              {/* Cover photo */}
               <CoverPhotoPanel
                 formId={id}
                 coverPhoto={form.coverPhoto || ""}
@@ -2686,44 +3592,58 @@ const FormEditor = () => {
                 />
               </div>
 
-              <AiEditPanel
-                formId={id}
-                dirty={dirty}
-                onSaveFirst={handleSave}
-                onApplied={handleAiApplied}
-              />
-
-              <div className="space-y-3">
-                {(form.fields || []).map((field, idx) => (
-                  <FieldCard
-                    key={field.id}
-                    field={field}
-                    index={idx}
-                    total={form.fields.length}
-                    isQuiz={isQuiz}
-                    onChange={(next) => updateField(idx, next)}
-                    onDelete={() => deleteField(idx)}
-                    onDuplicate={() => duplicateField(idx)}
-                    onMoveUp={() => moveField(idx, -1)}
-                    onMoveDown={() => moveField(idx, 1)}
-                  />
-                ))}
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setPickerOpen(true)}
-                className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-stone-300 bg-white/50 py-3.5 text-[12.5px] font-semibold text-stone-500 transition-colors hover:border-teal-300 hover:bg-teal-50/50 hover:text-teal-600 dark:border-stone-700 dark:bg-stone-900/40 dark:text-stone-400 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10 dark:hover:text-teal-400"
-              >
-                {I.plus("h-4 w-4")}
-                Add field
-              </button>
-
-              {form.fields?.length === 0 ? (
-                <p className="mt-3 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
-                  A form needs at least one field before it can be published.
-                </p>
+              {/* AI edit — hidden for elections (fields-only AI) */}
+              {!isElection ? (
+                <AiEditPanel
+                  formId={id}
+                  dirty={dirty}
+                  onSaveFirst={handleSave}
+                  onApplied={handleAiApplied}
+                />
               ) : null}
+
+              {/* Fields vs Positions */}
+              {isElection ? (
+                <PositionsEditor
+                  formId={id}
+                  positions={form.positions || []}
+                  onChange={(positions) => patchForm({ positions })}
+                />
+              ) : (
+                <>
+                  <div className="space-y-3">
+                    {(form.fields || []).map((field, idx) => (
+                      <FieldCard
+                        key={field.id}
+                        field={field}
+                        index={idx}
+                        total={form.fields.length}
+                        isQuiz={isQuiz}
+                        onChange={(next) => updateField(idx, next)}
+                        onDelete={() => deleteField(idx)}
+                        onDuplicate={() => duplicateField(idx)}
+                        onMoveUp={() => moveField(idx, -1)}
+                        onMoveDown={() => moveField(idx, 1)}
+                      />
+                    ))}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen(true)}
+                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border-2 border-dashed border-stone-300 bg-white/50 py-3.5 text-[12.5px] font-semibold text-stone-500 transition-colors hover:border-teal-300 hover:bg-teal-50/50 hover:text-teal-600 dark:border-stone-700 dark:bg-stone-900/40 dark:text-stone-400 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10 dark:hover:text-teal-400"
+                  >
+                    {I.plus("h-4 w-4")}
+                    Add field
+                  </button>
+
+                  {form.fields?.length === 0 ? (
+                    <p className="mt-3 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
+                      A form needs at least one field before it can be published.
+                    </p>
+                  ) : null}
+                </>
+              )}
             </div>
 
             <aside className="hidden lg:block">
@@ -2808,15 +3728,17 @@ const FormEditor = () => {
         </div>
       ) : null}
 
-      <ShareModal
-        open={shareOpen}
-        onClose={() => setShareOpen(false)}
-        formId={id}
-      />
+      <ShareModal open={shareOpen} onClose={() => setShareOpen(false)} formId={id} />
       <ParticipantsModal
         open={participantsOpen}
         onClose={() => setParticipantsOpen(false)}
         formId={id}
+      />
+      <AccessRequestsModal
+        open={accessOpen}
+        onClose={() => setAccessOpen(false)}
+        formId={id}
+        requestFields={form.settings?.requestFields || []}
       />
 
       {confirmClose ? (
@@ -2831,8 +3753,8 @@ const FormEditor = () => {
               Close this form?
             </h3>
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
-              People won't be able to submit any more responses. You can reopen
-              it later.
+              People won't be able to submit any more responses. You can reopen it
+              later.
             </p>
             <div className="mt-5 flex items-center justify-end gap-2">
               <button

@@ -1,11 +1,16 @@
 // pages/PublicForm.jsx
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useParams, useNavigate } from "react-router";
 import {
   useGetPublicFormQuery,
   useParticipantLoginMutation,
   useUploadFormMediaMutation,
   useSubmitResponseMutation,
+  useRequestAccessMutation,
+  useSaveDraftMutation,
+  useGetDraftQuery,
+  useClearDraftMutation,
+  useGetPublicElectionResultsQuery,
 } from "../features/formApiSlice";
 import { useDocumentMeta } from "../hooks/useDocumentMeta";
 
@@ -13,22 +18,47 @@ import { useDocumentMeta } from "../hooks/useDocumentMeta";
 // Token storage helpers
 // ─────────────────────────────────────────────────────────────
 const tokenKey = (slug) => `participant_token_${slug}`;
+const resultsKey = (slug) => `results_token_${slug}`;
+const sessionKeyKey = (slug) => `draft_session_${slug}`;
+const loginPromptKey = (slug) => `login_prompt_shown_${slug}`;
 
-const readToken = (slug) => {
-  try {
-    return sessionStorage.getItem(tokenKey(slug)) || null;
-  } catch {
-    return null;
-  }
-};
+const safeStorage = (store) => ({
+  get: (k) => {
+    try {
+      return store.getItem(k);
+    } catch {
+      return null;
+    }
+  },
+  set: (k, v) => {
+    try {
+      if (v) store.setItem(k, v);
+      else store.removeItem(k);
+    } catch {
+      /* noop */
+    }
+  },
+});
 
-const writeToken = (slug, token) => {
-  try {
-    if (token) sessionStorage.setItem(tokenKey(slug), token);
-    else sessionStorage.removeItem(tokenKey(slug));
-  } catch {
-    /* noop */
-  }
+const sessionStore = safeStorage(sessionStorage);
+const localStore = safeStorage(localStorage);
+
+const readToken = (slug) => sessionStore.get(tokenKey(slug));
+const writeToken = (slug, token) => sessionStore.set(tokenKey(slug), token);
+
+const readResultsToken = (slug) => sessionStore.get(resultsKey(slug));
+const writeResultsToken = (slug, token) =>
+  sessionStore.set(resultsKey(slug), token);
+
+const readSessionKey = (slug) => {
+  const existing = localStore.get(sessionKeyKey(slug));
+  if (existing) return existing;
+  const generated =
+    "sk_" +
+    Math.random().toString(36).slice(2) +
+    Math.random().toString(36).slice(2);
+  localStore.set(sessionKeyKey(slug), generated);
+  return generated;
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -53,20 +83,40 @@ const formatBytes = (bytes) => {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const formatCountdown = (targetIso) => {
+  if (!targetIso) return "";
+  const diff = new Date(targetIso).getTime() - Date.now();
+  if (diff <= 0) return "now";
+  const sec = Math.floor(diff / 1000);
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m`;
+  return `${sec}s`;
+};
+
 // ─────────────────────────────────────────────────────────────
-// Brand
+// Brand mark — small icon used inline in headers/footers
 // ─────────────────────────────────────────────────────────────
-const XamutMark = ({ className = "h-9 w-9" }) => (
-  <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 shadow-sm shadow-teal-500/30`}
-  >
-    <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-white">
-      <path
-        fill="currentColor"
-        d="M6 5h3.2L12 9.3 14.8 5H18l-4.5 6.4L18.5 19H15.3L12 14.2 8.7 19H5.5L10 12.2 6 5Z"
-      />
-    </svg>
-  </div>
+const XamutIcon = ({ className = "h-7 w-7" }) => (
+  <img
+    src="/xamut-icon.png"
+    alt="Xamut"
+    draggable={false}
+    className={`${className} shrink-0 select-none object-contain dark:brightness-0 dark:invert`}
+  />
+);
+
+// Full wordmark — used on standalone, centered screens
+const XamutLogo = ({ className = "h-9 w-auto" }) => (
+  <img
+    src="/xamut-logo.png"
+    alt="Xamut"
+    draggable={false}
+    className={`${className} shrink-0 select-none object-contain dark:brightness-0 dark:invert`}
+  />
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -104,6 +154,12 @@ const I = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <circle cx="12" cy="12" r="9" />
       <path d="M12 8v5M12 16h.01" strokeLinecap="round" />
+    </svg>
+  ),
+  info: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 16v-5M12 8h.01" strokeLinecap="round" />
     </svg>
   ),
   arrowUp: (c) => (
@@ -154,10 +210,41 @@ const I = {
       <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  ballot: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M4 20h16M6 20V10h12v10M10 6l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  clock: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" strokeLinecap="round" />
+    </svg>
+  ),
+  crown: (c) => (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={c}>
+      <path d="M3 18h18l-1.5-9-4.5 3L12 6 9 12 4.5 9 3 18Z" />
+    </svg>
+  ),
+  spark: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path
+        d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  ),
+  user: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <circle cx="12" cy="8" r="4" />
+      <path d="M4 21a8 8 0 0 1 16 0" strokeLinecap="round" />
+    </svg>
+  ),
 };
 
 // ─────────────────────────────────────────────────────────────
-// Rating input
+// Rating input (unchanged)
 // ─────────────────────────────────────────────────────────────
 const RatingInput = ({ value, min, max, onChange }) => {
   const items = [];
@@ -197,7 +284,7 @@ const RatingInput = ({ value, min, max, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Linear scale input
+// Linear scale input (unchanged)
 // ─────────────────────────────────────────────────────────────
 const ScaleInput = ({ value, min, max, onChange }) => {
   const items = [];
@@ -230,13 +317,7 @@ const ScaleInput = ({ value, min, max, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Media input — uploads files to Cloudinary via /upload
-//
-// The stored answer value is either:
-//   • a single { url, filename, size, mimetype } object (maxFiles === 1)
-//   • an array of those objects (maxFiles > 1)
-// The server turns that into a URL string (or array of strings) when
-// the response is saved.
+// Media input (unchanged)
 // ─────────────────────────────────────────────────────────────
 const MediaInput = ({
   field,
@@ -298,14 +379,8 @@ const MediaInput = ({
   };
 
   const handleRemove = (idx) => {
-    if (isMulti) {
-      onChange(
-        field.id,
-        current.filter((_, i) => i !== idx)
-      );
-    } else {
-      onChange(field.id, null);
-    }
+    if (isMulti) onChange(field.id, current.filter((_, i) => i !== idx));
+    else onChange(field.id, null);
   };
 
   return (
@@ -415,7 +490,7 @@ const MediaInput = ({
 };
 
 // ─────────────────────────────────────────────────────────────
-// Field renderer
+// Field renderer (unchanged)
 // ─────────────────────────────────────────────────────────────
 const FieldRenderer = ({
   field,
@@ -563,7 +638,6 @@ const FieldRenderer = ({
           />
         ) : null}
 
-        {/* Media — image / document / file */}
         {MEDIA_TYPES.has(field.type) ? (
           <MediaInput
             field={field}
@@ -576,7 +650,6 @@ const FieldRenderer = ({
           />
         ) : null}
 
-        {/* Radio */}
         {field.type === "radio" ? (
           <div className="space-y-1.5">
             {field.options.map((opt) => {
@@ -608,7 +681,6 @@ const FieldRenderer = ({
           </div>
         ) : null}
 
-        {/* Checkbox / multi_select */}
         {field.type === "checkbox" || field.type === "multi_select" ? (
           <div className="space-y-1.5">
             {field.options.map((opt) => {
@@ -644,7 +716,6 @@ const FieldRenderer = ({
           </div>
         ) : null}
 
-        {/* Dropdown */}
         {field.type === "dropdown" ? (
           <select
             value={valueStr}
@@ -660,7 +731,6 @@ const FieldRenderer = ({
           </select>
         ) : null}
 
-        {/* Yes / No */}
         {field.type === "yes_no" ? (
           <div className="flex gap-2">
             {[
@@ -686,7 +756,6 @@ const FieldRenderer = ({
           </div>
         ) : null}
 
-        {/* Rating */}
         {field.type === "rating" ? (
           <RatingInput
             value={Number(value) || 0}
@@ -696,7 +765,6 @@ const FieldRenderer = ({
           />
         ) : null}
 
-        {/* Linear scale */}
         {field.type === "scale" ? (
           <ScaleInput
             value={Number(value) || 0}
@@ -718,35 +786,386 @@ const FieldRenderer = ({
 };
 
 // ─────────────────────────────────────────────────────────────
-// Login screen (private forms)
+// Election — candidate card
 // ─────────────────────────────────────────────────────────────
-const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
+const CandidateCard = ({ candidate, selected, disabled, onClick }) => {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = candidate.bio || candidate.manifesto;
+
+  return (
+    <div
+      className={`group overflow-hidden rounded-lg border-2 transition-all ${
+        selected
+          ? "border-rose-500 bg-rose-50/50 shadow-sm shadow-rose-500/15 dark:border-rose-500 dark:bg-rose-500/10"
+          : "border-stone-200 bg-white hover:border-rose-300 dark:border-stone-700 dark:bg-stone-900 dark:hover:border-rose-500/50"
+      } ${disabled ? "opacity-60" : "cursor-pointer"}`}
+    >
+      <button
+        type="button"
+        onClick={disabled ? undefined : onClick}
+        className="flex w-full items-start gap-3 p-3 text-left"
+      >
+        <span className="relative flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-rose-100 text-[18px] font-semibold text-rose-700 ring-2 ring-white shadow dark:bg-rose-500/20 dark:text-rose-300 dark:ring-stone-900">
+          {candidate.photoUrl ? (
+            <img
+              src={candidate.photoUrl}
+              alt={candidate.name}
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            (candidate.name || "?").charAt(0).toUpperCase()
+          )}
+          {selected ? (
+            <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-rose-500 text-white shadow">
+              {I.check("h-3 w-3")}
+            </span>
+          ) : null}
+        </span>
+
+        <div className="min-w-0 flex-1 pt-0.5">
+          <p className="truncate text-[14px] font-semibold text-stone-900 dark:text-stone-100">
+            {candidate.name || "Unnamed candidate"}
+          </p>
+          {candidate.slogan ? (
+            <p className="mt-0.5 truncate text-[11.5px] italic text-stone-500 dark:text-stone-400">
+              "{candidate.slogan}"
+            </p>
+          ) : null}
+          {candidate.bio && !expanded ? (
+            <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-stone-500 dark:text-stone-400">
+              {candidate.bio}
+            </p>
+          ) : null}
+        </div>
+      </button>
+
+      {hasDetails ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            setExpanded((v) => !v);
+          }}
+          className="flex w-full items-center justify-between border-t border-stone-100 px-3 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-stone-400 transition-colors hover:bg-stone-50 dark:border-stone-800 dark:text-stone-500 dark:hover:bg-stone-800/50"
+        >
+          {expanded ? "Hide details" : "Show details"}
+          <span className={expanded ? "rotate-180" : ""}>▾</span>
+        </button>
+      ) : null}
+
+      {expanded && hasDetails ? (
+        <div className="border-t border-stone-100 px-3 py-3 dark:border-stone-800">
+          {candidate.bio ? (
+            <div className="mb-3">
+              <p className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                Bio
+              </p>
+              <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-stone-600 dark:text-stone-300">
+                {candidate.bio}
+              </p>
+            </div>
+          ) : null}
+          {candidate.manifesto ? (
+            <div>
+              <p className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                Manifesto
+              </p>
+              <p className="mt-1 whitespace-pre-wrap text-[12px] leading-relaxed text-stone-600 dark:text-stone-300">
+                {candidate.manifesto}
+              </p>
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Election — one position
+// ─────────────────────────────────────────────────────────────
+const PositionVoter = ({ position, value, error, onChange, allowAbstain }) => {
+  const maxSel = Math.max(1, position.maxSelections || 1);
+  const current = Array.isArray(value) ? value : value ? [value] : [];
+  const atMax = current.length >= maxSel;
+
+  const toggle = (candidateId) => {
+    if (current.includes(candidateId)) {
+      onChange(position.id, current.filter((v) => v !== candidateId));
+      return;
+    }
+    if (maxSel === 1) {
+      onChange(position.id, [candidateId]);
+      return;
+    }
+    if (atMax) return;
+    onChange(position.id, [...current, candidateId]);
+  };
+
+  const clear = () => onChange(position.id, []);
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-stone-200/80 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+      <div className="border-b border-stone-100 bg-gradient-to-r from-rose-50/60 to-white px-4 py-3 dark:border-stone-800 dark:from-rose-500/5 dark:to-stone-900 sm:px-5">
+        <div className="flex items-start gap-2">
+          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-rose-100 text-rose-600 dark:bg-rose-500/20 dark:text-rose-300">
+            {I.ballot("h-3.5 w-3.5")}
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[15px] font-semibold leading-tight tracking-tight text-stone-900 dark:text-stone-100">
+              {position.title}
+              {position.required && !allowAbstain ? (
+                <span className="ml-1 text-rose-500 dark:text-rose-400">*</span>
+              ) : null}
+            </h3>
+            {position.description ? (
+              <p className="mt-0.5 text-[12px] leading-snug text-stone-500 dark:text-stone-400">
+                {position.description}
+              </p>
+            ) : null}
+            <p className="mt-1 text-[10.5px] font-medium uppercase tracking-wider text-rose-600 dark:text-rose-400">
+              {maxSel === 1
+                ? "Pick one"
+                : `Pick up to ${maxSel}`}
+              {current.length > 0 ? ` · ${current.length} selected` : ""}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-2.5 p-3 sm:grid-cols-2 sm:p-4">
+        {position.candidates.map((c) => (
+          <CandidateCard
+            key={c.id}
+            candidate={c}
+            selected={current.includes(c.id)}
+            disabled={!current.includes(c.id) && maxSel > 1 && atMax}
+            onClick={() => toggle(c.id)}
+          />
+        ))}
+      </div>
+
+      {allowAbstain || current.length > 0 ? (
+        <div className="flex items-center justify-between gap-2 border-t border-stone-100 px-4 py-2 dark:border-stone-800">
+          {current.length > 0 ? (
+            <p className="text-[11px] text-emerald-600 dark:text-emerald-400">
+              {current.length} of {maxSel} selected
+            </p>
+          ) : (
+            <p className="text-[11px] italic text-stone-400 dark:text-stone-500">
+              {allowAbstain ? "You can skip this position." : ""}
+            </p>
+          )}
+          {current.length > 0 ? (
+            <button
+              type="button"
+              onClick={clear}
+              className="text-[11px] font-semibold text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100"
+            >
+              Clear
+            </button>
+          ) : null}
+        </div>
+      ) : null}
+
+      {error ? (
+        <p className="flex items-center gap-1.5 border-t border-red-100 bg-red-50/70 px-4 py-2 text-[11.5px] font-medium text-red-600 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-400">
+          {I.alert("h-3.5 w-3.5 shrink-0")}
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Election — live results panel
+// ─────────────────────────────────────────────────────────────
+const LiveResultsPanel = ({ slug, resultsToken }) => {
+  const { data, isLoading } = useGetPublicElectionResultsQuery(
+    { slug, resultsToken },
+    { skip: !slug || !resultsToken, pollingInterval: 20000 }
+  );
+
+  if (isLoading) {
+    return (
+      <div className="mt-5 rounded-lg border border-rose-200/70 bg-rose-50/50 p-4 text-center dark:border-rose-500/30 dark:bg-rose-500/10">
+        <span className="inline-flex items-center gap-2 text-[12px] font-medium text-rose-700 dark:text-rose-300">
+          {I.spinner("h-3.5 w-3.5")}
+          Loading live results…
+        </span>
+      </div>
+    );
+  }
+
+  if (!data?.results?.length) return null;
+
+  return (
+    <div className="mt-5 space-y-3">
+      <div className="rounded-lg border border-rose-200/70 bg-rose-50/50 px-3.5 py-2.5 dark:border-rose-500/30 dark:bg-rose-500/10">
+        <div className="flex items-center gap-2">
+          <span className="text-rose-500 dark:text-rose-400">
+            {I.ballot("h-4 w-4")}
+          </span>
+          <p className="text-[12px] font-semibold text-rose-800 dark:text-rose-200">
+            Live standings · {data.totalResponses} vote
+            {data.totalResponses === 1 ? "" : "s"}
+          </p>
+        </div>
+        <p className="mt-1 text-[10.5px] text-rose-600/80 dark:text-rose-400/80">
+          Updates as people vote. Only visible to those who've voted.
+        </p>
+      </div>
+
+      {data.results.map((p) => (
+        <div
+          key={p.positionId}
+          className="rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900"
+        >
+          <div className="mb-3 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <p className="break-words text-[13.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+                {p.title}
+              </p>
+              <p className="mt-0.5 text-[10.5px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                {p.totalVotes} vote{p.totalVotes === 1 ? "" : "s"}
+                {p.abstained > 0 ? ` · ${p.abstained} abstained` : ""}
+              </p>
+            </div>
+            {p.tie && p.totalVotes > 0 ? (
+              <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+                Tie
+              </span>
+            ) : null}
+          </div>
+
+          {p.totalVotes === 0 ? (
+            <p className="text-[12px] text-stone-400 dark:text-stone-500">
+              No votes yet.
+            </p>
+          ) : (
+            <div className="space-y-2.5">
+              {p.candidates.map((c) => {
+                const isWinner = p.winners?.includes(c.candidateId);
+                return (
+                  <div key={c.candidateId} className="flex items-center gap-3">
+                    <span className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-rose-100 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/20 dark:text-rose-300">
+                      {c.photoUrl ? (
+                        <img src={c.photoUrl} alt="" className="h-full w-full object-cover" />
+                      ) : (
+                        (c.name || "?").charAt(0).toUpperCase()
+                      )}
+                      {isWinner ? (
+                        <span
+                          className={`absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full text-white shadow ${
+                            p.tie ? "bg-amber-400" : "bg-amber-500"
+                          }`}
+                        >
+                          {I.crown("h-2.5 w-2.5")}
+                        </span>
+                      ) : null}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="mb-1 flex items-center justify-between gap-3">
+                        <span className="min-w-0 truncate text-[12px] font-medium text-stone-800 dark:text-stone-100">
+                          {c.name || "Unnamed"}
+                        </span>
+                        <span className="shrink-0 text-[11px] font-semibold text-stone-700 dark:text-stone-300">
+                          {c.count}
+                          <span className="ml-1.5 font-normal text-stone-400 dark:text-stone-500">
+                            {c.percentage}%
+                          </span>
+                        </span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-stone-100 dark:bg-stone-800">
+                        <div
+                          className={`h-full rounded-full transition-all duration-500 ${
+                            isWinner
+                              ? p.tie
+                                ? "bg-amber-400"
+                                : "bg-rose-500 dark:bg-rose-400"
+                              : "bg-stone-400 dark:bg-stone-500"
+                          }`}
+                          style={{ width: `${Math.max(2, c.percentage)}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Participant login / request access screen
+// ─────────────────────────────────────────────────────────────
+const ParticipantLogin = ({ slug, onSuccess, formTitle, canRequest, autoApprove, requestFields }) => {
+  const [mode, setMode] = useState("login"); // "login" | "request"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
+  const [requestNote, setRequestNote] = useState("");
+  const [requestName, setRequestName] = useState("");
+  const [extraInfo, setExtraInfo] = useState({});
   const [error, setError] = useState("");
+  const [requestSent, setRequestSent] = useState(null);
 
-  const [login, { isLoading }] = useParticipantLoginMutation();
+  const [login, { isLoading: loggingIn }] = useParticipantLoginMutation();
+  const [requestAccess, { isLoading: requesting }] = useRequestAccessMutation();
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
-    if (!email.trim() || !password) {
-      setError("Enter your email and password.");
-      return;
-    }
-    try {
-      const res = await login({
-        slug,
-        email: email.trim().toLowerCase(),
-        password,
-      }).unwrap();
-      writeToken(slug, res.token);
-      onSuccess(res.token, res.participant);
-    } catch (err) {
-      setError(err?.data?.message || "Invalid email or password.");
+    if (mode === "login") {
+      if (!email.trim() || !password) {
+        setError("Enter your email and password.");
+        return;
+      }
+      try {
+        const res = await login({
+          slug,
+          email: email.trim().toLowerCase(),
+          password,
+        }).unwrap();
+        writeToken(slug, res.token);
+        onSuccess(res.token, res.participant);
+      } catch (err) {
+        setError(err?.data?.message || "Invalid email or password.");
+      }
+    } else {
+      if (!email.trim() || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim())) {
+        setError("Enter a valid email.");
+        return;
+      }
+      for (const rf of requestFields || []) {
+        const v = extraInfo[rf.id];
+        const empty = v == null || v === "";
+        if (rf.required && empty) {
+          setError(`"${rf.label}" is required.`);
+          return;
+        }
+      }
+      try {
+        const res = await requestAccess({
+          slug,
+          email: email.trim().toLowerCase(),
+          name: requestName.trim(),
+          note: requestNote.trim(),
+          extraInfo,
+        }).unwrap();
+        setRequestSent(res);
+      } catch (err) {
+        setError(err?.data?.message || "Couldn't send the request.");
+      }
     }
   };
+
+  const busy = loggingIn || requesting;
 
   return (
     <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
@@ -755,7 +1174,7 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
         <div className="mb-6 flex justify-center">
-          <XamutMark className="h-11 w-11" />
+          <XamutLogo className="h-9 w-auto sm:h-10" />
         </div>
 
         <div className="mb-6 text-center">
@@ -767,96 +1186,297 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
             {formTitle || "Sign in to continue"}
           </h1>
           <p className="mt-1.5 text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
-            Enter the email and password from your invite email.
+            {mode === "login"
+              ? "Enter the email and password from your invite email."
+              : "Ask the organiser for access. You'll get an email once approved."}
           </p>
         </div>
+
+        {canRequest ? (
+          <div className="mb-4 grid grid-cols-2 gap-1 rounded-md border border-stone-200 bg-white p-1 dark:border-stone-800 dark:bg-stone-900">
+            {[
+              { id: "login", label: "I have a password" },
+              { id: "request", label: "Request access" },
+            ].map((t) => {
+              const active = mode === t.id;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => {
+                    setMode(t.id);
+                    setError("");
+                    setRequestSent(null);
+                  }}
+                  className={`rounded px-2 py-1.5 text-[11.5px] font-semibold transition-colors ${
+                    active
+                      ? "bg-teal-50 text-teal-700 dark:bg-teal-500/15 dark:text-teal-300"
+                      : "text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100"
+                  }`}
+                >
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        ) : null}
 
         <form
           onSubmit={handleSubmit}
           className="rounded-lg border border-stone-200/80 bg-white p-5 shadow-sm dark:border-stone-800 dark:bg-stone-900 sm:p-6"
         >
-          {error ? (
-            <div className="mb-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
-              <span className="mt-0.5 shrink-0">{I.alert("h-4 w-4")}</span>
-              <span>{error}</span>
-            </div>
-          ) : null}
-
-          <div className="space-y-4">
-            <div>
-              <label
-                htmlFor="participant-email"
-                className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
-              >
-                Email
-              </label>
-              <input
-                id="participant-email"
-                type="email"
-                autoComplete="email"
-                inputMode="email"
-                value={email}
-                onChange={(e) => {
-                  setEmail(e.target.value);
-                  if (error) setError("");
-                }}
-                placeholder="you@example.com"
-                className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
-              />
-            </div>
-
-            <div>
-              <label
-                htmlFor="participant-password"
-                className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
-              >
-                Password
-              </label>
-              <div className="relative">
-                <input
-                  id="participant-password"
-                  type={showPassword ? "text" : "password"}
-                  autoComplete="off"
-                  value={password}
-                  onChange={(e) => {
-                    setPassword(e.target.value);
-                    if (error) setError("");
-                  }}
-                  placeholder="Your invite password"
-                  className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 pr-11 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
-                />
+          {requestSent ? (
+            <div className="text-center">
+              <div className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-emerald-100 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400">
+                {I.check("h-5 w-5")}
+              </div>
+              <h2 className="mt-3 text-[15px] font-semibold text-stone-900 dark:text-stone-100">
+                {requestSent.autoApproved
+                  ? "Access granted"
+                  : "Request sent"}
+              </h2>
+              <p className="mt-1.5 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+                {requestSent.message ||
+                  "Check your email for credentials or approval."}
+              </p>
+              {requestSent.autoApproved ? (
                 <button
                   type="button"
-                  onClick={() => setShowPassword((s) => !s)}
-                  className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
-                  aria-label={showPassword ? "Hide" : "Show"}
+                  onClick={() => {
+                    setMode("login");
+                    setRequestSent(null);
+                  }}
+                  className="mt-4 rounded-md bg-teal-600 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-teal-700 dark:bg-teal-500 dark:hover:bg-teal-400"
                 >
-                  {showPassword ? I.eyeOff("h-4 w-4") : I.eye("h-4 w-4")}
+                  Sign in with my password
                 </button>
-              </div>
+              ) : null}
             </div>
-          </div>
+          ) : (
+            <>
+              {error ? (
+                <div className="mb-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
+                  <span className="mt-0.5 shrink-0">{I.alert("h-4 w-4")}</span>
+                  <span>{error}</span>
+                </div>
+              ) : null}
 
-          <button
-            type="submit"
-            disabled={isLoading}
-            className="mt-5 w-full rounded-md bg-teal-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
-          >
-            {isLoading ? (
-              <span className="inline-flex items-center gap-2">
-                {I.spinner("h-3.5 w-3.5")}
-                Signing in…
-              </span>
-            ) : (
-              "Continue"
-            )}
-          </button>
+              <div className="space-y-4">
+                <div>
+                  <label
+                    htmlFor="participant-email"
+                    className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
+                  >
+                    Email
+                  </label>
+                  <input
+                    id="participant-email"
+                    type="email"
+                    autoComplete="email"
+                    inputMode="email"
+                    value={email}
+                    onChange={(e) => {
+                      setEmail(e.target.value);
+                      if (error) setError("");
+                    }}
+                    placeholder="you@example.com"
+                    className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
+                  />
+                </div>
 
-          <p className="mt-4 text-center text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
-            This isn't a Xamut account. Use the credentials from your invite
-            email. Lost them? Ask the form owner to resend.
-          </p>
+                {mode === "login" ? (
+                  <div>
+                    <label
+                      htmlFor="participant-password"
+                      className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
+                    >
+                      Password
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="participant-password"
+                        type={showPassword ? "text" : "password"}
+                        autoComplete="off"
+                        value={password}
+                        onChange={(e) => {
+                          setPassword(e.target.value);
+                          if (error) setError("");
+                        }}
+                        placeholder="Your invite password"
+                        className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 pr-11 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowPassword((s) => !s)}
+                        className="absolute right-2 top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-700 dark:text-stone-500 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+                        aria-label={showPassword ? "Hide" : "Show"}
+                      >
+                        {showPassword ? I.eyeOff("h-4 w-4") : I.eye("h-4 w-4")}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <label className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                        Name <span className="text-stone-300 dark:text-stone-600">(optional)</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={requestName}
+                        onChange={(e) => setRequestName(e.target.value)}
+                        placeholder="Your name"
+                        className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
+                      />
+                    </div>
+
+                    {(requestFields || []).map((rf) => (
+                      <div key={rf.id}>
+                        <label className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                          {rf.label}
+                          {rf.required ? (
+                            <span className="ml-1 text-teal-500">*</span>
+                          ) : null}
+                        </label>
+                        <input
+                          type={rf.type === "email" ? "email" : rf.type === "number" ? "number" : "text"}
+                          value={extraInfo[rf.id] || ""}
+                          onChange={(e) =>
+                            setExtraInfo((prev) => ({ ...prev, [rf.id]: e.target.value }))
+                          }
+                          placeholder={rf.placeholder || ""}
+                          className="w-full rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[14px] text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
+                        />
+                      </div>
+                    ))}
+
+                    <div>
+                      <label className="mb-1.5 block text-[11.5px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400">
+                        Note{" "}
+                        <span className="text-stone-300 dark:text-stone-600">(optional)</span>
+                      </label>
+                      <textarea
+                        rows={2}
+                        value={requestNote}
+                        onChange={(e) => setRequestNote(e.target.value)}
+                        placeholder="Why should you have access?"
+                        className="w-full resize-none rounded-md border border-stone-200 bg-white px-3.5 py-2.5 text-[13px] leading-relaxed text-stone-900 outline-none transition-all placeholder:text-stone-400 focus:border-teal-400 focus:ring-4 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500 dark:focus:border-teal-500/60"
+                      />
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={busy}
+                className="mt-5 w-full rounded-md bg-teal-600 px-5 py-2.5 text-[13px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-70 dark:bg-teal-500 dark:hover:bg-teal-400"
+              >
+                {busy ? (
+                  <span className="inline-flex items-center gap-2">
+                    {I.spinner("h-3.5 w-3.5")}
+                    {mode === "login" ? "Signing in…" : "Sending…"}
+                  </span>
+                ) : mode === "login" ? (
+                  "Continue"
+                ) : autoApprove ? (
+                  "Request access"
+                ) : (
+                  "Send request"
+                )}
+              </button>
+
+              <p className="mt-4 text-center text-[11px] leading-relaxed text-stone-400 dark:text-stone-500">
+                This isn't a Xamut account. Use the credentials from your invite
+                email.
+              </p>
+            </>
+          )}
         </form>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Time window screen (not started / ended)
+// ─────────────────────────────────────────────────────────────
+const WindowScreen = ({ reason, message, startAt, expiresAt, formMeta }) => {
+  const [countdown, setCountdown] = useState("");
+  const target = reason === "not_started" ? startAt : null;
+
+  useEffect(() => {
+    if (!target) return;
+    const update = () => setCountdown(formatCountdown(target));
+    update();
+    const t = setInterval(update, 30000);
+    return () => clearInterval(t);
+  }, [target]);
+
+  const isEnded = reason === "ended" || reason === "closed";
+  const isNotStarted = reason === "not_started";
+
+  return (
+    <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+      <div
+        className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-4 py-8 text-center sm:px-6"
+        style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
+      >
+        <XamutLogo className="h-9 w-auto sm:h-10" />
+        <div
+          className={`mt-5 flex h-12 w-12 items-center justify-center rounded-full ${
+            isEnded
+              ? "bg-red-100 text-red-500 dark:bg-red-500/20 dark:text-red-400"
+              : "bg-amber-100 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400"
+          }`}
+        >
+          {I.clock("h-6 w-6")}
+        </div>
+
+        <h1 className="mt-4 text-[19px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+          {formMeta?.title || "This form"}
+        </h1>
+
+        <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
+          {message ||
+            (isNotStarted
+              ? "This form hasn't started yet. Check back soon."
+              : "This form has ended. Responses are no longer accepted.")}
+        </p>
+
+        {isNotStarted && countdown ? (
+          <div className="mt-5 rounded-lg border border-amber-200/70 bg-amber-50/60 px-4 py-3 dark:border-amber-500/30 dark:bg-amber-500/10">
+            <p className="text-[10.5px] font-bold uppercase tracking-wider text-amber-600 dark:text-amber-400">
+              Starts in
+            </p>
+            <p className="mt-1 text-[20px] font-bold text-amber-700 dark:text-amber-300">
+              {countdown}
+            </p>
+            {startAt ? (
+              <p className="mt-1 text-[10.5px] text-amber-600/80 dark:text-amber-400/80">
+                {new Date(startAt).toLocaleString([], {
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {isEnded && expiresAt ? (
+          <p className="mt-4 text-[11.5px] text-stone-400 dark:text-stone-500">
+            Ended{" "}
+            {new Date(expiresAt).toLocaleString([], {
+              month: "short",
+              day: "numeric",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+          </p>
+        ) : null}
       </div>
     </div>
   );
@@ -865,25 +1485,32 @@ const ParticipantLogin = ({ slug, onSuccess, formTitle }) => {
 // ─────────────────────────────────────────────────────────────
 // Submitted screen
 // ─────────────────────────────────────────────────────────────
-const SubmittedScreen = ({ form, result }) => {
-  const showScore =
-    result?.score && (form?.settings?.showScoreImmediately || result.score);
+const SubmittedScreen = ({ form, result, isElection, slug }) => {
+  const showScore = !isElection && result?.score;
   const redirectUrl = result?.successRedirectUrl || "";
+  const resultsToken =
+    isElection && result?.resultsToken ? result.resultsToken : null;
 
-  // Auto-redirect after a short pause so the user can read the
-  // confirmation message. They can also click "Go now" to leave early.
+  const [persistedToken] = useState(() => {
+    if (resultsToken) {
+      writeResultsToken(slug, resultsToken);
+      return resultsToken;
+    }
+    return readResultsToken(slug);
+  });
+
   useEffect(() => {
     if (!redirectUrl) return;
     const t = setTimeout(() => {
       window.location.href = redirectUrl;
-    }, 2000);
+    }, 2500);
     return () => clearTimeout(t);
   }, [redirectUrl]);
 
   return (
     <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       <div
-        className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-4 py-8 sm:px-6"
+        className="mx-auto w-full max-w-md flex-1 px-4 py-8 sm:px-6"
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
         <div className="rounded-lg border border-stone-200/80 bg-white p-6 text-center shadow-sm dark:border-stone-800 dark:bg-stone-900 sm:p-8">
@@ -892,12 +1519,14 @@ const SubmittedScreen = ({ form, result }) => {
           </div>
 
           <h1 className="mt-4 text-[20px] font-semibold tracking-tight text-stone-900 dark:text-stone-100 sm:text-[22px]">
-            All done
+            {isElection ? "Vote recorded" : "All done"}
           </h1>
           <p className="mt-2 text-[13.5px] leading-relaxed text-stone-500 dark:text-stone-400">
             {result?.confirmationMessage ||
               form?.settings?.confirmationMessage ||
-              "Thanks, your response has been recorded."}
+              (isElection
+                ? "Thanks for voting!"
+                : "Thanks, your response has been recorded.")}
           </p>
 
           {showScore ? (
@@ -942,52 +1571,45 @@ const SubmittedScreen = ({ form, result }) => {
                   {I.external("h-3.5 w-3.5")}
                   Go now
                 </a>
-                <span className="text-[10.5px] text-teal-700/70 dark:text-teal-400/80">
-                  Redirecting automatically in a moment.
-                </span>
               </div>
             </div>
           ) : null}
 
           <div className="mt-6 flex justify-center">
-            <XamutMark className="h-7 w-7" />
+            <XamutIcon className="h-7 w-7" />
           </div>
           <p className="mt-2 text-[10.5px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
             Made with Xamut
           </p>
         </div>
+
+        {/* Live results — elections only, when the owner enabled it */}
+        {isElection && persistedToken ? (
+          <LiveResultsPanel slug={slug} resultsToken={persistedToken} />
+        ) : null}
       </div>
     </div>
   );
 };
 
 // ─────────────────────────────────────────────────────────────
-// Fatal error screen
+// Fatal error / Loading (unchanged)
 // ─────────────────────────────────────────────────────────────
 const FatalScreen = ({ title, message, status }) => {
-  const isClosed = status === 410;
   const isMissing = status === 404;
-
   return (
     <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       <div
         className="mx-auto flex w-full max-w-md flex-1 flex-col items-center justify-center px-4 py-8 text-center sm:px-6"
         style={{ paddingTop: "max(env(safe-area-inset-top), 2rem)" }}
       >
-        <XamutMark className="h-11 w-11" />
+        <XamutLogo className="h-9 w-auto sm:h-10" />
         <h1 className="mt-5 text-[19px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-          {title ||
-            (isClosed
-              ? "This form isn't accepting responses"
-              : isMissing
-              ? "Form not found"
-              : "Something went wrong")}
+          {title || (isMissing ? "Form not found" : "Something went wrong")}
         </h1>
         <p className="mt-2 max-w-sm text-[13px] leading-relaxed text-stone-500 dark:text-stone-400">
           {message ||
-            (isClosed
-              ? "The owner closed it or the deadline has passed."
-              : isMissing
+            (isMissing
               ? "The link may be wrong or the form was deleted."
               : "Please try again in a moment.")}
         </p>
@@ -996,9 +1618,6 @@ const FatalScreen = ({ title, message, status }) => {
   );
 };
 
-// ─────────────────────────────────────────────────────────────
-// Loading screen
-// ─────────────────────────────────────────────────────────────
 const LoadingScreen = ({ label = "Loading form…" }) => (
   <div className="flex min-h-dvh items-center justify-center bg-stone-50 dark:bg-stone-950">
     <div className="flex flex-col items-center gap-3">
@@ -1009,6 +1628,75 @@ const LoadingScreen = ({ label = "Loading form…" }) => (
 );
 
 // ─────────────────────────────────────────────────────────────
+// Login prompt — soft popup offering to save via Xamut account
+// ─────────────────────────────────────────────────────────────
+const LoginPromptModal = ({ open, onClose, onContinue }) => {
+  const navigate = useNavigate();
+  const [dontAsk, setDontAsk] = useState(false);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[80] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
+      <div className="absolute inset-0" onClick={onClose} aria-hidden />
+      <div className="relative z-10 w-full max-w-sm rounded-t-xl bg-white p-5 shadow-2xl dark:bg-stone-900 sm:rounded-xl">
+        <div className="flex items-start gap-3">
+          <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-teal-500 to-teal-600 text-white shadow-sm shadow-teal-500/25">
+            {I.user("h-5 w-5")}
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+              Save your progress?
+            </h3>
+            <p className="mt-1 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
+              Sign in to Xamut to save answers across devices and see this form
+              in your dashboard. You can also just keep filling it out.
+            </p>
+          </div>
+        </div>
+
+        <label className="mt-4 flex cursor-pointer select-none items-center gap-2 text-[11.5px] text-stone-500 dark:text-stone-400">
+          <input
+            type="checkbox"
+            checked={dontAsk}
+            onChange={(e) => setDontAsk(e.target.checked)}
+            className="h-3.5 w-3.5 rounded border-stone-300 text-teal-500 focus:ring-teal-500/30 dark:border-stone-600"
+          />
+          Don't ask me again on this browser
+        </label>
+
+        <div className="mt-5 flex flex-col gap-2 sm:flex-row-reverse">
+          <button
+            type="button"
+            onClick={() => {
+              if (dontAsk) localStore.set(loginPromptKey(slugSafe()), "1");
+              onContinue?.();
+            }}
+            className="flex-1 rounded-md bg-teal-600 px-4 py-2 text-[12.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.98] dark:bg-teal-500 dark:hover:bg-teal-400"
+          >
+            Continue without signing in
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              if (dontAsk) localStore.set(loginPromptKey(slugSafe()), "1");
+              const back = encodeURIComponent(window.location.pathname);
+              navigate(`/signin?next=${back}`);
+            }}
+            className="flex-1 rounded-md border border-stone-200 bg-white px-4 py-2 text-[12.5px] font-semibold text-stone-700 transition-colors hover:bg-stone-50 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:hover:bg-stone-700"
+          >
+            Sign in
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// tiny helper so LoginPromptModal can call set without needing slug prop
+const slugSafe = () => window.location.pathname.split("/").pop() || "";
+
+// ─────────────────────────────────────────────────────────────
 // Main page
 // ─────────────────────────────────────────────────────────────
 const FORM_ID = "public-form";
@@ -1016,30 +1704,30 @@ const FORM_ID = "public-form";
 const PublicForm = () => {
   const { slug } = useParams();
 
-  const [participantToken, setParticipantToken] = useState(() =>
-    readToken(slug)
-  );
+  const [participantToken, setParticipantToken] = useState(() => readToken(slug));
   const [participantInfo, setParticipantInfo] = useState(null);
   const [needLogin, setNeedLogin] = useState(false);
 
-  const {
-    data: formData,
-    isLoading,
-    error,
-    refetch,
-  } = useGetPublicFormQuery({ slug, participantToken }, { skip: !slug });
+  const { data: formData, isLoading, error, refetch } = useGetPublicFormQuery(
+    { slug, participantToken },
+    { skip: !slug }
+  );
 
   const [submit, { isLoading: submitting }] = useSubmitResponseMutation();
+  const [saveDraft] = useSaveDraftMutation();
+  const [clearDraft] = useClearDraftMutation();
 
   const form = formData?.form;
+  const isElection = form?.type === "election";
 
   useDocumentMeta({
     title: form?.title ? `${form.title} — Xamut` : undefined,
     description: form?.description || undefined,
   });
 
+  // ── Handle auth / window errors from the query ─────────────
   useEffect(() => {
-    if (error?.status === 401) {
+    if (error?.status === 401 && error?.data?.requiresAuth) {
       setNeedLogin(true);
       writeToken(slug, null);
       setParticipantToken(null);
@@ -1053,6 +1741,7 @@ const PublicForm = () => {
     }
   }, [formData]);
 
+  // ── Local answer state ─────────────────────────────────────
   const [answers, setAnswers] = useState({});
   const [errors, setErrors] = useState({});
   const [submitted, setSubmitted] = useState(null);
@@ -1060,6 +1749,72 @@ const PublicForm = () => {
   const [startedAt] = useState(() => new Date().toISOString());
   const [showJump, setShowJump] = useState(false);
   const [uploadingFields, setUploadingFields] = useState(() => new Set());
+
+  // ── Draft state ────────────────────────────────────────────
+  const sessionKey = useMemo(() => readSessionKey(slug), [slug]);
+  const draftLoadedRef = useRef(false);
+  const [draftStatus, setDraftStatus] = useState("idle"); // "idle" | "saving" | "saved" | "error"
+  const [draftRestoredAt, setDraftRestoredAt] = useState(null);
+  const saveTimerRef = useRef(null);
+
+  const { data: draftData } = useGetDraftQuery(
+    { slug, sessionKey, participantToken },
+    { skip: !slug || !sessionKey }
+  );
+
+  // Restore draft once
+  useEffect(() => {
+    if (draftLoadedRef.current) return;
+    if (!draftData) return;
+    const d = draftData.draft;
+    if (d?.answers && Object.keys(d.answers).length) {
+      setAnswers(d.answers);
+      setDraftRestoredAt(d.updatedAt || new Date().toISOString());
+    }
+    draftLoadedRef.current = true;
+  }, [draftData]);
+
+  // Autosave — debounced 1.2s after last change
+  useEffect(() => {
+    if (!form) return;
+    if (submitted) return;
+    if (!Object.keys(answers).length) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    setDraftStatus("saving");
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        await saveDraft({
+          slug,
+          sessionKey,
+          participantToken,
+          answers,
+          startedAt,
+        }).unwrap();
+        setDraftStatus("saved");
+      } catch {
+        setDraftStatus("error");
+      }
+    }, 1200);
+    return () => {
+      if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    };
+  }, [answers, form, slug, sessionKey, participantToken, startedAt, submitted, saveDraft]);
+
+  // ── Login prompt — shown once per slug, unless user said don't ask ──
+  const [showLoginPrompt, setShowLoginPrompt] = useState(false);
+  const [promptDismissed, setPromptDismissed] = useState(false);
+
+  useEffect(() => {
+    if (!form) return;
+    if (promptDismissed) return;
+    if (form.visibility === "private") return; // they already have their own flow
+    if (localStore.get(loginPromptKey(slug)) === "1") return;
+    // Show only if the current user isn't already logged in
+    const userInfo = localStore.get("userInfo");
+    if (userInfo) return;
+    const t = setTimeout(() => setShowLoginPrompt(true), 1200);
+    return () => clearTimeout(t);
+  }, [form, slug, promptDismissed]);
 
   const anyUploading = uploadingFields.size > 0;
 
@@ -1069,7 +1824,6 @@ const PublicForm = () => {
     return () => window.removeEventListener("scroll", onScroll);
   }, []);
 
-  // Stable callback for MediaInput so its effect doesn't loop.
   const handleUploadingChange = useMemo(
     () => (fieldId, isUploading) => {
       setUploadingFields((prev) => {
@@ -1085,10 +1839,29 @@ const PublicForm = () => {
     []
   );
 
+  // ── Validation ─────────────────────────────────────────────
   const validate = () => {
     if (!form) return true;
     const errs = {};
-    for (const f of form.fields) {
+
+    if (isElection) {
+      const allowAbstain = !!form.settings?.allowAbstain;
+      for (const p of form.positions || []) {
+        const v = answers[p.id];
+        const isEmpty =
+          v === undefined ||
+          v === null ||
+          v === "" ||
+          (Array.isArray(v) && v.length === 0);
+        if (p.required && !allowAbstain && isEmpty) {
+          errs[p.id] = "Select a candidate.";
+        }
+      }
+      setErrors(errs);
+      return Object.keys(errs).length === 0;
+    }
+
+    for (const f of form.fields || []) {
       if (f.type === "section") continue;
       const v = answers[f.id];
       const isEmpty =
@@ -1160,9 +1933,7 @@ const PublicForm = () => {
     if (!validate()) {
       const firstErrorId = Object.keys(errors)[0];
       if (firstErrorId) {
-        const el = document.querySelector(
-          `[data-field-id="${firstErrorId}"]`
-        );
+        const el = document.querySelector(`[data-field-id="${firstErrorId}"]`);
         el?.scrollIntoView({ behavior: "smooth", block: "center" });
       }
       return;
@@ -1179,6 +1950,14 @@ const PublicForm = () => {
         startedAt,
         durationSeconds,
       }).unwrap();
+
+      // Clear draft locally and on server (server also does it, but be safe)
+      try {
+        await clearDraft({ slug, sessionKey, participantToken }).unwrap();
+      } catch {
+        /* noop */
+      }
+
       setSubmitted(res);
       window.scrollTo({ top: 0, behavior: "smooth" });
     } catch (err) {
@@ -1189,27 +1968,49 @@ const PublicForm = () => {
     }
   };
 
-  // ── Render branches ───────────────────────────────────────
-  if (isLoading && !form) return <LoadingScreen />;
+  // ── Render branches ────────────────────────────────────────
+  if (isLoading && !form) {
+    const data = error?.data;
+    if (error?.status === 410 && data?.reason) {
+      return (
+        <WindowScreen
+          reason={data.reason}
+          message={data.message}
+          startAt={data.startAt}
+          expiresAt={data.expiresAt}
+          formMeta={data.formMeta}
+        />
+      );
+    }
+    return <LoadingScreen />;
+  }
 
-  if (needLogin && form?.visibility === "private") {
+  // 410 from refetch after initial load (e.g. window just closed)
+  if (error?.status === 410 && error?.data?.reason) {
     return (
-      <ParticipantLogin
-        slug={slug}
-        formTitle={form?.title}
-        onSuccess={(token, participant) => {
-          setParticipantToken(token);
-          setParticipantInfo(participant);
-          setNeedLogin(false);
-        }}
+      <WindowScreen
+        reason={error.data.reason}
+        message={error.data.message}
+        startAt={error.data.startAt}
+        expiresAt={error.data.expiresAt}
+        formMeta={error.data.formMeta || { title: form?.title }}
       />
     );
   }
 
-  if (needLogin && !form) {
+  // Private form + needLogin (either no form loaded yet or form was loaded as meta)
+  if (
+    (needLogin && !form) ||
+    (error?.status === 401 && error?.data?.requiresAuth)
+  ) {
+    const meta = error?.data?.formMeta || {};
     return (
       <ParticipantLogin
         slug={slug}
+        formTitle={meta.title}
+        canRequest={!!error?.data?.canRequestAccess}
+        autoApprove={!!error?.data?.autoApprove}
+        requestFields={error?.data?.requestFields || []}
         onSuccess={(token, participant) => {
           setParticipantToken(token);
           setParticipantInfo(participant);
@@ -1222,13 +2023,24 @@ const PublicForm = () => {
 
   if (error && !form) return <FatalScreen status={error?.status} />;
   if (!form) return <FatalScreen status={404} />;
-  if (submitted) return <SubmittedScreen form={form} result={submitted} />;
+  if (submitted)
+    return (
+      <SubmittedScreen
+        form={form}
+        result={submitted}
+        isElection={isElection}
+        slug={slug}
+      />
+    );
 
   if (form.visibility === "private" && !participantToken) {
     return (
       <ParticipantLogin
         slug={slug}
-        formTitle={form?.title}
+        formTitle={form.title}
+        canRequest={!!form.settings?.allowAccessRequests}
+        autoApprove={!!form.settings?.autoApproveAccess}
+        requestFields={form.settings?.requestFields || []}
         onSuccess={(token, participant) => {
           setParticipantToken(token);
           setParticipantInfo(participant);
@@ -1238,48 +2050,85 @@ const PublicForm = () => {
     );
   }
 
+  // ── Progress computation (fields or positions) ─────────────
   const visibleFields = form.fields || [];
+  const positions = form.positions || [];
+  const totalItems = isElection
+    ? positions.length
+    : visibleFields.filter((f) => f.type !== "section").length;
 
-  const requiredFields = visibleFields.filter(
-    (f) => f.type !== "section" && f.required
-  );
-  const answeredRequired = requiredFields.filter((f) => {
-    const v = answers[f.id];
-    return !(
-      v === undefined ||
-      v === null ||
-      v === "" ||
-      (Array.isArray(v) && v.length === 0)
-    );
-  });
-  const totalFields = visibleFields.filter((f) => f.type !== "section");
-  const answeredAll = totalFields.filter((f) => {
-    const v = answers[f.id];
-    return !(
-      v === undefined ||
-      v === null ||
-      v === "" ||
-      (Array.isArray(v) && v.length === 0)
-    );
-  });
-  const progress = totalFields.length
-    ? Math.round((answeredAll.length / totalFields.length) * 100)
+  const answeredItems = isElection
+    ? positions.filter((p) => {
+        const v = answers[p.id];
+        return !(
+          v === undefined ||
+          v === null ||
+          v === "" ||
+          (Array.isArray(v) && v.length === 0)
+        );
+      }).length
+    : visibleFields
+        .filter((f) => f.type !== "section")
+        .filter((f) => {
+          const v = answers[f.id];
+          return !(
+            v === undefined ||
+            v === null ||
+            v === "" ||
+            (Array.isArray(v) && v.length === 0)
+          );
+        }).length;
+
+  const requiredItems = isElection
+    ? positions.filter((p) => p.required).length
+    : visibleFields.filter((f) => f.type !== "section" && f.required).length;
+
+  const answeredRequiredItems = isElection
+    ? positions.filter((p) => {
+        const v = answers[p.id];
+        return (
+          p.required &&
+          !(
+            v === undefined ||
+            v === null ||
+            v === "" ||
+            (Array.isArray(v) && v.length === 0)
+          )
+        );
+      }).length
+    : visibleFields
+        .filter((f) => f.type !== "section" && f.required)
+        .filter((f) => {
+          const v = answers[f.id];
+          return !(
+            v === undefined ||
+            v === null ||
+            v === "" ||
+            (Array.isArray(v) && v.length === 0)
+          );
+        }).length;
+
+  const progress = totalItems
+    ? Math.round((answeredItems / totalItems) * 100)
     : 0;
-  const requiredLeft = requiredFields.length - answeredRequired.length;
+  const requiredLeft = requiredItems - answeredRequiredItems;
 
   const showProgress = form.settings?.showProgressBar !== false;
-  const hasFields = visibleFields.length > 0;
-  const showMobileProgress = showProgress && totalFields.length > 0;
+  const hasContent = isElection ? positions.length > 0 : visibleFields.length > 0;
+  const showMobileProgress = showProgress && totalItems > 0;
+
+  const startAtMs = form.startAt ? new Date(form.startAt).getTime() : 0;
+  const notStartedYet = startAtMs && startAtMs > Date.now();
 
   return (
     <div className="flex min-h-dvh flex-col bg-stone-50 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
-      {/* Sticky header — mobile has a real progress bar block at its bottom edge */}
+      {/* Sticky header */}
       <header
         className="sticky top-0 z-30 bg-stone-50/90 backdrop-blur-xl dark:bg-stone-950/90"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
         <div className="mx-auto flex h-12 w-full max-w-5xl items-center gap-2.5 px-3 sm:h-14 sm:px-6">
-          <XamutMark className="h-7 w-7" />
+          <XamutIcon className="h-7 w-7" />
           <div className="min-w-0 flex-1">
             <p className="truncate text-[12.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
               {form.title}
@@ -1288,11 +2137,25 @@ const PublicForm = () => {
               {showProgress ? `${progress}% complete` : "Form in progress"}
               {requiredLeft > 0
                 ? ` · ${requiredLeft} required left`
-                : requiredFields.length > 0
+                : requiredItems > 0
                 ? " · ready to submit"
                 : ""}
             </p>
           </div>
+
+          {/* Draft status chip */}
+          {draftStatus === "saving" ? (
+            <span className="hidden items-center gap-1 rounded-md bg-stone-100 px-2 py-1 text-[10px] font-semibold text-stone-500 dark:bg-stone-800 dark:text-stone-400 sm:inline-flex">
+              {I.spinner("h-3 w-3")}
+              Saving
+            </span>
+          ) : draftStatus === "saved" ? (
+            <span className="hidden items-center gap-1 rounded-md bg-emerald-50 px-2 py-1 text-[10px] font-semibold text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400 sm:inline-flex">
+              {I.check("h-2.5 w-2.5")}
+              Saved
+            </span>
+          ) : null}
+
           {form.visibility === "private" ? (
             <span className="inline-flex items-center gap-1 rounded-md bg-stone-100 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
               {I.lock("h-3 w-3")}
@@ -1315,7 +2178,16 @@ const PublicForm = () => {
 
       {/* Content */}
       <div className="mx-auto w-full max-w-5xl flex-1 px-3 pt-4 pb-28 sm:px-6 sm:pt-6 lg:pb-16">
-        {/* Cover photo — banner above the title hero */}
+        {/* Draft restored notice */}
+        {draftRestoredAt ? (
+          <div className="mb-4 flex items-start gap-2 rounded-md border border-amber-200/70 bg-amber-50/70 px-3 py-2 text-[11.5px] text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+            <span className="mt-0.5 shrink-0">{I.info("h-3.5 w-3.5")}</span>
+            <span>
+              We found an unsaved draft from earlier and restored your answers.
+            </span>
+          </div>
+        ) : null}
+
         {form.coverPhoto ? (
           <div className="mb-4 overflow-hidden rounded-lg border border-stone-200/80 shadow-sm dark:border-stone-800 sm:mb-5">
             <img
@@ -1326,9 +2198,16 @@ const PublicForm = () => {
           </div>
         ) : null}
 
-        {/* Title hero */}
         <div className="mb-5 sm:mb-6">
-          <h1 className="text-[22px] font-semibold leading-tight tracking-tight text-stone-900 dark:text-stone-100 sm:text-[28px]">
+          <div className="flex items-center gap-2">
+            {isElection ? (
+              <span className="inline-flex items-center gap-1 rounded-md bg-rose-50 px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-rose-600 dark:bg-rose-500/15 dark:text-rose-400">
+                {I.ballot("h-3 w-3")}
+                Election
+              </span>
+            ) : null}
+          </div>
+          <h1 className="mt-1 text-[22px] font-semibold leading-tight tracking-tight text-stone-900 dark:text-stone-100 sm:text-[28px]">
             {form.title}
           </h1>
           {form.description ? (
@@ -1343,11 +2222,15 @@ const PublicForm = () => {
               <span className="font-semibold">{participantInfo.email}</span>
             </p>
           ) : null}
+          {notStartedYet ? (
+            <p className="mt-3 inline-flex items-center gap-1.5 rounded-md bg-amber-50 px-2.5 py-1 text-[11px] text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+              {I.clock("h-3 w-3")}
+              Starts in {formatCountdown(form.startAt)}
+            </p>
+          ) : null}
         </div>
 
-        {/* Two-column layout on desktop */}
         <div className="grid grid-cols-1 gap-5 lg:grid-cols-[1fr_280px] lg:gap-6">
-          {/* Form — the ONLY form on the page */}
           <form id={FORM_ID} onSubmit={handleSubmit} className="min-w-0">
             {submitError ? (
               <div className="mb-4 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3.5 py-3 text-[12.5px] text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400">
@@ -1356,71 +2239,105 @@ const PublicForm = () => {
               </div>
             ) : null}
 
-            {/* Fields sheet */}
-            <div className="overflow-hidden rounded-lg border border-stone-200/80 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
-              {!hasFields ? (
-                <div className="px-5 py-10 text-center">
-                  <p className="text-[13px] text-stone-400 dark:text-stone-500">
-                    This form has no fields yet.
+            {/* ── Election voting ─────────────────────────── */}
+            {isElection ? (
+              <>
+                {!hasContent ? (
+                  <div className="rounded-lg border border-stone-200/80 bg-white px-5 py-10 text-center dark:border-stone-800 dark:bg-stone-900">
+                    <p className="text-[13px] text-stone-400 dark:text-stone-500">
+                      This election has no positions yet.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {positions.map((p) => (
+                      <div key={p.id} data-field-id={p.id}>
+                        <PositionVoter
+                          position={p}
+                          value={answers[p.id]}
+                          error={errors[p.id]}
+                          onChange={handleChange}
+                          allowAbstain={!!form.settings?.allowAbstain}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div className="mt-8 hidden flex-col items-center gap-1.5 pb-2 text-center lg:flex">
+                  <XamutIcon className="h-6 w-6" />
+                  <p className="text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                    Powered by Xamut
                   </p>
                 </div>
-              ) : (
-                visibleFields.map((f, i) => {
-                  const isSection = f.type === "section";
-                  return (
-                    <div
-                      key={f.id}
-                      data-field-id={f.id}
-                      className={
-                        i > 0
-                          ? "border-t border-stone-100 dark:border-stone-800/60"
-                          : ""
-                      }
-                    >
-                      {isSection ? (
-                        <div className="bg-stone-50/70 px-5 py-4 dark:bg-stone-900/50 sm:px-6 sm:py-5">
-                          <FieldRenderer
-                            field={f}
-                            value={answers[f.id]}
-                            error={errors[f.id]}
-                            onChange={handleChange}
-                            slug={slug}
-                            participantToken={participantToken}
-                            onUploadingChange={handleUploadingChange}
-                          />
-                        </div>
-                      ) : (
-                        <div className="px-4 py-5 sm:px-6">
-                          <FieldRenderer
-                            field={f}
-                            value={answers[f.id]}
-                            error={errors[f.id]}
-                            onChange={handleChange}
-                            slug={slug}
-                            participantToken={participantToken}
-                            onUploadingChange={handleUploadingChange}
-                          />
-                        </div>
-                      )}
+              </>
+            ) : (
+              <>
+                {/* ── Regular fields ──────────────────────── */}
+                <div className="overflow-hidden rounded-lg border border-stone-200/80 bg-white shadow-sm dark:border-stone-800 dark:bg-stone-900">
+                  {!hasContent ? (
+                    <div className="px-5 py-10 text-center">
+                      <p className="text-[13px] text-stone-400 dark:text-stone-500">
+                        This form has no fields yet.
+                      </p>
                     </div>
-                  );
-                })
-              )}
-            </div>
+                  ) : (
+                    visibleFields.map((f, i) => {
+                      const isSection = f.type === "section";
+                      return (
+                        <div
+                          key={f.id}
+                          data-field-id={f.id}
+                          className={
+                            i > 0
+                              ? "border-t border-stone-100 dark:border-stone-800/60"
+                              : ""
+                          }
+                        >
+                          {isSection ? (
+                            <div className="bg-stone-50/70 px-5 py-4 dark:bg-stone-900/50 sm:px-6 sm:py-5">
+                              <FieldRenderer
+                                field={f}
+                                value={answers[f.id]}
+                                error={errors[f.id]}
+                                onChange={handleChange}
+                                slug={slug}
+                                participantToken={participantToken}
+                                onUploadingChange={handleUploadingChange}
+                              />
+                            </div>
+                          ) : (
+                            <div className="px-4 py-5 sm:px-6">
+                              <FieldRenderer
+                                field={f}
+                                value={answers[f.id]}
+                                error={errors[f.id]}
+                                onChange={handleChange}
+                                slug={slug}
+                                participantToken={participantToken}
+                                onUploadingChange={handleUploadingChange}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
 
-            {/* Brand footer — desktop only, in-flow */}
-            <div className="mt-8 hidden flex-col items-center gap-1.5 pb-2 text-center lg:flex">
-              <XamutMark className="h-6 w-6" />
-              <p className="text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                Powered by Xamut
-              </p>
-            </div>
+                <div className="mt-8 hidden flex-col items-center gap-1.5 pb-2 text-center lg:flex">
+                  <XamutIcon className="h-6 w-6" />
+                  <p className="text-[10px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                    Powered by Xamut
+                  </p>
+                </div>
+              </>
+            )}
           </form>
 
           {/* Desktop sidebar */}
           <aside className="hidden lg:block">
             <div className="sticky top-[80px] space-y-3">
-              {/* Progress card */}
               <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
                 <div className="flex items-center justify-between">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
@@ -1442,9 +2359,9 @@ const PublicForm = () => {
                       Answered
                     </p>
                     <p className="mt-0.5 text-[14px] font-semibold text-stone-800 dark:text-stone-100">
-                      {answeredAll.length}
+                      {answeredItems}
                       <span className="text-[11px] font-normal text-stone-400 dark:text-stone-500">
-                        /{totalFields.length}
+                        /{totalItems}
                       </span>
                     </p>
                   </div>
@@ -1463,9 +2380,36 @@ const PublicForm = () => {
                     </p>
                   </div>
                 </div>
+
+                {draftStatus !== "idle" ? (
+                  <div className="mt-3 flex items-center gap-1.5 border-t border-stone-100 pt-3 text-[10.5px] dark:border-stone-800/60">
+                    {draftStatus === "saving" ? (
+                      <>
+                        <span className="text-stone-400 dark:text-stone-500">
+                          {I.spinner("h-3 w-3")}
+                        </span>
+                        <span className="text-stone-400 dark:text-stone-500">
+                          Saving draft…
+                        </span>
+                      </>
+                    ) : draftStatus === "saved" ? (
+                      <>
+                        <span className="text-emerald-500 dark:text-emerald-400">
+                          {I.check("h-3 w-3")}
+                        </span>
+                        <span className="text-emerald-600 dark:text-emerald-400">
+                          Draft saved
+                        </span>
+                      </>
+                    ) : (
+                      <span className="text-red-500 dark:text-red-400">
+                        Draft save failed
+                      </span>
+                    )}
+                  </div>
+                ) : null}
               </div>
 
-              {/* Submit card */}
               <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
                 <button
                   type="submit"
@@ -1483,26 +2427,28 @@ const PublicForm = () => {
                       {I.spinner("h-3.5 w-3.5")}
                       Uploading…
                     </>
+                  ) : isElection ? (
+                    "Cast vote"
                   ) : (
                     "Submit form"
                   )}
                 </button>
                 {requiredLeft > 0 ? (
                   <p className="mt-2 text-center text-[10.5px] leading-relaxed text-stone-400 dark:text-stone-500">
-                    {requiredLeft} required question
+                    {requiredLeft} required {isElection ? "position" : "question"}
                     {requiredLeft === 1 ? "" : "s"} left
                   </p>
                 ) : null}
               </div>
 
-              {/* Note */}
               <div className="rounded-lg border border-stone-200/80 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
                 <p className="text-[10px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
                   Note
                 </p>
                 <p className="mt-1.5 text-[11.5px] leading-relaxed text-stone-500 dark:text-stone-400">
-                  Never submit passwords through this form. This page is served
-                  by Xamut on behalf of the form owner.
+                  {isElection
+                    ? "Your vote is final once submitted. Choose carefully."
+                    : "Never submit passwords through this form. This page is served by Xamut on behalf of the form owner."}
                 </p>
               </div>
             </div>
@@ -1510,8 +2456,8 @@ const PublicForm = () => {
         </div>
       </div>
 
-      {/* Mobile fixed bottom submit — the ONLY submit on mobile */}
-      {hasFields && !submitted ? (
+      {/* Mobile fixed bottom submit */}
+      {hasContent && !submitted ? (
         <div
           className="fixed inset-x-0 z-30 flex justify-center border-t border-stone-200/70 bg-stone-50/95 px-3 py-2.5 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/95 lg:hidden"
           style={{
@@ -1535,6 +2481,8 @@ const PublicForm = () => {
                 {I.spinner("h-3.5 w-3.5")}
                 Uploading…
               </span>
+            ) : isElection ? (
+              "Cast vote"
             ) : (
               "Submit"
             )}
@@ -1542,7 +2490,6 @@ const PublicForm = () => {
         </div>
       ) : null}
 
-      {/* Scroll to top */}
       {showJump ? (
         <button
           type="button"
@@ -1554,6 +2501,19 @@ const PublicForm = () => {
           {I.arrowUp("h-4 w-4")}
         </button>
       ) : null}
+
+      {/* Login prompt — one-time, for public forms only, when user is anonymous */}
+      <LoginPromptModal
+        open={showLoginPrompt}
+        onClose={() => {
+          setShowLoginPrompt(false);
+          setPromptDismissed(true);
+        }}
+        onContinue={() => {
+          setShowLoginPrompt(false);
+          setPromptDismissed(true);
+        }}
+      />
     </div>
   );
 };

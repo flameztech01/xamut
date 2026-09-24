@@ -1,6 +1,6 @@
 // pages/Signin.jsx
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router";
+import { Link, useNavigate, useSearchParams } from "react-router";
 import { useDispatch } from "react-redux";
 import {
   useLoginMutation,
@@ -11,14 +11,15 @@ import {
 import { setCredentials } from "../features/auth/authSlice";
 
 // ─────────────────────────────────────────────────────────────
-// Brand mark
+// Brand logo
 // ─────────────────────────────────────────────────────────────
-const XamutMark = ({ className = "h-10 w-10" }) => (
-  <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 text-lg font-bold text-white shadow-md shadow-teal-500/40`}
-  >
-    X
-  </div>
+const XamutLogo = ({ className = "h-9 w-auto" }) => (
+  <img
+    src="/xamut-logo.png"
+    alt="Xamut"
+    draggable={false}
+    className={`${className} shrink-0 select-none object-contain dark:brightness-0 dark:invert`}
+  />
 );
 
 // ─────────────────────────────────────────────────────────────
@@ -47,9 +48,30 @@ const IconAlert = ({ className = "h-4 w-4" }) => (
   </svg>
 );
 
+// Only accept internal paths ("/forms/abc"). Reject anything that
+// looks external, protocol-relative, or javascript: — prevents an
+// open-redirect where a crafted ?next= sends a freshly-logged-in
+// user off-site.
+const safeNext = (raw) => {
+  if (!raw || typeof raw !== "string") return null;
+  // Must start with a single "/" and not "//" (protocol-relative)
+  if (!raw.startsWith("/") || raw.startsWith("//")) return null;
+  // Reject control chars and backslashes (used to bypass startWith checks)
+  if (/[\x00-\x1f\\]/.test(raw)) return null;
+  return raw;
+};
+
 const Signin = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
+  const [searchParams] = useSearchParams();
+
+  // Where to land after auth. Falls back to "/" if missing or unsafe.
+  const nextParam = safeNext(searchParams.get("next"));
+  const nextUrl = nextParam || "/";
+  const signupHref = nextParam
+    ? `/signup?next=${encodeURIComponent(nextParam)}`
+    : "/signup";
 
   const [login, { isLoading }] = useLoginMutation();
   const [googleAuth, { isLoading: isGoogleLoading }] = useGoogleAuthMutation();
@@ -87,7 +109,7 @@ const Signin = () => {
         password: form.password,
       }).unwrap();
       dispatch(setCredentials(res));
-      navigate("/");
+      navigate(nextUrl, { replace: true });
     } catch (err) {
       setError(err?.data?.message || "Invalid email or password.");
     }
@@ -96,6 +118,8 @@ const Signin = () => {
   const handleGoogle = async () => {
     setError("");
     try {
+      // TODO: once the Google popup is wired, pass nextUrl through the
+      // OAuth state param so the callback can navigate back here.
       setError(
         "Google sign-in needs to be connected. Add your GOOGLE_CLIENT_ID and wire the popup."
       );
@@ -269,11 +293,11 @@ const Signin = () => {
         />
         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/35 to-black/25" />
 
-        <Link to="/" className="absolute left-8 top-8 flex items-center gap-2.5">
-          <XamutMark className="h-10 w-10" />
-          <span className="text-xl font-bold tracking-tight text-white">
-            Xamut
-          </span>
+        <Link
+          to="/"
+          className="absolute left-8 top-8 flex items-center [&_img]:brightness-0 [&_img]:invert"
+        >
+          <XamutLogo className="h-9 w-auto" />
         </Link>
 
         <div className="absolute inset-x-8 bottom-8">
@@ -302,11 +326,8 @@ const Signin = () => {
 
         <div className="relative flex min-h-full items-center justify-center px-4 py-8 sm:px-8">
           <div className="w-full max-w-md">
-            <Link to="/" className="mb-7 flex items-center gap-2.5 md:hidden">
-              <XamutMark className="h-10 w-10" />
-              <span className="text-xl font-bold tracking-tight text-stone-900 dark:text-stone-100">
-                Xamut
-              </span>
+            <Link to="/" className="mb-7 flex items-center md:hidden">
+              <XamutLogo className="h-9 w-auto" />
             </Link>
 
             <div className="mb-7">
@@ -316,7 +337,9 @@ const Signin = () => {
                     Welcome back
                   </h1>
                   <p className="mt-2 text-[13.5px] text-stone-500 dark:text-stone-400">
-                    Sign in to continue to your workspace.
+                    {nextParam
+                      ? "Sign in to continue where you left off."
+                      : "Sign in to continue to your workspace."}
                   </p>
                 </>
               ) : null}
@@ -475,7 +498,7 @@ const Signin = () => {
                 <p className="mt-6 text-center text-[13px] text-stone-500 dark:text-stone-400">
                   Don't have an account?{" "}
                   <Link
-                    to="/signup"
+                    to={signupHref}
                     className="font-semibold text-teal-600 hover:text-teal-700 dark:text-teal-400 dark:hover:text-teal-300"
                   >
                     Create one

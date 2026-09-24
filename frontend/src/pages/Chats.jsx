@@ -29,7 +29,7 @@ import { useTheme } from "../context/ThemeContext";
 const MAX_FORM_QUESTIONS = 3;
 
 const FORM_LOOKUP_RE =
-  /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded)\b|\bhow many (people )?(filled|finished|completed|submitted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b/i;
+  /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?|elections?|votes?|ballots?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|standings?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers|votes?)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded|voted)\b|\bhow many (people )?(filled|finished|completed|submitted|voted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bwho('s| is) winning\b|\bcurrent (standings?|results?)\b/i;
 
 const AGENTS = [
   { id: "chat", label: "Chat", hint: "General help" },
@@ -174,19 +174,6 @@ const groupConversations = (list) => {
 // ─────────────────────────────────────────────────────────────
 // Brand marks
 // ─────────────────────────────────────────────────────────────
-const XamutMark = ({ className = "h-9 w-9" }) => (
-  <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[11px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 shadow-sm shadow-teal-500/30`}
-  >
-    <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-white">
-      <path
-        fill="currentColor"
-        d="M6 5h3.2L12 9.3 14.8 5H18l-4.5 6.4L18.5 19H15.3L12 14.2 8.7 19H5.5L10 12.2 6 5Z"
-      />
-    </svg>
-  </div>
-);
-
 const XamutAvatar = ({ size = "md" }) => {
   const dims = size === "sm" ? "h-6 w-6 sm:h-7 sm:w-7" : "h-7 w-7 sm:h-8 sm:w-8";
   return (
@@ -261,13 +248,6 @@ const IconForms = ({ className = "h-4 w-4" }) => (
       strokeLinecap="round"
       strokeLinejoin="round"
     />
-  </svg>
-);
-
-const IconWhatsApp = ({ className = "h-4 w-4" }) => (
-  <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
-    <path d="M17.5 14.4c-.3-.1-1.7-.8-2-.9-.3-.1-.5-.1-.7.1-.2.3-.8.9-.9 1.1-.2.2-.3.2-.6.1-.3-.1-1.2-.5-2.3-1.4-.9-.8-1.4-1.7-1.6-2-.2-.3 0-.4.1-.6.1-.1.3-.3.4-.5.1-.1.2-.3.2-.4.1-.2 0-.3 0-.4 0-.1-.7-1.6-.9-2.2-.2-.6-.5-.5-.7-.5-.2 0-.4 0-.6 0s-.6.1-.9.4c-.3.3-1.1 1.1-1.1 2.6 0 1.5 1.1 3 1.3 3.2.1.2 2.2 3.4 5.3 4.7.7.3 1.3.5 1.7.6.7.2 1.4.2 1.9.1.6-.1 1.7-.7 2-1.4.2-.7.2-1.3.2-1.4-.1-.1-.3-.2-.6-.3z" />
-    <path d="M12 2C6.5 2 2 6.5 2 12c0 1.8.5 3.5 1.3 4.9L2 22l5.2-1.3c1.4.8 3.1 1.3 4.8 1.3 5.5 0 10-4.5 10-10S17.5 2 12 2zm0 18.2c-1.6 0-3.1-.4-4.4-1.2l-.3-.2-3.1.8.8-3-.2-.3C4 15 3.5 13.5 3.5 12c0-4.7 3.8-8.5 8.5-8.5s8.5 3.8 8.5 8.5-3.8 8.2-8.5 8.2z" />
   </svg>
 );
 
@@ -898,13 +878,15 @@ const DocumentCard = ({ attachment, onOpen }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Created form card
+// Created form card — election-aware count
 // ─────────────────────────────────────────────────────────────
 const CreatedFormCard = ({ session, onOpen }) => {
   const draft = session?.draft || {};
-  const fieldCount = (draft.fields || []).filter(
-    (f) => f.type !== "section"
-  ).length;
+  const isElection = draft.type === "election";
+  const realFields = (draft.fields || []).filter((f) => f.type !== "section");
+  const realPositions = draft.positions || [];
+  const itemCount = isElection ? realPositions.length : realFields.length;
+  const itemNoun = isElection ? "position" : "question";
   const typeLabel = (draft.type || "form").toLowerCase();
   const visibilityLabel =
     draft.visibility === "private" ? "Invited only" : "Public";
@@ -923,7 +905,8 @@ const CreatedFormCard = ({ session, onOpen }) => {
           {draft.title || "Untitled form"}
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-stone-500 dark:text-stone-400">
-          {fieldCount} question{fieldCount === 1 ? "" : "s"}
+          {itemCount} {itemNoun}
+          {itemCount === 1 ? "" : "s"}
           <span className="mx-1 text-stone-300 dark:text-stone-600">·</span>
           {visibilityLabel}
           <span className="mx-1 text-stone-300 dark:text-stone-600">·</span>
@@ -1035,7 +1018,7 @@ const ThinkingBubble = ({ statuses = [] }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Form session panel
+// Form session panel — election-aware preview
 // ─────────────────────────────────────────────────────────────
 const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
   const [picked, setPicked] = useState([]);
@@ -1226,8 +1209,12 @@ const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
   }
 
   if (awaitingConfirm && draft) {
+    const isElection = draft.type === "election";
     const realFields = (draft.fields || []).filter((f) => f.type !== "section");
-    const fieldCount = realFields.length;
+    const realPositions = draft.positions || [];
+
+    const itemCount = isElection ? realPositions.length : realFields.length;
+    const itemNoun = isElection ? "position" : "question";
 
     return (
       <div className="mb-2 overflow-hidden rounded-2xl border border-teal-200/80 bg-gradient-to-br from-teal-50/90 via-white to-white shadow-sm dark:border-teal-500/30 dark:from-teal-500/10 dark:via-stone-900 dark:to-stone-900">
@@ -1240,7 +1227,8 @@ const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
               Preview
             </span>
             <span className="shrink-0 rounded-full bg-white/80 px-1.5 py-0.5 text-[9.5px] font-semibold text-teal-500 ring-1 ring-teal-100 dark:bg-stone-800/80 dark:text-teal-400 dark:ring-teal-500/20">
-              {fieldCount} question{fieldCount === 1 ? "" : "s"}
+              {itemCount} {itemNoun}
+              {itemCount === 1 ? "" : "s"}
             </span>
           </div>
           <button
@@ -1278,7 +1266,61 @@ const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
           </div>
 
           <div className="space-y-1">
-            {realFields.length === 0 ? (
+            {isElection ? (
+              realPositions.length === 0 ? (
+                <p className="py-2 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
+                  No positions yet. Ask for a change below.
+                </p>
+              ) : (
+                realPositions.map((p, i) => (
+                  <div
+                    key={p.id || i}
+                    className="rounded-xl border border-stone-200/80 bg-white px-2.5 py-2 dark:border-stone-700 dark:bg-stone-800"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <p className="min-w-0 flex-1 break-words text-[12.5px] font-medium leading-snug text-stone-800 dark:text-stone-100">
+                        <span className="mr-1.5 text-stone-400 dark:text-stone-500">
+                          {i + 1}.
+                        </span>
+                        {p.title || `Position ${i + 1}`}
+                        {p.required ? (
+                          <span className="ml-1 text-teal-500 dark:text-teal-400">
+                            *
+                          </span>
+                        ) : null}
+                      </p>
+                      <span className="shrink-0 rounded-full bg-stone-100 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-700/60 dark:text-stone-400">
+                        {p.maxSelections > 1
+                          ? `Pick ${p.maxSelections}`
+                          : "Pick 1"}
+                      </span>
+                    </div>
+
+                    {p.candidates?.length ? (
+                      <div className="mt-1.5 flex flex-wrap gap-1">
+                        {p.candidates.slice(0, 10).map((c) => (
+                          <span
+                            key={c.id}
+                            className="rounded-md border border-stone-200 bg-stone-50 px-1.5 py-0.5 text-[10px] text-stone-600 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300"
+                          >
+                            {c.name || "(unnamed candidate)"}
+                          </span>
+                        ))}
+                        {p.candidates.length > 10 ? (
+                          <span className="rounded-md border border-dashed border-stone-200 px-1.5 py-0.5 text-[10px] text-stone-400 dark:border-stone-700 dark:text-stone-500">
+                            +{p.candidates.length - 10} more
+                          </span>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="mt-1 text-[10px] text-stone-400 dark:text-stone-500">
+                        No candidates yet — add them in the editor.
+                      </p>
+                    )}
+                  </div>
+                ))
+              )
+            ) : realFields.length === 0 ? (
               <p className="py-2 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
                 No questions yet. Ask for a change below.
               </p>
@@ -1379,7 +1421,7 @@ const FormSessionPanel = ({ session, onSessionUpdate, onCancel }) => {
             <button
               type="button"
               onClick={handleConfirm}
-              disabled={busy || realFields.length === 0}
+              disabled={busy || itemCount === 0}
               className="rounded-full bg-gradient-to-br from-teal-500 to-teal-600 px-4 py-1.5 text-[11.5px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:shadow-md active:scale-95 disabled:opacity-50"
             >
               {confirming ? "Creating…" : "Looks good, create"}
@@ -1968,11 +2010,13 @@ const Chat = () => {
           className="flex items-center justify-between px-4 pb-3 pt-4"
           style={{ paddingTop: "max(env(safe-area-inset-top), 1rem)" }}
         >
-          <Link to="/" className="flex items-center gap-2">
-            <XamutMark className="h-7 w-7" />
-            <span className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-              Xamut
-            </span>
+          <Link to="/" className="flex items-center">
+            <img
+              src="/xamut-logo.png"
+              alt="Xamut"
+              draggable={false}
+              className="h-7 w-auto select-none dark:brightness-0 dark:invert"
+            />
           </Link>
           <button
             onClick={() => setSidebarOpen(false)}
@@ -2009,14 +2053,6 @@ const Chat = () => {
           >
             <IconForms className="h-4 w-4 text-stone-400 dark:text-stone-500" />
             My forms
-          </Link>
-
-          <Link
-            to="/whatsapp"
-            className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-[13px] font-medium text-stone-600 transition-colors duration-150 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-300 dark:hover:bg-stone-800 dark:hover:text-stone-100"
-          >
-            <IconWhatsApp className="h-4 w-4 text-emerald-500 dark:text-emerald-400" />
-            WhatsApp
           </Link>
         </div>
 
@@ -2167,7 +2203,18 @@ const Chat = () => {
             </svg>
           </button>
 
-          <XamutAvatar size="sm" />
+          <Link
+            to="/"
+            className="flex shrink-0 items-center md:hidden"
+            aria-label="Xamut"
+          >
+            <img
+              src="/xamut-icon.png"
+              alt="Xamut"
+              draggable={false}
+              className="h-6 w-6 select-none dark:brightness-0 dark:invert sm:h-7 sm:w-7"
+            />
+          </Link>
 
           <div className="min-w-0 flex-1">
             <h1 className="truncate text-[12.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100 sm:text-sm">

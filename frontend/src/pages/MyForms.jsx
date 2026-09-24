@@ -8,6 +8,7 @@ import {
   useDuplicateFormMutation,
   usePublishFormMutation,
   useCloseFormMutation,
+  useListMyPendingFormsQuery,
 } from "../features/formApiSlice";
 
 // ─────────────────────────────────────────────────────────────
@@ -38,6 +39,11 @@ const FORM_TYPE_META = {
     label: "Attendance",
     bg: "bg-amber-50 dark:bg-amber-500/15",
     text: "text-amber-700 dark:text-amber-400",
+  },
+  election: {
+    label: "Election",
+    bg: "bg-rose-50 dark:bg-rose-500/15",
+    text: "text-rose-600 dark:text-rose-400",
   },
 };
 
@@ -76,6 +82,7 @@ const TYPE_FILTERS = [
   { id: "survey", label: "Surveys" },
   { id: "feedback", label: "Feedback" },
   { id: "attendance", label: "Attendance" },
+  { id: "election", label: "Elections" },
 ];
 
 const formatDate = (iso) => {
@@ -110,23 +117,18 @@ const formatShortDate = (iso) => {
   return d.toLocaleDateString([], { month: "short", day: "numeric" });
 };
 
-const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
+const formatWindowDate = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+};
 
-// ─────────────────────────────────────────────────────────────
-// Brand mark
-// ─────────────────────────────────────────────────────────────
-const XamutMark = ({ className = "h-9 w-9" }) => (
-  <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 shadow-sm shadow-teal-500/30`}
-  >
-    <svg viewBox="0 0 24 24" className="h-1/2 w-1/2 text-white">
-      <path
-        fill="currentColor"
-        d="M6 5h3.2L12 9.3 14.8 5H18l-4.5 6.4L18.5 19H15.3L12 14.2 8.7 19H5.5L10 12.2 6 5Z"
-      />
-    </svg>
-  </div>
-);
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 // ─────────────────────────────────────────────────────────────
 // Type icon
@@ -168,6 +170,16 @@ const TypeIcon = ({ type, className = "h-4 w-4" }) => {
         <svg {...props}>
           <path
             d="M9 11l2 2 4-4M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      );
+    case "election":
+      return (
+        <svg {...props}>
+          <path
+            d="M4 20h16M6 20V10h12v10M10 6l2 2 4-4"
             strokeLinecap="round"
             strokeLinejoin="round"
           />
@@ -272,6 +284,13 @@ const IconArrowLeft = ({ className = "h-4 w-4" }) => (
   </svg>
 );
 
+const IconClock = ({ className = "h-4 w-4" }) => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={className}>
+    <circle cx="12" cy="12" r="9" />
+    <path d="M12 8v4l3 2" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 // ─────────────────────────────────────────────────────────────
 // Card menu
 // ─────────────────────────────────────────────────────────────
@@ -343,6 +362,44 @@ const CardMenu = ({ form, onAction, align = "right" }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Time window line (used on desktop card)
+// ─────────────────────────────────────────────────────────────
+const TimeWindowLine = ({ form }) => {
+  if (!form.startAt && !form.expiresAt) return null;
+  const now = new Date();
+  if (form.startAt && new Date(form.startAt) > now) {
+    return (
+      <p className="mt-1 text-[10.5px] text-amber-600 dark:text-amber-400">
+        Starts {formatWindowDate(form.startAt)}
+      </p>
+    );
+  }
+  if (form.expiresAt) {
+    return (
+      <p className="mt-1 text-[10.5px] text-stone-400 dark:text-stone-500">
+        Ends {formatWindowDate(form.expiresAt)}
+      </p>
+    );
+  }
+  return null;
+};
+
+// ─────────────────────────────────────────────────────────────
+// Pending access-request badge
+// ─────────────────────────────────────────────────────────────
+const PendingRequestsBadge = ({ count }) => {
+  if (!count) return null;
+  return (
+    <span
+      className="inline-flex h-5 items-center gap-1 rounded bg-amber-100 px-1.5 text-[9.5px] font-bold uppercase tracking-wider text-amber-700 dark:bg-amber-500/15 dark:text-amber-400"
+      title={`${count} pending access request${count === 1 ? "" : "s"}`}
+    >
+      {count} req
+    </span>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Desktop form card
 // ─────────────────────────────────────────────────────────────
 const DesktopFormCard = ({ form, role, onAction }) => {
@@ -370,7 +427,7 @@ const DesktopFormCard = ({ form, role, onAction }) => {
       className="group flex cursor-pointer flex-col rounded-lg border border-stone-200/80 bg-white p-3.5 transition-all duration-150 hover:border-teal-300 hover:shadow-[0_4px_16px_-8px_rgba(13,148,136,0.35)] dark:border-stone-800 dark:bg-stone-900 dark:hover:border-teal-500/50 dark:hover:shadow-[0_4px_16px_-8px_rgba(13,148,136,0.5)]"
     >
       <div className="mb-2.5 flex items-start justify-between gap-2">
-        <div className="flex min-w-0 items-center gap-1.5">
+        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
           <span
             className={`inline-flex h-5 items-center gap-1 rounded px-1.5 text-[9.5px] font-bold uppercase tracking-wider ${typeMeta.bg} ${typeMeta.text}`}
           >
@@ -382,6 +439,7 @@ const DesktopFormCard = ({ form, role, onAction }) => {
               Shared
             </span>
           ) : null}
+          <PendingRequestsBadge count={form.pendingRequestsCount} />
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <span
@@ -418,10 +476,12 @@ const DesktopFormCard = ({ form, role, onAction }) => {
         </div>
         <div className="px-2">
           <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-            Fields
+            {form.type === "election" ? "Positions" : "Fields"}
           </p>
           <p className="mt-0.5 text-[13px] font-semibold text-stone-800 dark:text-stone-100">
-            {form.fieldsCount || 0}
+            {form.type === "election"
+              ? form.positionsCount || 0
+              : form.fieldsCount || 0}
           </p>
         </div>
         <div className="px-2">
@@ -437,11 +497,14 @@ const DesktopFormCard = ({ form, role, onAction }) => {
       </div>
 
       <div className="mt-2.5 flex items-center justify-between">
-        <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
-          Updated {formatDate(form.updatedAt)}
-        </span>
+        <div className="min-w-0">
+          <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
+            Updated {formatDate(form.updatedAt)}
+          </span>
+          <TimeWindowLine form={form} />
+        </div>
 
-        <div className="flex items-center gap-0.5">
+        <div className="flex shrink-0 items-center gap-0.5">
           {form.status === "open" ? (
             <button
               type="button"
@@ -493,6 +556,11 @@ const MobileFormRow = ({ form, onAction }) => {
             {form.title || "Untitled form"}
           </span>
           <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${statusMeta.dot}`} />
+          {form.pendingRequestsCount > 0 ? (
+            <span className="shrink-0 rounded bg-amber-100 px-1 text-[9px] font-bold text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+              {form.pendingRequestsCount}
+            </span>
+          ) : null}
         </span>
         <span className="mt-0.5 block truncate text-[11px] text-stone-500 dark:text-stone-400">
           {plural(form.responseCount || 0, "response")}
@@ -511,6 +579,59 @@ const MobileFormRow = ({ form, onAction }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Pending drafts banner
+// ─────────────────────────────────────────────────────────────
+const PendingDraftsBanner = ({ drafts, onResume }) => {
+  if (!drafts.length) return null;
+
+  return (
+    <div className="border-b border-amber-200/70 bg-amber-50/70 px-4 py-3 dark:border-amber-500/20 dark:bg-amber-500/5 sm:px-5">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-amber-100 text-amber-700 dark:bg-amber-500/20 dark:text-amber-400">
+          <IconClock className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="text-[12.5px] font-semibold text-amber-900 dark:text-amber-300">
+            You have {drafts.length} unfinished{" "}
+            {drafts.length === 1 ? "form" : "forms"}
+          </p>
+          <div className="mt-1.5 flex flex-wrap gap-1.5">
+            {drafts.slice(0, 6).map((d) => (
+              <button
+                key={d.draftId}
+                type="button"
+                onClick={() => onResume(d)}
+                disabled={!d.accessible}
+                title={d.accessible ? "Resume" : d.reason || "Not available"}
+                className={`inline-flex max-w-[220px] items-center gap-1.5 rounded-md border px-2 py-1 text-[11px] font-medium transition-colors ${
+                  d.accessible
+                    ? "border-amber-300 bg-white text-amber-900 hover:bg-amber-100 dark:border-amber-500/40 dark:bg-transparent dark:text-amber-300 dark:hover:bg-amber-500/10"
+                    : "cursor-not-allowed border-stone-200 bg-white/60 text-stone-400 dark:border-stone-700 dark:bg-transparent dark:text-stone-500"
+                }`}
+              >
+                <span className="truncate">
+                  {d.form?.title || "Untitled form"}
+                </span>
+                {!d.accessible && d.reason ? (
+                  <span className="shrink-0 text-[9.5px] uppercase tracking-wide opacity-70">
+                    {d.reason}
+                  </span>
+                ) : null}
+              </button>
+            ))}
+            {drafts.length > 6 ? (
+              <span className="self-center text-[10.5px] text-amber-700/70 dark:text-amber-400/70">
+                +{drafts.length - 6} more
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Create modal
 // ─────────────────────────────────────────────────────────────
 const TYPE_OPTIONS = [
@@ -519,6 +640,7 @@ const TYPE_OPTIONS = [
   { id: "survey", label: "Survey", desc: "Collect opinions.", icon: "📊" },
   { id: "feedback", label: "Feedback", desc: "Ask for reviews.", icon: "💬" },
   { id: "attendance", label: "Attendance", desc: "Track who showed up.", icon: "✅" },
+  { id: "election", label: "Election", desc: "Vote for positions.", icon: "🗳️" },
 ];
 
 const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
@@ -634,7 +756,10 @@ const CreateFormModal = ({ open, onClose, onCreate, creating }) => {
               htmlFor="form-description"
               className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-stone-400"
             >
-              Description <span className="text-stone-300 dark:text-stone-600">(optional)</span>
+              Description{" "}
+              <span className="text-stone-300 dark:text-stone-600">
+                (optional)
+              </span>
             </label>
             <textarea
               id="form-description"
@@ -777,6 +902,9 @@ const MyForms = () => {
   const owned = data?.owned || [];
   const collaborated = data?.collaborated || [];
 
+  const { data: pendingData } = useListMyPendingFormsQuery();
+  const pendingDrafts = pendingData?.pending || [];
+
   const [createForm, { isLoading: creating }] = useCreateFormMutation();
   const [deleteForm, { isLoading: deleting }] = useDeleteFormMutation();
   const [duplicateForm] = useDuplicateFormMutation();
@@ -918,12 +1046,14 @@ const MyForms = () => {
     <div className="flex h-dvh w-full overflow-hidden bg-white text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
       {/* ── Desktop sidebar ──────────────────────────────── */}
       <aside className="hidden shrink-0 flex-col border-r border-stone-200/70 bg-stone-50/50 dark:border-stone-800/70 dark:bg-stone-900/40 md:flex md:w-[260px]">
-        <div className="flex h-14 items-center gap-2.5 border-b border-stone-200/70 px-4 dark:border-stone-800/70">
-          <Link to="/chat" className="flex items-center gap-2.5">
-            <XamutMark className="h-7 w-7" />
-            <span className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-              Xamut
-            </span>
+        <div className="flex h-14 items-center border-b border-stone-200/70 px-4 dark:border-stone-800/70">
+          <Link to="/chat" className="flex items-center">
+            <img
+              src="/xamut-logo.png"
+              alt="Xamut"
+              draggable={false}
+              className="h-7 w-auto select-none dark:brightness-0 dark:invert"
+            />
           </Link>
         </div>
 
@@ -1071,8 +1201,17 @@ const MyForms = () => {
           className="z-20 flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white/90 px-3 backdrop-blur-xl dark:border-stone-800/70 dark:bg-stone-950/90 sm:px-5"
           style={{ paddingTop: "env(safe-area-inset-top)" }}
         >
-          <Link to="/chat" className="flex items-center gap-2 md:hidden">
-            <XamutMark className="h-7 w-7" />
+          <Link
+            to="/chat"
+            className="flex shrink-0 items-center md:hidden"
+            aria-label="Xamut"
+          >
+            <img
+              src="/xamut-icon.png"
+              alt="Xamut"
+              draggable={false}
+              className="h-7 w-7 select-none dark:brightness-0 dark:invert"
+            />
           </Link>
 
           <div className="min-w-0 flex-1">
@@ -1186,6 +1325,12 @@ const MyForms = () => {
         </div>
 
         <div className="scrollbar-thin flex-1 overflow-y-auto">
+          {/* Pending drafts banner */}
+          <PendingDraftsBanner
+            drafts={pendingDrafts}
+            onResume={(d) => navigate(`/forms/${d.form.slug}`)}
+          />
+
           {/* Loading */}
           {isLoading ? (
             <div>
@@ -1233,7 +1378,7 @@ const MyForms = () => {
                 {isFiltered
                   ? "Try clearing your filters or searching for something else."
                   : tab === "owned"
-                  ? "Create your first form, quiz, survey or attendance sheet. It takes ten seconds."
+                  ? "Create your first form, quiz, survey, election or attendance sheet. It takes ten seconds."
                   : "When someone adds you as a collaborator on a form, it'll show up here."}
               </p>
               {!isFiltered && tab === "owned" ? (

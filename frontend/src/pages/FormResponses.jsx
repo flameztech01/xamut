@@ -7,6 +7,7 @@ import {
   useListResponsesQuery,
   useGetLeaderboardQuery,
   useDeleteResponseMutation,
+  useGetOwnerElectionResultsQuery,
 } from "../features/formApiSlice";
 
 // ─────────────────────────────────────────────────────────────
@@ -58,16 +59,7 @@ const formatBytes = (bytes) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Media value helpers
-//
-// Media field answers land here in one of three shapes:
-//   • a plain URL string (legacy `file` fields from before the
-//     media upload feature)
-//   • { url, filename, size, mimetype } (single-file upload)
-//   • [ ...objects ] (multi-file upload)
-//
-// These helpers normalise all three so the renderer doesn't care
-// which shape it received.
+// Media value helpers (unchanged)
 // ─────────────────────────────────────────────────────────────
 const MEDIA_FIELD_TYPES = new Set(["file", "image", "document"]);
 
@@ -82,9 +74,7 @@ const mediaValueToUrl = (v) => {
 
 const mediaValueToName = (v) => {
   if (v == null) return "";
-  if (typeof v === "object") {
-    return v.filename || v.name || "";
-  }
+  if (typeof v === "object") return v.filename || v.name || "";
   if (typeof v === "string") {
     try {
       const u = new URL(v);
@@ -112,9 +102,6 @@ const looksLikeImage = (v, kind) => {
   return /\.(jpe?g|png|gif|webp|avif|heic|heif|svg)(?:\?|$)/i.test(url);
 };
 
-// ─────────────────────────────────────────────────────────────
-// Value → display string (for CSV, chips, aria, etc.)
-// ─────────────────────────────────────────────────────────────
 const stripHtmlToText = (v) => {
   if (v === null || v === undefined) return "";
   if (typeof v === "boolean") return v ? "Yes" : "No";
@@ -135,9 +122,6 @@ const stripHtmlToText = (v) => {
   return String(v);
 };
 
-// ─────────────────────────────────────────────────────────────
-// CSV exporter — media values get flattened to their URLs
-// ─────────────────────────────────────────────────────────────
 const toCSV = (columns, rows) => {
   const esc = (val) => {
     if (val === null || val === undefined) return "";
@@ -145,8 +129,7 @@ const toCSV = (columns, rows) => {
     if (Array.isArray(val)) {
       s = val
         .map((x) => {
-          if (x && typeof x === "object" && typeof x.url === "string")
-            return x.url;
+          if (x && typeof x === "object" && typeof x.url === "string") return x.url;
           return String(x);
         })
         .join("; ");
@@ -178,32 +161,9 @@ const downloadBlob = (content, filename, type = "text/csv;charset=utf-8") => {
 };
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
-
-// Match a label that reads like a name field. Covers "Name",
-// "Full name", "First name", "Last name", "Your name", "Full Name",
-// "Name of student", etc. Deliberately broad — a text answer to a
-// field labeled anything name-ish is a reasonable fallback.
 const NAME_LABEL_RE = /\b(name|fullname|full-?name)\b/i;
-
-// Match a label that reads like an email field. Used as a secondary
-// path since we also have an explicit "email" field type.
 const EMAIL_LABEL_RE = /\b(e-?mail|mail\s*address)\b/i;
 
-// ─────────────────────────────────────────────────────────────
-// Respondent display resolver
-//
-// Order of preference:
-//   1. response.respondentName       — captured at submit time
-//   2. A name-like text field answer — "Full name", "Your name", etc.
-//   3. response.respondentEmail      — captured at submit time
-//   4. An email-type / email-labeled field answer
-//   5. Local part of any email we found (so we never say "Anonymous"
-//      when we at least have an address)
-//   6. "Anonymous"
-//
-// Returns { primary, secondary, initials } where secondary is the
-// email to show under the name (empty string if none).
-// ─────────────────────────────────────────────────────────────
 const getRespondentDisplay = (response, form) => {
   const r = response || {};
   const fields = form?.fields || [];
@@ -243,10 +203,7 @@ const getRespondentDisplay = (response, form) => {
 
   if (!foundName && foundEmail) {
     const local = foundEmail.split("@")[0];
-    const clean = local
-      .replace(/[._-]+/g, " ")
-      .replace(/\d+/g, " ")
-      .trim();
+    const clean = local.replace(/[._-]+/g, " ").replace(/\d+/g, " ").trim();
     if (clean && clean.length <= 40 && /^[a-z]/i.test(local)) {
       foundName = clean
         .split(/\s+/)
@@ -290,13 +247,6 @@ const I = {
       <path d="M19 12H5M12 19l-7-7 7-7" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
-  dots: (c) => (
-    <svg viewBox="0 0 24 24" fill="currentColor" className={c}>
-      <circle cx="5" cy="12" r="1.7" />
-      <circle cx="12" cy="12" r="1.7" />
-      <circle cx="19" cy="12" r="1.7" />
-    </svg>
-  ),
   close: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" className={c}>
       <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
@@ -338,6 +288,16 @@ const I = {
       <path d="M8 21h8M12 17v4M7 4h10v5a5 5 0 0 1-10 0V4zM17 5h3v3a3 3 0 0 1-3 3M7 5H4v3a3 3 0 0 0 3 3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   ),
+  ballot: (c) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
+      <path d="M4 20h16M6 20V10h12v10M10 6l2 2 4-4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  ),
+  crown: (c) => (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={c}>
+      <path d="M3 18h18l-1.5-9-4.5 3L12 6 9 12 4.5 9 3 18Z" />
+    </svg>
+  ),
   edit: (c) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <path d="M12 20h9M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" strokeLinecap="round" strokeLinejoin="round" />
@@ -357,11 +317,6 @@ const I = {
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
       <circle cx="12" cy="12" r="9" />
       <path d="M12 7v5l3 2" strokeLinecap="round" />
-    </svg>
-  ),
-  users: (c) => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.9" className={c}>
-      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" strokeLinecap="round" />
     </svg>
   ),
   empty: (c) => (
@@ -388,15 +343,13 @@ const I = {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Media answer renderer
+// Media answer renderer (unchanged)
 // ─────────────────────────────────────────────────────────────
 const MediaAnswer = ({ value, kind, compact = false }) => {
   const items = normalizeMediaValue(value).filter((v) => mediaValueToUrl(v));
   if (!items.length) {
     return (
-      <span className="italic text-stone-400 dark:text-stone-500">
-        No answer
-      </span>
+      <span className="italic text-stone-400 dark:text-stone-500">No answer</span>
     );
   }
 
@@ -412,20 +365,15 @@ const MediaAnswer = ({ value, kind, compact = false }) => {
           href={url}
           target="_blank"
           rel="noopener noreferrer"
-          className={`group relative block overflow-hidden rounded-md ring-1 ring-stone-200 transition-all hover:ring-teal-400 dark:ring-stone-700 dark:hover:ring-teal-500/60 ${
-            compact ? "aspect-square" : "aspect-square"
-          }`}
+          className="group relative block overflow-hidden rounded-md ring-1 ring-stone-200 transition-all hover:ring-teal-400 dark:ring-stone-700 dark:hover:ring-teal-500/60"
           title={name || "Open image"}
         >
           <img
             src={url}
             alt={name || "Uploaded image"}
             loading="lazy"
-            className="h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
+            className="aspect-square h-full w-full object-cover transition-transform duration-300 group-hover:scale-[1.03]"
           />
-          <span className="pointer-events-none absolute inset-x-0 bottom-0 flex items-center justify-end bg-gradient-to-t from-black/55 to-transparent px-2 py-1.5 opacity-0 transition-opacity group-hover:opacity-100">
-            <span className="text-white">{I.external("h-3 w-3")}</span>
-          </span>
         </a>
       );
     }
@@ -491,7 +439,7 @@ const MediaAnswer = ({ value, kind, compact = false }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Stat bar
+// Stat bar (regular fields)
 // ─────────────────────────────────────────────────────────────
 const StatBar = ({ label, count, percentage, correct }) => (
   <div>
@@ -525,7 +473,7 @@ const StatBar = ({ label, count, percentage, correct }) => (
 );
 
 // ─────────────────────────────────────────────────────────────
-// Field stats block
+// Field stats block (regular forms)
 // ─────────────────────────────────────────────────────────────
 const FieldStats = ({ field, stats }) => {
   if (stats?.isSection || field.type === "section") {
@@ -628,9 +576,7 @@ const FieldStats = ({ field, stats }) => {
                   key={d.value}
                   label={String(d.value)}
                   count={d.count}
-                  percentage={
-                    answered ? Math.round((d.count / answered) * 100) : 0
-                  }
+                  percentage={answered ? Math.round((d.count / answered) * 100) : 0}
                 />
               ))}
             </div>
@@ -642,9 +588,7 @@ const FieldStats = ({ field, stats }) => {
         <div className="space-y-1.5 text-[12px] text-stone-600 dark:text-stone-300">
           {stats.earliest ? (
             <p>
-              <span className="text-stone-400 dark:text-stone-500">
-                Earliest:
-              </span>{" "}
+              <span className="text-stone-400 dark:text-stone-500">Earliest:</span>{" "}
               {formatDateTime(stats.earliest)}
             </p>
           ) : null}
@@ -713,25 +657,206 @@ const FieldStats = ({ field, stats }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
+// Election candidate bar (with photo + winner crown)
+// ─────────────────────────────────────────────────────────────
+const CandidateBar = ({ candidate, isWinner, tie }) => {
+  const initial = (candidate.name || "?").charAt(0).toUpperCase();
+  return (
+    <div className="flex items-center gap-3">
+      <span className="relative flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-rose-100 text-[12px] font-semibold text-rose-700 dark:bg-rose-500/20 dark:text-rose-300">
+        {candidate.photoUrl ? (
+          <img
+            src={candidate.photoUrl}
+            alt=""
+            className="h-full w-full object-cover"
+          />
+        ) : (
+          initial
+        )}
+        {isWinner ? (
+          <span
+            className={`absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full text-white shadow ${
+              tie ? "bg-amber-400" : "bg-amber-500"
+            }`}
+            title={tie ? "Tied for lead" : "Winner"}
+          >
+            {I.crown("h-2.5 w-2.5")}
+          </span>
+        ) : null}
+      </span>
+
+      <div className="min-w-0 flex-1">
+        <div className="mb-1 flex items-center justify-between gap-3">
+          <span className="min-w-0 truncate text-[12.5px] font-medium text-stone-800 dark:text-stone-100">
+            {candidate.name || "Unnamed candidate"}
+          </span>
+          <span className="shrink-0 text-[11.5px] font-semibold text-stone-700 dark:text-stone-300">
+            {candidate.count}
+            <span className="ml-1.5 font-normal text-stone-400 dark:text-stone-500">
+              {candidate.percentage}%
+            </span>
+          </span>
+        </div>
+        <div className="h-1.5 overflow-hidden rounded-full bg-stone-100 dark:bg-stone-800">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${
+              isWinner
+                ? tie
+                  ? "bg-amber-400"
+                  : "bg-rose-500 dark:bg-rose-400"
+                : "bg-stone-400 dark:bg-stone-500"
+            }`}
+            style={{ width: `${Math.max(2, candidate.percentage)}%` }}
+          />
+        </div>
+        {candidate.slogan ? (
+          <p className="mt-1 truncate text-[10.5px] italic text-stone-400 dark:text-stone-500">
+            {candidate.slogan}
+          </p>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Election position block (summary / results)
+// ─────────────────────────────────────────────────────────────
+const PositionStats = ({ position, totalResponses }) => {
+  const hasVotes = position.totalVotes > 0;
+
+  return (
+    <div className="rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900">
+      <div className="mb-3 flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="flex items-center gap-1.5 break-words text-[13.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+            <span className="text-rose-500 dark:text-rose-400">
+              {I.ballot("h-3.5 w-3.5")}
+            </span>
+            {position.title}
+          </p>
+          <p className="mt-0.5 text-[10.5px] uppercase tracking-wider text-stone-400 dark:text-stone-500">
+            {position.totalVotes} {position.totalVotes === 1 ? "vote" : "votes"}
+            {position.maxSelections > 1
+              ? ` · up to ${position.maxSelections} per voter`
+              : ""}
+            {position.abstained > 0 ? ` · ${position.abstained} abstained` : ""}
+          </p>
+        </div>
+        {position.tie && hasVotes ? (
+          <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-amber-700 dark:bg-amber-500/15 dark:text-amber-400">
+            Tie
+          </span>
+        ) : null}
+      </div>
+
+      {!hasVotes ? (
+        <p className="text-[12px] text-stone-400 dark:text-stone-500">
+          No votes yet.
+        </p>
+      ) : (
+        <div className="space-y-3">
+          {position.candidates.map((c) => (
+            <CandidateBar
+              key={c.candidateId}
+              candidate={c}
+              isWinner={position.winners?.includes(c.candidateId)}
+              tie={position.tie}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
 // Empty state
 // ─────────────────────────────────────────────────────────────
-const EmptyResponses = ({ status }) => (
+const EmptyResponses = ({ status, isElection }) => (
   <div className="flex flex-col items-center px-4 py-16 text-center">
     <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-teal-50 text-teal-600 dark:bg-teal-500/15 dark:text-teal-400">
       {I.empty("h-6 w-6")}
     </div>
     <h3 className="mt-3.5 text-[14.5px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-      No responses yet
+      {isElection ? "No votes yet" : "No responses yet"}
     </h3>
     <p className="mt-1.5 max-w-xs text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
       {status === "draft"
         ? "Publish the form first. Once people start filling it, responses show up here."
         : status === "closed"
         ? "This form is closed. Reopen it to keep collecting responses."
+        : isElection
+        ? "Share the public link to start collecting votes."
         : "Share the public link to start collecting responses."}
     </p>
   </div>
 );
+
+// ─────────────────────────────────────────────────────────────
+// Election response detail block — given a position and candidate IDs
+// ─────────────────────────────────────────────────────────────
+const ElectionAnswerBlock = ({ position, value }) => {
+  const ids = Array.isArray(value) ? value : value ? [value] : [];
+  const byId = new Map(
+    (position.candidates || []).map((c) => [String(c.id), c])
+  );
+  const picked = ids.map((id) => byId.get(String(id))).filter(Boolean);
+
+  return (
+    <div>
+      <div className="mb-1 flex items-center gap-1.5">
+        <span className="text-rose-500 dark:text-rose-400">
+          {I.ballot("h-3 w-3")}
+        </span>
+        <p className="min-w-0 flex-1 text-[11.5px] font-semibold text-stone-600 dark:text-stone-300">
+          {position.title}
+        </p>
+        {!picked.length ? (
+          <span className="shrink-0 rounded bg-stone-100 px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider text-stone-500 dark:bg-stone-800 dark:text-stone-400">
+            Abstained
+          </span>
+        ) : null}
+      </div>
+
+      {!picked.length ? (
+        <div className="rounded-md bg-stone-50 px-3 py-2.5 text-[12px] italic text-stone-400 dark:bg-stone-800/60 dark:text-stone-500">
+          No vote recorded for this position.
+        </div>
+      ) : (
+        <div className="space-y-1.5">
+          {picked.map((c) => (
+            <div
+              key={c.id}
+              className="flex items-center gap-2.5 rounded-md border border-rose-100 bg-rose-50/50 px-2.5 py-2 dark:border-rose-500/20 dark:bg-rose-500/5"
+            >
+              <span className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-rose-100 text-[11px] font-semibold text-rose-700 dark:bg-rose-500/20 dark:text-rose-300">
+                {c.photoUrl ? (
+                  <img src={c.photoUrl} alt="" className="h-full w-full object-cover" />
+                ) : (
+                  (c.name || "?").charAt(0).toUpperCase()
+                )}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[12.5px] font-medium text-stone-800 dark:text-stone-100">
+                  {c.name || "Unnamed candidate"}
+                </p>
+                {c.slogan ? (
+                  <p className="truncate text-[10.5px] italic text-stone-400 dark:text-stone-500">
+                    {c.slogan}
+                  </p>
+                ) : null}
+              </div>
+              <span className="shrink-0 text-emerald-500 dark:text-emerald-400">
+                {I.check("h-3.5 w-3.5")}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
 
 // ─────────────────────────────────────────────────────────────
 // Response detail modal
@@ -739,12 +864,23 @@ const EmptyResponses = ({ status }) => (
 const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) => {
   if (!response || !form) return null;
 
+  const isElection = form.type === "election";
   const answerMap = new Map();
   for (const a of response.answers || []) answerMap.set(a.fieldId, a);
 
-  const isQuiz = form.type === "quiz" || (response.maxScore || 0) > 0;
+  const isQuiz =
+    !isElection && (form.type === "quiz" || (response.maxScore || 0) > 0);
 
   const { primary, secondary } = getRespondentDisplay(response, form);
+
+  const votedCount = isElection
+    ? (form.positions || []).filter((p) => {
+        const a = answerMap.get(p.id);
+        const v = a?.value;
+        return Array.isArray(v) && v.length > 0;
+      }).length
+    : 0;
+  const totalPositions = (form.positions || []).length;
 
   return (
     <div className="fixed inset-0 z-[75] flex items-end justify-center bg-stone-900/50 backdrop-blur-[3px] dark:bg-black/60 sm:items-center">
@@ -756,7 +892,7 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
         >
           <div className="min-w-0">
             <p className="text-[10.5px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-              Response
+              {isElection ? "Vote" : "Response"}
             </p>
             <h2 className="mt-0.5 truncate text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
               {primary}
@@ -811,90 +947,122 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
           </div>
         ) : null}
 
+        {isElection ? (
+          <div className="border-b border-stone-100 bg-rose-50/50 px-4 py-3 dark:border-stone-800 dark:bg-rose-500/5 sm:px-5">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-rose-100 text-rose-600 dark:bg-rose-500/20 dark:text-rose-300">
+                {I.ballot("h-5 w-5")}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-rose-800 dark:text-rose-200">
+                  Voted in {votedCount} of {totalPositions}{" "}
+                  {totalPositions === 1 ? "position" : "positions"}
+                </p>
+                <p className="mt-0.5 text-[11px] text-rose-600/80 dark:text-rose-400/80">
+                  {totalPositions - votedCount > 0
+                    ? `${totalPositions - votedCount} abstained`
+                    : "All positions answered"}
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <div className="scrollbar-thin flex-1 overflow-y-auto px-4 py-4 sm:px-5">
           <div className="space-y-3">
-            {(form.fields || []).map((field) => {
-              if (field.type === "section") {
-                return (
-                  <div
-                    key={field.id}
-                    className="rounded-md border border-dashed border-stone-300 bg-stone-50/50 px-3 py-2 dark:border-stone-700 dark:bg-stone-900/50"
-                  >
-                    <p className="text-[12px] font-semibold text-stone-600 dark:text-stone-300">
-                      {field.label}
-                    </p>
-                  </div>
-                );
-              }
-
-              const a = answerMap.get(field.id);
-              const value = a?.value;
-              const correct = a?.correct;
-              const isEmpty =
-                value === null ||
-                value === undefined ||
-                value === "" ||
-                (Array.isArray(value) && value.length === 0);
-
-              return (
-                <div key={field.id}>
-                  <div className="mb-1 flex items-center gap-1.5">
-                    <p className="min-w-0 flex-1 text-[11.5px] font-semibold text-stone-600 dark:text-stone-300">
-                      {field.label}
-                    </p>
-                    {correct !== null && correct !== undefined ? (
-                      <span
-                        className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white ${
-                          correct ? "bg-emerald-500" : "bg-red-400"
-                        }`}
+            {isElection
+              ? (form.positions || []).map((p) => {
+                  const a = answerMap.get(p.id);
+                  return (
+                    <ElectionAnswerBlock
+                      key={p.id}
+                      position={p}
+                      value={a?.value}
+                    />
+                  );
+                })
+              : (form.fields || []).map((field) => {
+                  if (field.type === "section") {
+                    return (
+                      <div
+                        key={field.id}
+                        className="rounded-md border border-dashed border-stone-300 bg-stone-50/50 px-3 py-2 dark:border-stone-700 dark:bg-stone-900/50"
                       >
-                        {correct ? I.check("h-2.5 w-2.5") : I.x("h-2.5 w-2.5")}
-                      </span>
-                    ) : null}
-                  </div>
-                  <div className="rounded-md bg-stone-50 px-3 py-2.5 text-[12.5px] leading-relaxed text-stone-800 dark:bg-stone-800/60 dark:text-stone-200">
-                    {isEmpty ? (
-                      <span className="italic text-stone-400 dark:text-stone-500">
-                        No answer
-                      </span>
-                    ) : isMediaField(field.type) ? (
-                      <MediaAnswer value={value} kind={field.type} />
-                    ) : field.type === "url" ? (
-                      <a
-                        href={String(value)}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="break-all text-teal-600 underline decoration-teal-300 underline-offset-2 hover:text-teal-700 dark:text-teal-400 dark:decoration-teal-500/60 dark:hover:text-teal-300"
-                      >
-                        {String(value)}
-                      </a>
-                    ) : Array.isArray(value) ? (
-                      <div className="flex flex-wrap gap-1.5">
-                        {value.map((v, i) => (
-                          <span
-                            key={i}
-                            className="rounded-md bg-white px-2 py-0.5 text-[11.5px] font-medium text-stone-700 ring-1 ring-stone-200 dark:bg-stone-900 dark:text-stone-200 dark:ring-stone-700"
-                          >
-                            {stripHtmlToText(v)}
-                          </span>
-                        ))}
+                        <p className="text-[12px] font-semibold text-stone-600 dark:text-stone-300">
+                          {field.label}
+                        </p>
                       </div>
-                    ) : typeof value === "boolean" ? (
-                      value ? "Yes" : "No"
-                    ) : (
-                      <p className="whitespace-pre-wrap break-words">
-                        {stripHtmlToText(value)}
-                      </p>
-                    )}
-                  </div>
-                  {a?.score != null && field.scoring?.points ? (
-                    <p className="mt-1 text-[10.5px] text-purple-600 dark:text-purple-400">
-                      {a.score} / {field.scoring.points} points
-                    </p>
-                  ) : null}
-                </div>
-              );
-            })}
+                    );
+                  }
+
+                  const a = answerMap.get(field.id);
+                  const value = a?.value;
+                  const correct = a?.correct;
+                  const isEmpty =
+                    value === null ||
+                    value === undefined ||
+                    value === "" ||
+                    (Array.isArray(value) && value.length === 0);
+
+                  return (
+                    <div key={field.id}>
+                      <div className="mb-1 flex items-center gap-1.5">
+                        <p className="min-w-0 flex-1 text-[11.5px] font-semibold text-stone-600 dark:text-stone-300">
+                          {field.label}
+                        </p>
+                        {correct !== null && correct !== undefined ? (
+                          <span
+                            className={`flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white ${
+                              correct ? "bg-emerald-500" : "bg-red-400"
+                            }`}
+                          >
+                            {correct ? I.check("h-2.5 w-2.5") : I.x("h-2.5 w-2.5")}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="rounded-md bg-stone-50 px-3 py-2.5 text-[12.5px] leading-relaxed text-stone-800 dark:bg-stone-800/60 dark:text-stone-200">
+                        {isEmpty ? (
+                          <span className="italic text-stone-400 dark:text-stone-500">
+                            No answer
+                          </span>
+                        ) : isMediaField(field.type) ? (
+                          <MediaAnswer value={value} kind={field.type} />
+                        ) : field.type === "url" ? (
+                          <a
+                            href={String(value)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="break-all text-teal-600 underline decoration-teal-300 underline-offset-2 hover:text-teal-700 dark:text-teal-400 dark:decoration-teal-500/60 dark:hover:text-teal-300"
+                          >
+                            {String(value)}
+                          </a>
+                        ) : Array.isArray(value) ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {value.map((v, i) => (
+                              <span
+                                key={i}
+                                className="rounded-md bg-white px-2 py-0.5 text-[11.5px] font-medium text-stone-700 ring-1 ring-stone-200 dark:bg-stone-900 dark:text-stone-200 dark:ring-stone-700"
+                              >
+                                {stripHtmlToText(v)}
+                              </span>
+                            ))}
+                          </div>
+                        ) : typeof value === "boolean" ? (
+                          value ? "Yes" : "No"
+                        ) : (
+                          <p className="whitespace-pre-wrap break-words">
+                            {stripHtmlToText(value)}
+                          </p>
+                        )}
+                      </div>
+                      {a?.score != null && field.scoring?.points ? (
+                        <p className="mt-1 text-[10.5px] text-purple-600 dark:text-purple-400">
+                          {a.score} / {field.scoring.points} points
+                        </p>
+                      ) : null}
+                    </div>
+                  );
+                })}
           </div>
         </div>
 
@@ -928,8 +1096,18 @@ const ResponseDetailModal = ({ response, form, onClose, onDelete, deleting }) =>
 // Desktop response row
 // ─────────────────────────────────────────────────────────────
 const DesktopResponseRow = ({ response, form, onOpen }) => {
-  const isQuiz = form?.type === "quiz" || (response.maxScore || 0) > 0;
+  const isElection = form?.type === "election";
+  const isQuiz =
+    !isElection && (form?.type === "quiz" || (response.maxScore || 0) > 0);
   const { primary, secondary, initials } = getRespondentDisplay(response, form);
+
+  const totalPositions = form?.positions?.length || 0;
+  const votedCount = isElection
+    ? (form.positions || []).filter((p) => {
+        const a = (response.answers || []).find((x) => x.fieldId === p.id);
+        return Array.isArray(a?.value) && a.value.length > 0;
+      }).length
+    : 0;
 
   return (
     <button
@@ -961,7 +1139,11 @@ const DesktopResponseRow = ({ response, form, onOpen }) => {
         {formatDuration(response.durationSeconds)}
       </span>
 
-      {isQuiz ? (
+      {isElection ? (
+        <span className="shrink-0 text-[11px] font-semibold text-rose-600 dark:text-rose-400">
+          {votedCount}/{totalPositions}
+        </span>
+      ) : isQuiz ? (
         <span
           className={`shrink-0 text-[11px] font-semibold ${
             response.passed === true
@@ -990,8 +1172,18 @@ const DesktopResponseRow = ({ response, form, onOpen }) => {
 // Mobile response row
 // ─────────────────────────────────────────────────────────────
 const MobileResponseRow = ({ response, form, onOpen }) => {
-  const isQuiz = form?.type === "quiz" || (response.maxScore || 0) > 0;
+  const isElection = form?.type === "election";
+  const isQuiz =
+    !isElection && (form?.type === "quiz" || (response.maxScore || 0) > 0);
   const { primary, secondary, initials } = getRespondentDisplay(response, form);
+
+  const totalPositions = form?.positions?.length || 0;
+  const votedCount = isElection
+    ? (form.positions || []).filter((p) => {
+        const a = (response.answers || []).find((x) => x.fieldId === p.id);
+        return Array.isArray(a?.value) && a.value.length > 0;
+      }).length
+    : 0;
 
   return (
     <button
@@ -1014,15 +1206,14 @@ const MobileResponseRow = ({ response, form, onOpen }) => {
             </>
           ) : null}
           <span className="shrink-0">{formatRelative(response.submittedAt)}</span>
-          {response.durationSeconds ? (
+          {isElection ? (
             <>
               <span className="shrink-0 text-stone-300 dark:text-stone-600">·</span>
-              <span className="shrink-0">
-                {formatDuration(response.durationSeconds)}
+              <span className="shrink-0 font-semibold text-rose-600 dark:text-rose-400">
+                {votedCount}/{totalPositions}
               </span>
             </>
-          ) : null}
-          {isQuiz ? (
+          ) : isQuiz ? (
             <>
               <span className="shrink-0 text-stone-300 dark:text-stone-600">·</span>
               <span
@@ -1048,13 +1239,7 @@ const MobileResponseRow = ({ response, form, onOpen }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Leaderboard row
-//
-// Uses the exact same name resolution as the responses list, so a
-// leaderboard entry with no respondentName/Email but a "Full name"
-// or "Email" field answer still shows the person's name — and if
-// we only have an email, we derive a friendly name from the local
-// part before ever falling back to "Anonymous".
+// Leaderboard row (regular quizzes only)
 // ─────────────────────────────────────────────────────────────
 const LeaderboardRow = ({ entry, form }) => {
   const medal =
@@ -1066,9 +1251,6 @@ const LeaderboardRow = ({ entry, form }) => {
       ? "bg-gradient-to-br from-orange-300 to-orange-500 text-white"
       : "bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-300";
 
-  // Shape the leaderboard entry like a response so we can reuse the
-  // exact same resolver as the responses list. `entry.answers` may be
-  // undefined on older backends — getRespondentDisplay handles that.
   const { primary, secondary, initials } = getRespondentDisplay(
     {
       respondentName: entry.name,
@@ -1080,16 +1262,12 @@ const LeaderboardRow = ({ entry, form }) => {
 
   return (
     <div className="flex items-center gap-3 border-b border-stone-100 px-4 py-2.5 last:border-b-0 dark:border-stone-800/60">
-      <span
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${medal}`}
-      >
+      <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold ${medal}`}>
         {entry.rank}
       </span>
-
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-teal-100 text-[11px] font-semibold text-teal-700 dark:bg-teal-500/20 dark:text-teal-300">
         {initials}
       </span>
-
       <div className="min-w-0 flex-1">
         <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
           {primary}
@@ -1100,7 +1278,6 @@ const LeaderboardRow = ({ entry, form }) => {
           </p>
         ) : null}
       </div>
-
       <div className="shrink-0 text-right">
         <p className="text-[13px] font-bold text-stone-800 dark:text-stone-100">
           {entry.totalScore}
@@ -1136,10 +1313,14 @@ const FormResponses = () => {
   });
   const form = formData?.form;
 
+  const isElection = form?.type === "election";
+
   const isQuiz = useMemo(
     () =>
-      form?.type === "quiz" || form?.fields?.some((f) => f.scoring?.points > 0),
-    [form]
+      !isElection &&
+      (form?.type === "quiz" ||
+        form?.fields?.some((f) => f.scoring?.points > 0)),
+    [form, isElection]
   );
 
   const { data: statsData, isLoading: statsLoading } = useGetFormStatsQuery(id, {
@@ -1156,7 +1337,15 @@ const FormResponses = () => {
   );
 
   const { data: leaderboardData, isLoading: leaderboardLoading } =
-    useGetLeaderboardQuery(id, { skip: !id || tab !== "leaderboard" || !isQuiz });
+    useGetLeaderboardQuery(id, {
+      skip: !id || tab !== "leaderboard" || !isQuiz,
+    });
+
+  // Owner election results (always allowed, independent of showLiveResults)
+  const { data: electionResultsData, isLoading: electionResultsLoading } =
+    useGetOwnerElectionResultsQuery(id, {
+      skip: !id || tab !== "results" || !isElection,
+    });
 
   const [deleteResponse, { isLoading: deleting }] = useDeleteResponseMutation();
 
@@ -1188,9 +1377,12 @@ const FormResponses = () => {
       const safeTitle = (form.title || "form")
         .replace(/[^a-z0-9\-_]+/gi, "_")
         .slice(0, 40);
-      downloadBlob(csv, `${safeTitle}-responses.csv`);
+      downloadBlob(
+        csv,
+        `${safeTitle}-${isElection ? "votes" : "responses"}.csv`
+      );
       showToast("CSV downloaded.");
-    } catch (err) {
+    } catch {
       showToast("Couldn't export. Try again.");
     }
   };
@@ -1200,9 +1392,9 @@ const FormResponses = () => {
       await deleteResponse({ id, responseId }).unwrap();
       setOpenResponse(null);
       setConfirmDeleteId(null);
-      showToast("Response deleted.");
+      showToast(isElection ? "Vote deleted." : "Response deleted.");
     } catch (err) {
-      showToast(err?.data?.message || "Couldn't delete response.");
+      showToast(err?.data?.message || "Couldn't delete.");
     }
   };
 
@@ -1212,7 +1404,7 @@ const FormResponses = () => {
         <div className="flex flex-col items-center gap-3">
           <span className="h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500 dark:border-stone-700 dark:border-t-teal-400" />
           <p className="text-[12px] text-stone-400 dark:text-stone-500">
-            Loading responses…
+            Loading…
           </p>
         </div>
       </div>
@@ -1226,9 +1418,18 @@ const FormResponses = () => {
 
   const TABS = [
     { id: "summary", label: "Summary", icon: I.chart },
-    { id: "responses", label: "Responses", icon: I.list },
-    ...(isQuiz ? [{ id: "leaderboard", label: "Leaderboard", icon: I.trophy }] : []),
+    { id: "responses", label: isElection ? "Votes" : "Responses", icon: I.list },
+    ...(isQuiz
+      ? [{ id: "leaderboard", label: "Leaderboard", icon: I.trophy }]
+      : []),
+    ...(isElection
+      ? [{ id: "results", label: "Standings", icon: I.ballot }]
+      : []),
   ];
+
+  // Summary positions for elections (from statsData)
+  const electionPositions = statsData?.positions || [];
+  const liveResultsPositions = electionResultsData?.results || [];
 
   return (
     <div className="flex h-dvh w-full overflow-hidden bg-white text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
@@ -1244,7 +1445,7 @@ const FormResponses = () => {
           </button>
           <Link to="/forms" className="min-w-0 flex-1">
             <p className="truncate text-[13px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-              Responses
+              {isElection ? "Votes" : "Responses"}
             </p>
             <p className="truncate text-[10.5px] text-stone-400 dark:text-stone-500">
               Back to forms
@@ -1264,7 +1465,7 @@ const FormResponses = () => {
                 <span className={`h-1 w-1 rounded-full ${statusMeta.dot}`} />
                 {statusMeta.label}
               </span>
-              <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
+              <span className="text-[10.5px] capitalize text-stone-400 dark:text-stone-500">
                 {form.type}
               </span>
             </div>
@@ -1314,7 +1515,7 @@ const FormResponses = () => {
           <div className="grid grid-cols-2 gap-2">
             <div className="rounded-lg border border-stone-200/70 bg-white p-2.5 dark:border-stone-800 dark:bg-stone-900">
               <p className="text-[9.5px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                Responses
+                {isElection ? "Votes" : "Responses"}
               </p>
               <p className="mt-0.5 text-[16px] font-semibold text-stone-900 dark:text-stone-100">
                 {totalResponses}
@@ -1329,6 +1530,7 @@ const FormResponses = () => {
               </p>
             </div>
           </div>
+
           {isQuiz && quiz ? (
             <div className="mt-2 rounded-lg border border-purple-200/70 bg-purple-50/60 p-2.5 dark:border-purple-500/30 dark:bg-purple-500/10">
               <p className="text-[9.5px] font-bold uppercase tracking-wider text-purple-600 dark:text-purple-400">
@@ -1340,6 +1542,17 @@ const FormResponses = () => {
               <p className="mt-0.5 text-[10px] text-purple-500 dark:text-purple-400/80">
                 {quiz.passedCount} passed
                 {quiz.passPercentage > 0 ? ` · ${quiz.passPercentage}% to pass` : ""}
+              </p>
+            </div>
+          ) : null}
+
+          {isElection && statsData?.positions?.length ? (
+            <div className="mt-2 rounded-lg border border-rose-200/70 bg-rose-50/60 p-2.5 dark:border-rose-500/30 dark:bg-rose-500/10">
+              <p className="text-[9.5px] font-bold uppercase tracking-wider text-rose-600 dark:text-rose-400">
+                Positions
+              </p>
+              <p className="mt-0.5 text-[16px] font-semibold text-rose-700 dark:text-rose-300">
+                {statsData.positions.length}
               </p>
             </div>
           ) : null}
@@ -1365,8 +1578,8 @@ const FormResponses = () => {
               {form.title || "Untitled form"}
             </h1>
             <p className="hidden truncate text-[11px] text-stone-400 dark:text-stone-500 md:block">
-              {totalResponses}{" "}
-              {totalResponses === 1 ? "response" : "responses"}
+              {totalResponses} {isElection ? "vote" : "response"}
+              {totalResponses === 1 ? "" : "s"}
               <span className="mx-1.5 text-stone-300 dark:text-stone-600">·</span>
               {form.type}
             </p>
@@ -1458,6 +1671,7 @@ const FormResponses = () => {
         </div>
 
         <div className="scrollbar-thin flex-1 overflow-y-auto">
+          {/* ── SUMMARY TAB ────────────────────────────────── */}
           {tab === "summary" ? (
             <div className="mx-auto max-w-5xl p-3 sm:p-5">
               {statsLoading ? (
@@ -1470,13 +1684,13 @@ const FormResponses = () => {
                   ))}
                 </div>
               ) : totalResponses === 0 ? (
-                <EmptyResponses status={form.status} />
+                <EmptyResponses status={form.status} isElection={isElection} />
               ) : (
                 <>
                   <div className="mb-5 grid grid-cols-2 gap-2.5 md:grid-cols-4 md:gap-3">
                     <div className="rounded-lg border border-stone-200/80 bg-white p-3.5 dark:border-stone-800 dark:bg-stone-900">
                       <p className="text-[9.5px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                        Responses
+                        {isElection ? "Total votes" : "Responses"}
                       </p>
                       <p className="mt-1 text-[22px] font-bold tracking-tight text-stone-900 dark:text-stone-100">
                         {totalResponses}
@@ -1492,7 +1706,16 @@ const FormResponses = () => {
                       </p>
                     </div>
 
-                    {isQuiz && quiz ? (
+                    {isElection ? (
+                      <div className="rounded-lg border border-rose-200/70 bg-rose-50/40 p-3.5 dark:border-rose-500/30 dark:bg-rose-500/10">
+                        <p className="text-[9.5px] font-semibold uppercase tracking-wider text-rose-600 dark:text-rose-400">
+                          Positions
+                        </p>
+                        <p className="mt-1 text-[22px] font-bold tracking-tight text-rose-700 dark:text-rose-300">
+                          {electionPositions.length}
+                        </p>
+                      </div>
+                    ) : isQuiz && quiz ? (
                       <>
                         <div className="rounded-lg border border-purple-200/70 bg-purple-50/40 p-3.5 dark:border-purple-500/30 dark:bg-purple-500/10">
                           <p className="text-[9.5px] font-semibold uppercase tracking-wider text-purple-600 dark:text-purple-400">
@@ -1543,28 +1766,41 @@ const FormResponses = () => {
                     )}
                   </div>
 
-                  <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-                    {(form.fields || []).map((field) => (
-                      <FieldStats
-                        key={field.id}
-                        field={field}
-                        stats={(statsData?.fields || []).find(
-                          (s) => s.fieldId === field.id
-                        )}
-                      />
-                    ))}
-                  </div>
+                  {isElection ? (
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {electionPositions.map((p) => (
+                        <PositionStats
+                          key={p.positionId}
+                          position={p}
+                          totalResponses={totalResponses}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                      {(form.fields || []).map((field) => (
+                        <FieldStats
+                          key={field.id}
+                          field={field}
+                          stats={(statsData?.fields || []).find(
+                            (s) => s.fieldId === field.id
+                          )}
+                        />
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
             </div>
           ) : null}
 
+          {/* ── RESPONSES / VOTES TAB ──────────────────────── */}
           {tab === "responses" ? (
             <div>
               <div className="hidden border-b border-stone-200/80 bg-stone-50/60 px-4 py-2 dark:border-stone-800/70 dark:bg-stone-900/40 md:grid md:grid-cols-[auto_1fr_auto_auto_auto_auto] md:items-center md:gap-4">
                 <span className="w-8" />
                 <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                  Respondent
+                  {isElection ? "Voter" : "Respondent"}
                 </span>
                 <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
                   When
@@ -1573,7 +1809,7 @@ const FormResponses = () => {
                   Duration
                 </span>
                 <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
-                  {isQuiz ? "Score" : ""}
+                  {isElection ? "Positions" : isQuiz ? "Score" : ""}
                 </span>
                 <span className="w-4" />
               </div>
@@ -1597,7 +1833,7 @@ const FormResponses = () => {
                 search ? (
                   <div className="py-14 text-center">
                     <p className="text-[13px] font-semibold text-stone-700 dark:text-stone-200">
-                      No responses match "{search}"
+                      No {isElection ? "votes" : "responses"} match "{search}"
                     </p>
                     <button
                       type="button"
@@ -1608,7 +1844,7 @@ const FormResponses = () => {
                     </button>
                   </div>
                 ) : (
-                  <EmptyResponses status={form.status} />
+                  <EmptyResponses status={form.status} isElection={isElection} />
                 )
               ) : (
                 <>
@@ -1679,6 +1915,7 @@ const FormResponses = () => {
             </div>
           ) : null}
 
+          {/* ── LEADERBOARD TAB (quiz only) ────────────────── */}
           {tab === "leaderboard" && isQuiz ? (
             <div className="mx-auto max-w-4xl p-3 sm:p-5">
               {leaderboardLoading ? (
@@ -1691,7 +1928,7 @@ const FormResponses = () => {
                   ))}
                 </div>
               ) : !leaderboardData?.leaderboard?.length ? (
-                <EmptyResponses status={form.status} />
+                <EmptyResponses status={form.status} isElection={false} />
               ) : (
                 <>
                   <div className="mb-3 rounded-lg border border-purple-200/70 bg-purple-50/50 p-3.5 dark:border-purple-500/30 dark:bg-purple-500/10">
@@ -1722,6 +1959,54 @@ const FormResponses = () => {
               )}
             </div>
           ) : null}
+
+          {/* ── STANDINGS TAB (elections) ──────────────────── */}
+          {tab === "results" && isElection ? (
+            <div className="mx-auto max-w-4xl p-3 sm:p-5">
+              {electionResultsLoading ? (
+                <div className="space-y-3">
+                  {[1, 2, 3].map((i) => (
+                    <div
+                      key={i}
+                      className="h-40 animate-pulse rounded-lg border border-stone-200/80 bg-stone-50 dark:border-stone-800 dark:bg-stone-900/60"
+                    />
+                  ))}
+                </div>
+              ) : !liveResultsPositions.length || totalResponses === 0 ? (
+                <EmptyResponses status={form.status} isElection={true} />
+              ) : (
+                <>
+                  <div className="mb-3 rounded-lg border border-rose-200/70 bg-rose-50/50 p-3.5 dark:border-rose-500/30 dark:bg-rose-500/10">
+                    <div className="flex items-center gap-2">
+                      <span className="text-rose-500 dark:text-rose-400">
+                        {I.ballot("h-4 w-4")}
+                      </span>
+                      <p className="text-[12.5px] font-semibold text-rose-800 dark:text-rose-200">
+                        Live standings
+                      </p>
+                    </div>
+                    <p className="mt-1 text-[11px] text-rose-700/80 dark:text-rose-400/80">
+                      {electionResultsData?.totalResponses ?? 0} total{" "}
+                      {(electionResultsData?.totalResponses ?? 0) === 1
+                        ? "vote"
+                        : "votes"}{" "}
+                      · updates as people vote
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-1 gap-3">
+                    {liveResultsPositions.map((p) => (
+                      <PositionStats
+                        key={p.positionId}
+                        position={p}
+                        totalResponses={electionResultsData?.totalResponses || 0}
+                      />
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          ) : null}
         </div>
       </main>
 
@@ -1742,7 +2027,7 @@ const FormResponses = () => {
           />
           <div className="relative z-10 w-full max-w-sm rounded-lg bg-white p-5 shadow-2xl dark:bg-stone-900">
             <h3 className="text-[15px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
-              Delete this response?
+              Delete this {isElection ? "vote" : "response"}?
             </h3>
             <p className="mt-1.5 text-[12.5px] leading-relaxed text-stone-500 dark:text-stone-400">
               This can't be undone. The stats will update immediately.

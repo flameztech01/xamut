@@ -1,24 +1,20 @@
 // controllers/formAiController.js
 //
 // Conversational form builder. Four modes: create, edit, collaborators,
-// respond. State lives in Mongo so a slow turn or a page reload doesn't
-// lose the thread.
+// respond. State lives in Mongo.
 //
-// This file exports both the HTTP handlers (for the standalone form-ai
-// API) AND the core helpers (startFormSessionCore, answerQuestionCore,
-// publicSession) so aiController can drive the same flow from inside
-// chat without duplicating any logic.
+// IMPORTANT: This file does NOT hardcode field types, form types,
+// setting keys, or features. Everything comes from
+// ../config/formCapabilities.js. To teach the AI about a new form
+// feature, add it to that file — no change needed here.
 //
-// Behaviour notes (v2):
-//   • The AI drafts by default. It only asks questions when the prompt
-//     is genuinely under-specified, and it may ask at most MAX_QUESTIONS
-//     across a whole session.
-//   • Questions are dynamic. Their options reference the user's actual
-//     request, never a generic menu of "survey / quiz / form" defaults.
-//   • The AI fills in EVERYTHING when drafting: validation, options,
-//     scoring, required flags, placeholders. Drafts come out publish-ready.
-//   • Media fields: `image` for photos, `document` for PDFs/CVs/etc,
-//     `file` only when the user wants "any file" and hasn't narrowed it.
+// ── Election handling ────────────────────────────────────────────
+// Creating an election is CHEAPER than creating a normal form.
+// Obvious election requests skip the giant general schema prompt
+// entirely and go straight to extractElectionDraft() — a lean,
+// purpose-built ~300-token prompt that only knows how to build
+// elections. One cheap call, no back-to-back heavy calls, no
+// rate-limit trips, no "0 positions" dead screens.
 
 import asyncHandler from "express-async-handler";
 import mongoose from "mongoose";
@@ -31,6 +27,19 @@ import User from "../models/userModel.js";
 import { groqJSONFast } from "../utils/xamutAI.js";
 import { sendEmailSafe } from "../utils/sendMail.js";
 
+import {
+  FORM_TYPE_IDS,
+  FIELD_TYPES,
+  isChoiceType,
+  isMediaType,
+  isLayoutType,
+  SETTINGS_KEYS,
+  FEATURES,
+  buildSchemaDocForAI,
+  coerceToValidation,
+  emptyValidation,
+} from "../config/formCapabilities.js";
+
 // ─────────────────────────────────────────────────────────────────────
 // Small helpers
 // ─────────────────────────────────────────────────────────────────────
@@ -39,6 +48,8 @@ const isObjectId = (id) => mongoose.Types.ObjectId.isValid(id);
 const genFieldId = () => `f_${crypto.randomBytes(4).toString("hex")}`;
 const genOptionId = () => `o_${crypto.randomBytes(3).toString("hex")}`;
 const genQuestionId = () => `q_${crypto.randomBytes(3).toString("hex")}`;
+const genPositionId = () => `p_${crypto.randomBytes(4).toString("hex")}`;
+const genCandidateId = () => `c_${crypto.randomBytes(4).toString("hex")}`;
 
 const httpError = (msg, statusCode = 400) => {
   const err = new Error(msg);
@@ -49,27 +60,15 @@ const httpError = (msg, statusCode = 400) => {
 const frontendUrl = () => (process.env.FRONTEND_URL || "").replace(/\/$/, "");
 
 // ─────────────────────────────────────────────────────────────────────
-// Field / settings sanitizers
+// Sanitizers — driven by the capability registry
 // ─────────────────────────────────────────────────────────────────────
-const FIELD_TYPES = new Set([
-  "short_text", "long_text", "email", "number", "date", "time",
-  "url", "phone", "radio", "checkbox", "dropdown", "multi_select",
-  "rating", "scale", "yes_no",
-  "file", "image", "document",
-  "section",
-]);
-
-const CHOICE_TYPES = new Set(["radio", "checkbox", "dropdown", "multi_select"]);
-
-// Media fields collect uploaded files. They need `maxFiles` set so the
-// editor and the respondent UI know how many attachments to allow.
-const MEDIA_TYPES = new Set(["file", "image", "document"]);
 
 const sanitizeFields = (fields) => {
   if (!Array.isArray(fields)) return [];
   return fields.map((f, idx) => {
-    const type = FIELD_TYPES.has(f?.type) ? f.type : "short_text";
-    const isMedia = MEDIA_TYPES.has(type);
+    const rawType = f?.type;
+    const type = FIELD_TYPES[rawType] ? rawType : "short_text";
+    const def = FIELD_TYPES[type];
 
     const field = {
       id: typeof f.id === "string" && f.id ? f.id : genFieldId(),
@@ -81,18 +80,10 @@ const sanitizeFields = (fields) => {
       order: typeof f.order === "number" ? f.order : idx,
       options: [],
       scoring: { correct: [], points: 0 },
-      validation: {
-        min: null,
-        max: null,
-        minLength: null,
-        maxLength: null,
-        pattern: null,
-        // Only meaningful for file / image / document. Defaults to 1.
-        maxFiles: isMedia ? 1 : null,
-      },
+      validation: coerceToValidation(type, f.validation),
     };
 
-    if (CHOICE_TYPES.has(type) && Array.isArray(f.options)) {
+    if (isChoiceType(type) && Array.isArray(f.options)) {
       field.options = f.options.map((o, i) => ({
         id: typeof o.id === "string" && o.id ? o.id : genOptionId(),
         label: String(o.label ?? `Option ${i + 1}`).slice(0, 200),
@@ -100,34 +91,21 @@ const sanitizeFields = (fields) => {
       }));
     }
 
-    const scoringEligible = [
-      "radio", "checkbox", "dropdown", "multi_select",
-      "short_text", "long_text", "yes_no",
-    ].includes(type);
+    const scoringEligible =
+      isChoiceType(type) ||
+      type === "short_text" ||
+      type === "long_text" ||
+      type === "yes_no";
 
     if (scoringEligible && f.scoring) {
       const correct = Array.isArray(f.scoring.correct)
         ? f.scoring.correct
-        : f.scoring.correct != null ? [f.scoring.correct] : [];
+        : f.scoring.correct != null
+        ? [f.scoring.correct]
+        : [];
       field.scoring = {
         correct: correct.map((c) => String(c).slice(0, 200)).slice(0, 20),
         points: Number(f.scoring.points) || 0,
-      };
-    }
-
-    if (f.validation) {
-      const v = f.validation;
-      field.validation = {
-        min: Number.isFinite(Number(v.min)) ? Number(v.min) : null,
-        max: Number.isFinite(Number(v.max)) ? Number(v.max) : null,
-        minLength: Number.isFinite(Number(v.minLength)) ? Number(v.minLength) : null,
-        maxLength: Number.isFinite(Number(v.maxLength)) ? Number(v.maxLength) : null,
-        pattern: typeof v.pattern === "string" ? v.pattern.slice(0, 300) : null,
-        maxFiles: isMedia
-          ? Number.isFinite(Number(v.maxFiles))
-            ? Math.min(10, Math.max(1, Number(v.maxFiles)))
-            : 1
-          : null,
       };
     }
 
@@ -135,124 +113,284 @@ const sanitizeFields = (fields) => {
   });
 };
 
-const sanitizeSettings = (s = {}) => ({
-  collectEmail: !!s.collectEmail,
-  allowMultipleSubmissions: !!s.allowMultipleSubmissions,
-  shuffleQuestions: !!s.shuffleQuestions,
-  showProgressBar: s.showProgressBar !== false,
-  confirmationMessage:
-    typeof s.confirmationMessage === "string"
-      ? s.confirmationMessage.slice(0, 1000)
-      : "Thanks, your response has been recorded.",
-  successRedirectUrl:
-    typeof s.successRedirectUrl === "string" ? s.successRedirectUrl.slice(0, 500) : "",
-  theme: typeof s.theme === "string" ? s.theme.slice(0, 50) : "default",
-  primaryColor: typeof s.primaryColor === "string" ? s.primaryColor.slice(0, 20) : "",
-  showScoreImmediately: !!s.showScoreImmediately,
-  passPercentage: Number.isFinite(Number(s.passPercentage))
-    ? Math.max(0, Math.min(100, Number(s.passPercentage)))
-    : 0,
-});
-
-// ─────────────────────────────────────────────────────────────────────
-// The schema spec fed to the AI
-// ─────────────────────────────────────────────────────────────────────
-const FORM_SCHEMA_SPEC = `
-A Form document has this shape:
-
-{
-  "title": "string",
-  "description": "string",
-  "type": "form" | "quiz" | "survey" | "feedback" | "attendance",
-  "visibility": "public" | "private",
-  "fields": [ Field, ... ],
-  "settings": Settings,
-  "isMultipage": boolean
-}
-
-A Field is:
-{
-  "id": "f_xxxxxxxx",
-  "type": one of:
-      short_text | long_text | email | number | date | time | url |
-      phone | radio | checkbox | dropdown | multi_select |
-      rating | scale | yes_no |
-      file | image | document |
-      section,
-  "label": "string",
-  "description": "string",
-  "placeholder": "string",
-  "required": boolean,
-  "order": number,
-  "options": [
-    { "id": "o_xxxx", "label": "string", "value": "string" }
-  ],
-  "validation": {
-    "min": number | null,
-    "max": number | null,
-    "minLength": number | null,
-    "maxLength": number | null,
-    "pattern": string | null,
-    "maxFiles": number | null
-  },
-  "scoring": {
-    "correct": ["value", ...],
-    "points": number
+// Generic settings sanitizer driven by SETTINGS_KEYS
+const sanitizeSettings = (raw = {}) => {
+  const out = {};
+  for (const [key, spec] of Object.entries(SETTINGS_KEYS)) {
+    const v = raw[key];
+    if (spec.type === "boolean") {
+      out[key] = v == null ? spec.default : !!v;
+    } else if (spec.type === "number") {
+      const n = Number(v);
+      const fallback = spec.default ?? 0;
+      let value = Number.isFinite(n) ? n : fallback;
+      if (spec.min != null) value = Math.max(spec.min, value);
+      if (spec.max != null) value = Math.min(spec.max, value);
+      out[key] = value;
+    } else if (spec.type === "array") {
+      out[key] = Array.isArray(v) ? v : spec.default ?? [];
+    } else {
+      // string
+      out[key] =
+        typeof v === "string"
+          ? v.slice(0, spec.max || 1000)
+          : spec.default ?? "";
+    }
   }
+  // requestFields: sanitize each entry if present
+  if (Array.isArray(raw.requestFields)) {
+    out.requestFields = raw.requestFields
+      .slice(0, 10)
+      .map((rf, idx) => ({
+        id: typeof rf.id === "string" && rf.id ? rf.id : genFieldId(),
+        label: String(rf.label || `Field ${idx + 1}`).slice(0, 200),
+        type: ["short_text", "long_text", "email", "number", "phone", "url", "date"].includes(
+          rf.type
+        )
+          ? rf.type
+          : "short_text",
+        required: !!rf.required,
+        placeholder: String(rf.placeholder || "").slice(0, 200),
+        order: typeof rf.order === "number" ? rf.order : idx,
+      }));
+  } else {
+    out.requestFields = [];
+  }
+  return out;
+};
+
+// Election positions sanitizer — driven by FEATURES.positions
+const sanitizePositions = (positions) => {
+  if (!Array.isArray(positions)) return [];
+  return positions.map((p, idx) => {
+    const maxSel = Number.isFinite(Number(p.maxSelections))
+      ? Math.max(1, Math.min(20, Number(p.maxSelections)))
+      : 1;
+    return {
+      id: typeof p.id === "string" && p.id ? p.id : genPositionId(),
+      title: String(p.title || `Position ${idx + 1}`).slice(0, 200),
+      description: String(p.description || "").slice(0, 1000),
+      maxSelections: maxSel,
+      required: p.required !== false,
+      order: typeof p.order === "number" ? p.order : idx,
+      candidates: Array.isArray(p.candidates)
+        ? p.candidates.map((c, i) => ({
+            id: typeof c.id === "string" && c.id ? c.id : genCandidateId(),
+            name: String(c.name || "").slice(0, 200),
+            bio: String(c.bio || "").slice(0, 2000),
+            manifesto: String(c.manifesto || "").slice(0, 5000),
+            photoUrl: String(c.photoUrl || "").slice(0, 1000),
+            slogan: String(c.slogan || "").slice(0, 200),
+            metadata:
+              c.metadata && typeof c.metadata === "object" ? c.metadata : {},
+            order: typeof c.order === "number" ? c.order : i,
+          }))
+        : [],
+    };
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// The schema spec — generated from the registry, not hardcoded.
+// ─────────────────────────────────────────────────────────────────────
+const FORM_SCHEMA_SPEC = buildSchemaDocForAI();
+
+// ─────────────────────────────────────────────────────────────────────
+// ELECTION FAST PATH
+//
+// The general form-building prompt is huge — it has to teach the
+// model every field type, feature, setting, plus the shape of a
+// position and a worked example. Small models lose the "positions"
+// tail when they have to hold all of that at once, and the failure
+// mode is type="election" with positions:[].
+//
+// Fix: for obvious election requests on a fresh create, skip the
+// giant prompt entirely and call a lean, purpose-built extractor.
+// One cheap call, no back-to-back heavy calls, no rate-limit trips.
+// ─────────────────────────────────────────────────────────────────────
+
+const ELECTION_INTENT_RE =
+  /\b(election|elect|vote|voting|voter|ballot|candidate|candidates|position|president|chairman|chairperson|treasurer|secretary|governor|senator|mayor|captain|leader|running mate|contest)\b/i;
+
+// Pull a rough title out of the prompt for the fallback case where
+// the extractor fails. Best-effort — the user can rename later.
+function deriveElectionTitle(prompt) {
+  const firstLine = String(prompt || "")
+    .split(/\n/)[0]
+    .trim();
+  if (!firstLine) return "Election";
+  const cleaned = firstLine
+    .replace(
+      /^(i\s+need|i\s+want|make|create|build|give\s+me|set\s+up)\s+(me\s+)?(an?\s+)?/i,
+      ""
+    )
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return "Election";
+  const capped =
+    cleaned.length > 60 ? cleaned.slice(0, 57) + "..." : cleaned;
+  return capped[0].toUpperCase() + capped.slice(1);
 }
 
-A Settings is:
+// Best-effort candidate name extraction for the fallback case.
+// Looks for a line with commas/and whose parts start with capitals.
+function guessCandidateNames(prompt) {
+  const lines = String(prompt || "")
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (!/,/.test(line) && !/\band\b/i.test(line)) continue;
+    if (/^(i\s+need|i\s+want|make|create|build|give|set)/i.test(line) && !/,/.test(line))
+      continue;
+
+    const cleaned = line
+      .replace(/\b(are|is)\s+(the\s+)?candidates?\b.*$/i, "")
+      .replace(/\bcandidates?\s*[:–-]\s*/i, "")
+      .trim();
+
+    const parts = cleaned
+      .split(/\s*,\s*|\s+and\s+/i)
+      .map((p) => p.trim())
+      .filter((p) => p.length >= 2 && p.length < 60 && /^[A-Z]/.test(p));
+
+    if (parts.length >= 2) return parts;
+  }
+  return [];
+}
+
+// Best-effort position title extraction for the fallback case.
+function guessPositionTitle(prompt) {
+  const m = String(prompt || "").match(
+    /\b(president|chairman|chairperson|chair|secretary|treasurer|governor|senator|mayor|captain|leader|director|prefect)\b/i
+  );
+  if (!m) return "Position 1";
+  const w = m[1].toLowerCase();
+  return w[0].toUpperCase() + w.slice(1);
+}
+
+// Build a minimal but valid election draft when the extractor fails.
+// Always has one position with at least one candidate, so the panel
+// shows something creatable and the user isn't stuck on a dead screen.
+function buildPlaceholderElectionDraft(userPrompt) {
+  const title = guessPositionTitle(userPrompt);
+  const names = guessCandidateNames(userPrompt);
+  const candidates =
+    names.length > 0
+      ? names.map((n, i) => ({
+          id: genCandidateId(),
+          name: n,
+          bio: "",
+          manifesto: "",
+          photoUrl: "",
+          slogan: "",
+          order: i,
+        }))
+      : [
+          {
+            id: genCandidateId(),
+            name: "",
+            bio: "",
+            manifesto: "",
+            photoUrl: "",
+            slogan: "",
+            order: 0,
+          },
+        ];
+
+  return {
+    title: deriveElectionTitle(userPrompt),
+    description: "",
+    type: "election",
+    visibility: "public",
+    fields: [],
+    positions: [
+      {
+        id: genPositionId(),
+        title,
+        description: "",
+        maxSelections: 1,
+        required: true,
+        order: 0,
+        candidates,
+      },
+    ],
+    settings: {},
+    isMultipage: false,
+    startAt: null,
+    expiresAt: null,
+  };
+}
+
+// Lean election extractor. Only knows how to build elections. Fits
+// in a few hundred tokens, so it can't get lost.
+async function extractElectionDraft({ userPrompt, history = [] }) {
+  const historyLines = history
+    .slice(-6)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map(
+      (m) =>
+        `${m.role.toUpperCase()}: ${String(m.content || "").slice(0, 400)}`
+    )
+    .join("\n");
+
+  const system = `You build election forms. Given a user's request, return ONE JSON object with EXACTLY this shape:
+
 {
-  "collectEmail": boolean,
-  "allowMultipleSubmissions": boolean,
-  "shuffleQuestions": boolean,
-  "showProgressBar": boolean,
-  "confirmationMessage": "string",
-  "successRedirectUrl": "string",
-  "showScoreImmediately": boolean,
-  "passPercentage": number
+  "title": "string (short, human, e.g. 'NACCOS President Election')",
+  "description": "string (one short line, e.g. 'Vote for the next NACCOS President.')",
+  "positions": [
+    {
+      "id": "string starting with p_",
+      "title": "string (e.g. 'President')",
+      "description": "string (can be \\"\\")",
+      "maxSelections": 1,
+      "required": true,
+      "order": 0,
+      "candidates": [
+        { "id": "string starting with c_", "name": "string", "order": 0 }
+      ]
+    }
+  ]
 }
 
-Rules for fields:
-- A "section" is a divider. It has a label and description but no
-  options, no required flag, no validation, no scoring.
-- Every choice field (radio / checkbox / dropdown / multi_select) must
-  have at least two options, with stable ids and non-empty, lowercase,
-  space-free values (use snake_case or kebab-case).
-- For quizzes, populate scoring.correct with the correct option.value(s)
-  and set points per question (default 1 per question).
-- Text fields MUST have sensible minLength and maxLength. Never leave
-  both null.
-- Number, rating, and scale fields MUST have min and max set. Rating
-  defaults 1-5, scale defaults 1-10, plain numbers are context-specific.
-- Email, URL, and phone fields do not need min/max.
-- Labels must be short and human. Never duplicate the label text into
-  the description. Never use placeholders like "Question 1" or
-  "Option A" unless the user explicitly asked for filler.
-- Every field in a draft must be publish-ready. Real content, real
-  validation, real options.
+ABSOLUTE RULES (breaking any of these fails the task):
+1. "positions" MUST be a NON-EMPTY array. Never [].
+2. Every position MUST have "candidates" as a NON-EMPTY array.
+3. If the user names any candidates, use those EXACT names, EXACT spelling. One candidate object per name.
+4. Never invent candidate names. If none were given, use one candidate with name "".
+5. If the user names a single role ("president", "chairman"), produce ONE position with that title.
+6. If the user names multiple roles, produce ONE position per role.
+7. maxSelections is 1 unless the user explicitly says "pick N" or "vote for N".
 
-Media fields (file | image | document) — read this carefully:
-- "image"   → collect photos, pictures, screenshots, selfies, product
-              shots, artwork, posters, receipts photographed, etc.
-              Set validation.maxFiles (1 for a single upload, up to 10).
-- "document"→ collect PDFs, Word docs, CVs, résumés, spreadsheets,
-              slide decks, essays, invoices, contracts, ID scans, etc.
-              Set validation.maxFiles (1 for a single upload, up to 10).
-- "file"    → generic catch-all. Only use when the user asked for
-              "any file" and hasn't narrowed it down. Set maxFiles.
-- Media fields have NO options, NO scoring, NO min/max/minLength/
-  maxLength. Only validation.maxFiles matters.
-- Add a short, helpful description so respondents know what to upload
-  and any size/format expectations (e.g. "PDF only, max 5MB").
+Return ONLY the JSON object. No markdown. No commentary.`;
 
-Settings notes:
-- "successRedirectUrl" is where respondents go after submitting. Use
-  it when the user mentions a WhatsApp group, Telegram channel, a
-  thank-you page, a website, or any post-submission destination.
-- "confirmationMessage" is shown briefly before any redirect, so keep
-  it short and warm.
-`;
+  const user = [
+    historyLines ? `Recent conversation:\n${historyLines}\n` : "",
+    `User request:\n${userPrompt}`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const result = await groqJSONFast({
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+    temperature: 0.1,
+    maxTokens: 1500,
+  });
+
+  return result;
+}
+
+function positionsAreGood(positions) {
+  if (!Array.isArray(positions) || positions.length === 0) return false;
+  return positions.every(
+    (p) => Array.isArray(p.candidates) && p.candidates.length > 0
+  );
+}
 
 // ─────────────────────────────────────────────────────────────────────
 // The core AI call
@@ -266,6 +404,54 @@ export async function askFormAi({
   questionCount = 0,
   forceReady = false,
 }) {
+  // ── Fast path: obvious election create ────────────────────────
+  // Skip the giant general schema prompt. Call the lean extractor
+  // once. If it works, done. If it fails, hand back a minimal
+  // placeholder so the user still has something creatable —
+  // NEVER fire a second heavy model call in this branch.
+  if (mode === "create" && ELECTION_INTENT_RE.test(userPrompt)) {
+    let extracted = null;
+    try {
+      extracted = await extractElectionDraft({ userPrompt, history });
+    } catch (err) {
+      console.warn(
+        "⚠️ Election extractor threw, using placeholder:",
+        err.message
+      );
+    }
+
+    if (positionsAreGood(extracted?.positions)) {
+      console.log(
+        `✅ Election fast path — ${extracted.positions.length} position(s).`
+      );
+      return {
+        kind: "draft",
+        draft: {
+          title: extracted.title || deriveElectionTitle(userPrompt),
+          description: extracted.description || "",
+          type: "election",
+          visibility: "public",
+          fields: [],
+          positions: extracted.positions,
+          settings: {},
+          isMultipage: false,
+          startAt: null,
+          expiresAt: null,
+        },
+        reasoning: "Election draft",
+      };
+    }
+
+    console.warn(
+      "⚠️ Election extractor returned no positions — using placeholder draft."
+    );
+    return {
+      kind: "draft",
+      draft: buildPlaceholderElectionDraft(userPrompt),
+      reasoning: "Election draft (placeholder — edit to finish)",
+    };
+  }
+
   const MAX_QUESTIONS = 3;
   const questionsLeft = Math.max(0, MAX_QUESTIONS - questionCount);
 
@@ -279,127 +465,78 @@ message is almost always enough to build something good.
 DEFAULT BEHAVIOUR:
 - If the message gives you ANY signal about the form's purpose, topic,
   type, audience, or content, produce the full draft IMMEDIATELY.
-- Fill in every detail yourself: title, description, field labels,
-  placeholders, required flags, validation (min, max, minLength,
-  maxLength, maxFiles for media fields), options for choice fields,
-  scoring for quizzes, confirmation message, settings. Everything.
-- Drafts must be publish-ready. No placeholder text. No "TBD". No
-  "Question 1" labels.
+- Fill in every detail yourself. The schema spec below lists every
+  field type, every feature, every setting. Use them.
+- Drafts must be publish-ready. No placeholder text. No "TBD".
 
 WHEN TO ASK (the escape hatch, not the default):
 - Only when the request is so vague you'd be inventing the entire
-  form from nothing (e.g. "make me a form" with literally nothing
-  else, or "set up something for the thing").
-- You may ask up to ${MAX_QUESTIONS} questions total across this
-  session. You have already asked ${questionCount}. You have
-  ${questionsLeft} left.
-- Never ask more than one question per turn.
-- Once ${questionsLeft} reaches 0, you MUST produce the draft. No
-  more questions.
+  form from nothing.
+- Up to ${MAX_QUESTIONS} questions total. You've asked ${questionCount}.
+  You have ${questionsLeft} left.
+- Never ask more than one per turn.
+- Once ${questionsLeft} reaches 0, draft no matter what.
 
-WHAT NOT TO ASK ABOUT (already known or inferable):
-- Type — infer from context. "Exam" → quiz. "RSVP" → form. "Feedback
-  on the workshop" → feedback. Do not ask "what type of form is this?"
-  when the answer is sitting in the sentence.
-- Audience — infer from context. "My students" → students. "The team"
-  → team members. Do not ask.
-- Topic — it's in the message. Do not ask for it back.
-- Anything you were already told in a previous turn of this session.
+WHAT NOT TO ASK ABOUT:
+- Type, audience, or topic — infer them.
+- Anything you were already told in a previous turn.
+- Cover photo. The user adds that from the editor afterwards.
+- Redirect URL, unless the user didn't already give one. The app asks
+  about it after the draft.
 
-MEDIA FIELDS — use them when the content calls for them:
-- If the request is about collecting photos (photos of a product, a
-  recipe, a selfie, an artwork, a screenshot, a receipt), use type
-  "image".
-- If the request is about collecting documents (a CV, a résumé, an
-  application form, an assignment, an invoice, an essay, a PDF), use
-  type "document".
-- Use "file" only when the user wants "any file" and hasn't narrowed
-  it down.
-- Set validation.maxFiles (1 for one upload, more if they want
-  several). Add a short description telling the respondent what to
-  attach (e.g. "PDF only, one file, max 5MB").
+MEDIA FIELDS: the schema spec lists "image", "document" and "file".
+Use them when the request calls for them.
 
-DO NOT ASK ABOUT:
-- Cover photo. The user adds that from the editor after the form
-  exists. You cannot upload it. Do not ask.
-- Redirect URL. Do not ask about it either — the app handles that
-  in a follow-up message after you draft. If the user's original
-  request ALREADY mentions a destination (WhatsApp group, Telegram,
-  thank-you page, website), set settings.successRedirectUrl directly
-  in the draft. Otherwise leave it empty.
-
-QUESTION QUALITY (when you do ask):
-- Questions must be specific to THIS request. If the user said "sign-up
-  sheet for the team BBQ", a good question is "What info should each
-  person provide? (name only / name + dietary / name + dietary + guests
-  / all of that plus phone)". A bad question is "What type of form is
-  this?".
-- Options must be concrete and tailored, 3-5 of them, with a real
-  "other" escape.
-- Never re-ask for information already given.
-
-Tone: a competent colleague who hears "sign-up sheet for the BBQ" and
-just makes one. Not a wizard asking what a sign-up sheet is.
+Tone: a competent colleague. Not a wizard.
 `,
     edit: `
 MODE: EDIT AN EXISTING FORM
 
-The user has an existing form (see the JSON below). They've described a
-change. Apply it and return the FULL updated form as a draft.
+Apply the user's change and return the FULL updated form as a draft.
 
 RULES:
 - Return the full form, not a diff.
-- Preserve existing field ids when editing in place so prior responses
-  stay attached to the right question.
-- Do not drop fields the user didn't ask to remove.
-- Any new field must be fully specified the same way a create draft is
-  (validation, options, required flag, placeholder, etc). This includes
-  media fields: set validation.maxFiles and a good description.
-- If the user asks to add a redirect URL, set settings.successRedirectUrl.
-- Ask a clarifying question ONLY if the request is genuinely ambiguous
-  and you cannot pick a sensible default (e.g. "change the colors" with
-  no colors named). At most one question, and only if you have
-  questions left this session.
-- You have ${questionsLeft} clarifying question(s) left this session.
-- Once ${questionsLeft} reaches 0, you MUST draft with your best
-  interpretation. Pick a sensible default and note it in changeSummary.
+- Preserve existing ids (fields, positions, candidates) so responses
+  stay attached.
+- Do not drop anything the user didn't ask to remove.
+- Any new field or position must be fully specified.
+- Ask a question ONLY if the change is genuinely ambiguous. You have
+  ${questionsLeft} question(s) left this session.
+- Once ${questionsLeft} reaches 0, draft with your best interpretation.
+- If the target form is type="election", the updated draft must still
+  have type="election" and a non-empty "positions" array.
 `,
     collaborators: `
 MODE: ADD COLLABORATORS
 
-The user has a form (see below) and wants to add people as collaborators.
-Extract each email address and role (editor or viewer). Default to
-"editor" if role isn't stated. Return kind="collaborators".
+The user has a form (see below) and wants to add people as
+collaborators. Extract each email and role (editor or viewer). Default
+to "editor". Return kind="collaborators".
 `,
     respond: `
 MODE: COMPOSE EMAILS TO RESPONDENTS
 
-The user has a form and wants to send emails to some or all people who
-filled it out. See the responses below. Compose ONE email template
-personalized per recipient with these placeholders:
-
-  {{name}}  {{email}}  {{score}}  {{maxScore}}  {{percentage}}
-  {{passed}}  {{duration}}  {{submittedAt}}
-
+The user has a form and wants to email some or all respondents.
+Compose ONE template with placeholders:
+  {{name}} {{email}} {{score}} {{maxScore}} {{percentage}}
+  {{passed}} {{duration}} {{submittedAt}}
 Return kind="emails".
 `,
   };
 
   const schemaHints = {
     create: `
-Return STRICT JSON. Two possible shapes.
+Return STRICT JSON. Two shapes.
 
-DRAFT (this is what you return ~90% of the time):
-
+DRAFT (return this ~90% of the time):
 {
   "kind": "draft",
-  "draft": { ...full form per schema above... },
-  "reasoning": "one short sentence on what you built"
+  "draft": { ...full form per schema spec... },
+  "reasoning": "one short sentence"
 }
 
-QUESTION (only when the request is genuinely too vague to draft, and
-only while you still have questions left):
-
+QUESTION (only when the request is too vague to draft, and only while
+questionsLeft > 0):
 {
   "kind": "question",
   "question": {
@@ -407,63 +544,22 @@ only while you still have questions left):
     "text": "specific question referencing their actual request",
     "helper": "optional one-line explanation",
     "options": [
-      { "id": "o_1", "label": "Concrete option A", "value": "a" },
-      { "id": "o_2", "label": "Concrete option B", "value": "b" }
+      { "id": "o_1", "label": "Concrete option A", "value": "a" }
     ],
     "allowOther": true,
-    "otherLabel": "Something else",
     "otherPlaceholder": "Describe it",
     "multiSelect": false
   }
 }
-
-Draft rules — apply to every single draft:
-- Title: short, real, taken from the user's request.
-- Description: one sentence on what the form is for.
-- Fields: usually 4-10 depending on complexity. Do not pad. Do not
-  under-build either — a real exam has real questions.
-- Every field MUST have: label, description (optional), placeholder
-  (for text inputs), required flag, and full validation.
-- Text fields: set minLength and maxLength (names 1-80, paragraphs
-  10-2000, etc). Never leave both null.
-- Number / rating / scale: set min and max. Rating 1-5. Scale 1-10.
-  Number is context-specific (e.g. age 0-120).
-- Choice fields: 3-6 options with clean lowercase values
-  (snake_case or kebab-case, no spaces).
-- Media fields (file / image / document): set validation.maxFiles
-  (1 for one upload, up to 10 if they want several), write a clear
-  description telling the respondent what to attach.
-- Quiz scoring: populate scoring.correct with the correct
-  option.value(s) and set points (default 1 per question).
-- Required: true for essential fields, false for clearly optional ones.
-- Settings: set sensible defaults — collectEmail if the form collects
-  contact info, allowMultipleSubmissions false for exams, true for
-  feedback, showProgressBar true for forms with 5+ fields,
-  showScoreImmediately true for quizzes, passPercentage 60 for quizzes
-  unless the user specified one. If the user mentioned a destination
-  for after submission (WhatsApp group, Telegram, website, thank-you
-  page), set settings.successRedirectUrl to that URL.
-
-Question rules — apply to every question:
-- Exactly one question.
-- 3-5 concrete options, each referencing the user's actual request.
-- Set allowOther=true unless the options are exhaustive beyond doubt.
-- Never ask about type, audience, or topic — infer them.
-- Never ask about cover photos or redirect URLs — those are handled
-  by the app after the draft.
 `,
     edit: `
 Return STRICT JSON, one of:
-
 {
   "kind": "draft",
   "draft": { ...the FULL updated form... },
-  "changeSummary": "one short sentence on what changed"
+  "changeSummary": "one short sentence"
 }
-
-or, ONLY if the change is genuinely ambiguous AND you still have
-questions left:
-
+or, only if genuinely ambiguous AND questionsLeft > 0:
 {
   "kind": "question",
   "question": { ...same shape as create... }
@@ -471,27 +567,21 @@ questions left:
 `,
     collaborators: `
 Return STRICT JSON:
-
 {
   "kind": "collaborators",
   "collaborators": [
     { "email": "a@b.com", "role": "editor", "name": "" }
   ],
-  "notes": "one short sentence on what you're adding"
+  "notes": "one short sentence"
 }
-
-or, if the message doesn't contain usable emails:
-
+Or, if no usable emails:
 {
   "kind": "question",
   "question": {
     "id": "q_xxx",
     "text": "Paste the emails to add",
-    "options": [
-      { "id": "o_1", "label": "Enter emails", "value": "__other__", "isOther": true }
-    ],
+    "options": [],
     "allowOther": true,
-    "otherLabel": "Enter emails",
     "otherPlaceholder": "alice@x.com, bob@y.com",
     "multiSelect": false
   }
@@ -499,41 +589,36 @@ or, if the message doesn't contain usable emails:
 `,
     respond: `
 Return STRICT JSON:
-
 {
   "kind": "emails",
   "subject": "string with placeholders",
   "body": "string with placeholders",
   "recipients": [
-    {
-      "responseId": "...",
-      "email": "a@b.com",
-      "name": "Alice",
-      "previewSubject": "the rendered subject for this recipient",
-      "previewBody": "the rendered body for this recipient"
-    }
+    { "responseId": "...", "email": "a@b.com", "name": "Alice" }
   ],
-  "notes": "one short sentence about the tone/audience"
+  "notes": "one short sentence"
 }
 `,
   };
 
   const targetBlocks = [];
   if (targetForm) {
+    // Serialize the form in a way that automatically includes any new
+    // registry-driven fields (positions, startAt, expiresAt, everything).
+    const projected = {
+      _id: String(targetForm._id),
+      title: targetForm.title,
+      description: targetForm.description,
+      type: targetForm.type,
+      visibility: targetForm.visibility,
+      fields: targetForm.fields,
+      positions: targetForm.positions,
+      startAt: targetForm.startAt,
+      expiresAt: targetForm.expiresAt,
+      settings: targetForm.settings,
+    };
     targetBlocks.push(
-      `Target form (JSON):\n${JSON.stringify(
-        {
-          _id: String(targetForm._id),
-          title: targetForm.title,
-          description: targetForm.description,
-          type: targetForm.type,
-          visibility: targetForm.visibility,
-          fields: targetForm.fields,
-          settings: targetForm.settings,
-        },
-        null,
-        2
-      ).slice(0, 14000)}`
+      `Target form (JSON):\n${JSON.stringify(projected, null, 2).slice(0, 16000)}`
     );
   }
 
@@ -559,7 +644,6 @@ You are the AI engine behind a form builder. You help users design,
 edit, and use forms. You speak in short, direct sentences.
 
 You are biased toward action. Your default is to BUILD, not to ask.
-Users who wanted an interview would say so. When in doubt, draft.
 
 ${modeBlocks[mode] || modeBlocks.create}
 
@@ -569,13 +653,11 @@ ${schemaHints[mode] || schemaHints.create}
 
 Hard rules:
 - Return ONLY the JSON object. No markdown, no code fences, no commentary.
-- Question ids and option ids must be unique.
-- Use the exact "kind" values spelled above.
-- Never invent form fields the user didn't ask about unless they're
-  universally expected (title, description) or clearly implied by the
-  form's purpose (a "name" field on an RSVP, a "score" on a quiz).
-- Never include scoring unless the context is clearly a quiz or exam.
+- Question ids, option ids, position ids, candidate ids must be unique.
+- Use the exact "kind" values above.
 - Never ask a question when questionsLeft is 0. Draft instead.
+- Never include scoring unless the context is clearly a quiz.
+- Never invent real people as candidates. Empty names are fine.
 `.trim();
 
   const historyMessages = history
@@ -603,8 +685,8 @@ Hard rules:
     maxTokens: 4000,
   });
 
-  // Safety net — if the model asks a question anyway but we've hit the
-  // cap, force one more turn with an explicit draft demand.
+  // Safety net — if the model asked anyway when it shouldn't have,
+  // force one more turn demanding a draft.
   if (
     (questionsLeft === 0 || forceReady) &&
     result &&
@@ -615,14 +697,11 @@ Hard rules:
         { role: "system", content: system },
         ...historyMessages,
         { role: "user", content: userBlock },
-        {
-          role: "assistant",
-          content: JSON.stringify(result),
-        },
+        { role: "assistant", content: JSON.stringify(result) },
         {
           role: "user",
           content:
-            "You've used all your clarifying questions. Produce the draft now with your best judgement. Return only the JSON draft object.",
+            "You've used all your clarifying questions. Produce the draft now. Return only the JSON draft object.",
         },
       ],
       temperature: 0.4,
@@ -647,32 +726,39 @@ export const normalizeQuestion = (q) => {
         isOther: !!o.isOther,
       }))
     : [];
-  const allowOther = q.allowOther !== false;
   return {
     id: String(q.id || genQuestionId()),
     text: String(q.text || "Pick an option").slice(0, 300),
     helper: String(q.helper || "").slice(0, 300),
     options,
-    allowOther,
+    allowOther: q.allowOther !== false,
     otherLabel: String(q.otherLabel || "Other").slice(0, 80),
     otherPlaceholder: String(q.otherPlaceholder || "Type your answer").slice(0, 200),
     multiSelect: !!q.multiSelect,
-    minSelections: Number.isFinite(Number(q.minSelections)) ? Number(q.minSelections) : 0,
-    maxSelections: Number.isFinite(Number(q.maxSelections)) ? Number(q.maxSelections) : 0,
   };
 };
 
-export const normalizeDraft = (d = {}) => ({
-  title: String(d.title || "Untitled form").slice(0, 200),
-  description: String(d.description || "").slice(0, 2000),
-  type: ["form", "quiz", "survey", "feedback", "attendance"].includes(d.type)
-    ? d.type
-    : "form",
-  visibility: d.visibility === "private" ? "private" : "public",
-  fields: sanitizeFields(d.fields),
-  settings: sanitizeSettings(d.settings || {}),
-  isMultipage: !!d.isMultipage,
-});
+export const normalizeDraft = (d = {}) => {
+  // Registry-driven: only accept form types the registry declares.
+  const type = FORM_TYPE_IDS.includes(d.type) ? d.type : "form";
+  const isElection = type === "election";
+
+  return {
+    title: String(d.title || "Untitled form").slice(0, 200),
+    description: String(d.description || "").slice(0, 2000),
+    type,
+    visibility: d.visibility === "private" ? "private" : "public",
+    // Fields only for non-election forms
+    fields: isElection ? [] : sanitizeFields(d.fields),
+    // Positions only for election forms
+    positions: isElection ? sanitizePositions(d.positions) : [],
+    settings: sanitizeSettings(d.settings || {}),
+    isMultipage: !!d.isMultipage,
+    // Timing — passthrough, normalizer keeps values as ISO or null
+    startAt: d.startAt ? new Date(d.startAt).toISOString() : null,
+    expiresAt: d.expiresAt ? new Date(d.expiresAt).toISOString() : null,
+  };
+};
 
 export const normalizeCollaborators = (list = []) =>
   list
@@ -715,7 +801,7 @@ export function publicSession(session) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Core: apply the AI's response to the session state
+// Core: apply the AI's response
 // ─────────────────────────────────────────────────────────────────────
 async function applyAiResult({ session, ai, targetResponses = [] }) {
   if (!ai || typeof ai !== "object") {
@@ -752,7 +838,10 @@ async function applyAiResult({ session, ai, targetResponses = [] }) {
     session.messages.push({
       role: "assistant",
       content: ai.reasoning || ai.changeSummary || "Here's a draft.",
-      meta: { kind: "draft", changeSummary: ai.changeSummary || ai.reasoning || "" },
+      meta: {
+        kind: "draft",
+        changeSummary: ai.changeSummary || ai.reasoning || "",
+      },
     });
     await session.save();
     return publicSession(session);
@@ -784,35 +873,47 @@ async function applyAiResult({ session, ai, targetResponses = [] }) {
   if (ai.kind === "emails") {
     const subject = String(ai.subject || "").slice(0, 200);
     const body = String(ai.body || "").slice(0, 8000);
-    const recipients = [];
     const renderTemplate = (tpl, vars) =>
       String(tpl || "").replace(/\{\{\s*(\w+)\s*\}\}/g, (_, k) =>
         vars[k] == null ? "" : String(vars[k])
       );
     const buildVars = (r) => ({
-      name: r.respondentName || (r.respondentEmail ? r.respondentEmail.split("@")[0] : "there"),
+      name:
+        r.respondentName ||
+        (r.respondentEmail ? r.respondentEmail.split("@")[0] : "there"),
       email: r.respondentEmail || "",
       score: r.totalScore ?? "",
       maxScore: r.maxScore ?? "",
       percentage: r.percentage ?? "",
       passed:
-        r.passed === true ? "passed" : r.passed === false ? "did not pass" : "",
+        r.passed === true
+          ? "passed"
+          : r.passed === false
+          ? "did not pass"
+          : "",
       duration: r.durationSeconds ? `${r.durationSeconds}s` : "",
-      submittedAt: r.submittedAt ? new Date(r.submittedAt).toLocaleDateString() : "",
+      submittedAt: r.submittedAt
+        ? new Date(r.submittedAt).toLocaleDateString()
+        : "",
     });
 
-    for (const r of targetResponses) {
+    const recipients = targetResponses.map((r) => {
       const vars = buildVars(r);
-      recipients.push({
+      return {
         responseId: String(r._id),
         email: r.respondentEmail || "",
         name: r.respondentName || "",
         previewSubject: renderTemplate(subject, vars),
         previewBody: renderTemplate(body, vars),
-      });
-    }
+      };
+    });
 
-    session.draftEmails = { subject, bodyTemplate: body, overrides: [], recipients };
+    session.draftEmails = {
+      subject,
+      bodyTemplate: body,
+      overrides: [],
+      recipients,
+    };
     session.pendingQuestion = null;
     session.awaitingConfirm = true;
     session.status = "previewing";
@@ -831,7 +932,7 @@ async function applyAiResult({ session, ai, targetResponses = [] }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// CORE: start a session and get the first AI response
+// CORE: start session
 // ─────────────────────────────────────────────────────────────────────
 export async function startFormSessionCore({
   userId,
@@ -869,7 +970,9 @@ export async function startFormSessionCore({
     const filter = { form: targetForm._id };
     if (Array.isArray(responseIds) && responseIds.length) {
       filter._id = {
-        $in: responseIds.filter(isObjectId).map((x) => new mongoose.Types.ObjectId(x)),
+        $in: responseIds
+          .filter(isObjectId)
+          .map((x) => new mongoose.Types.ObjectId(x)),
       };
     }
     targetResponses = await FormResponse.find(filter)
@@ -906,14 +1009,16 @@ export async function startFormSessionCore({
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// CORE: answer the current pending question
+// CORE: answer current pending question
 // ─────────────────────────────────────────────────────────────────────
 const answerToUserText = (question, answer) => {
   if (!answer) return "(no answer)";
   const parts = [];
   const pickedIds = Array.isArray(answer.optionIds)
     ? answer.optionIds
-    : answer.optionId ? [answer.optionId] : [];
+    : answer.optionId
+    ? [answer.optionId]
+    : [];
   const pickedLabels = [];
   for (const id of pickedIds) {
     const opt = question.options.find((o) => o.id === id);
@@ -930,9 +1035,11 @@ const answerToUserText = (question, answer) => {
 
 export async function answerQuestionCore({ userId, sessionId, answer }) {
   if (!isObjectId(sessionId)) throw httpError("Invalid session id.", 400);
-  const session = await FormAiSession.findOne({ _id: sessionId, user: userId });
+  const session = await FormAiSession.findOne({
+    _id: sessionId,
+    user: userId,
+  });
   if (!session) throw httpError("Session not found.", 404);
-
   if (session.status !== "collecting") {
     throw httpError("This session is no longer collecting answers.", 409);
   }
@@ -941,12 +1048,17 @@ export async function answerQuestionCore({ userId, sessionId, answer }) {
   }
 
   const userText = answerToUserText(session.pendingQuestion, answer);
-  session.messages.push({ role: "user", content: userText, meta: { answer: true } });
+  session.messages.push({
+    role: "user",
+    content: userText,
+    meta: { answer: true },
+  });
   session.pendingQuestion = null;
 
   let targetForm = null;
   let targetResponses = [];
-  if (session.targetFormId) targetForm = await Form.findById(session.targetFormId);
+  if (session.targetFormId)
+    targetForm = await Form.findById(session.targetFormId);
   if (session.mode === "respond" && session.targetResponseIds.length) {
     targetResponses = await FormResponse.find({
       _id: { $in: session.targetResponseIds },
@@ -966,11 +1078,14 @@ export async function answerQuestionCore({ userId, sessionId, answer }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// CORE: regenerate draft from free-text feedback
+// CORE: regenerate draft from feedback
 // ─────────────────────────────────────────────────────────────────────
 export async function regenerateDraftCore({ userId, sessionId, feedback }) {
   if (!isObjectId(sessionId)) throw httpError("Invalid session id.", 400);
-  const session = await FormAiSession.findOne({ _id: sessionId, user: userId });
+  const session = await FormAiSession.findOne({
+    _id: sessionId,
+    user: userId,
+  });
   if (!session) throw httpError("Session not found.", 404);
 
   const trimmed = String(feedback || "").trim();
@@ -982,7 +1097,8 @@ export async function regenerateDraftCore({ userId, sessionId, feedback }) {
 
   let targetForm = null;
   let targetResponses = [];
-  if (session.targetFormId) targetForm = await Form.findById(session.targetFormId);
+  if (session.targetFormId)
+    targetForm = await Form.findById(session.targetFormId);
   if (session.mode === "respond" && session.targetResponseIds.length) {
     targetResponses = await FormResponse.find({
       _id: { $in: session.targetResponseIds },
@@ -1004,13 +1120,23 @@ export async function regenerateDraftCore({ userId, sessionId, feedback }) {
 // ─────────────────────────────────────────────────────────────────────
 // CORE: confirm and apply
 // ─────────────────────────────────────────────────────────────────────
-export async function confirmSessionCore({ userId, sessionId, overrides = {} }) {
+export async function confirmSessionCore({
+  userId,
+  sessionId,
+  overrides = {},
+}) {
   if (!isObjectId(sessionId)) throw httpError("Invalid session id.", 400);
-  const session = await FormAiSession.findOne({ _id: sessionId, user: userId });
+  const session = await FormAiSession.findOne({
+    _id: sessionId,
+    user: userId,
+  });
   if (!session) throw httpError("Session not found.", 404);
 
   if (session.status === "done") {
-    return { session: publicSession(session), result: { alreadyDone: true } };
+    return {
+      session: publicSession(session),
+      result: { alreadyDone: true },
+    };
   }
   if (session.status === "cancelled") {
     throw httpError("This session was cancelled.", 409);
@@ -1019,10 +1145,24 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
   let result = {};
 
   if (session.mode === "create") {
-    const draft = { ...(session.draft.toObject?.() || session.draft), ...overrides };
+    const draft = {
+      ...(session.draft.toObject?.() || session.draft),
+      ...overrides,
+    };
     const clean = normalizeDraft(draft);
-    if (!clean.fields.length) {
-      throw httpError("The draft has no fields. Add at least one before saving.", 400);
+    const isElection = clean.type === "election";
+
+    if (isElection && !clean.positions.length) {
+      throw httpError(
+        "An election needs at least one position before saving.",
+        400
+      );
+    }
+    if (!isElection && !clean.fields.length) {
+      throw httpError(
+        "The draft has no fields. Add at least one before saving.",
+        400
+      );
     }
 
     const form = await Form.create({
@@ -1034,8 +1174,11 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
       status: "draft",
       slug: crypto.randomBytes(6).toString("hex"),
       fields: clean.fields,
+      positions: clean.positions,
       settings: clean.settings,
       isMultipage: clean.isMultipage,
+      startAt: clean.startAt,
+      expiresAt: clean.expiresAt,
       sourceConversation: null,
     });
 
@@ -1044,7 +1187,7 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
     session.awaitingConfirm = false;
 
     const mediaCount = (form.fields || []).filter((f) =>
-      ["file", "image", "document"].includes(f.type)
+      isMediaType(f.type)
     ).length;
 
     result = {
@@ -1061,29 +1204,38 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
         hasRedirect: !!form.settings?.successRedirectUrl,
         redirectUrl: form.settings?.successRedirectUrl || "",
         mediaFieldsCount: mediaCount,
+        positionsCount: isElection ? (form.positions || []).length : 0,
+        isElection,
       },
     };
   } else if (session.mode === "edit") {
     const form = await Form.findById(session.targetFormId);
     if (!form) throw httpError("Target form not found.", 404);
 
-    const draft = { ...(session.draft.toObject?.() || session.draft), ...overrides };
+    const draft = {
+      ...(session.draft.toObject?.() || session.draft),
+      ...overrides,
+    };
     const clean = normalizeDraft(draft);
+    const isElection = clean.type === "election";
 
     form.title = clean.title;
     form.description = clean.description;
     form.type = clean.type;
     form.visibility = clean.visibility;
-    form.fields = clean.fields;
+    form.fields = isElection ? [] : clean.fields;
+    form.positions = isElection ? clean.positions : [];
     form.settings = clean.settings;
     form.isMultipage = clean.isMultipage;
+    form.startAt = clean.startAt;
+    form.expiresAt = clean.expiresAt;
     await form.save();
 
     session.status = "done";
     session.awaitingConfirm = false;
 
     const mediaCount = (form.fields || []).filter((f) =>
-      ["file", "image", "document"].includes(f.type)
+      isMediaType(f.type)
     ).length;
 
     result = {
@@ -1098,6 +1250,8 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
         hasRedirect: !!form.settings?.successRedirectUrl,
         redirectUrl: form.settings?.successRedirectUrl || "",
         mediaFieldsCount: mediaCount,
+        positionsCount: isElection ? (form.positions || []).length : 0,
+        isElection,
       },
     };
   } else if (session.mode === "collaborators") {
@@ -1125,7 +1279,11 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
         existing.role = c.role;
         added.push({ email: c.email, role: c.role, updated: true });
       } else {
-        form.collaborators.push({ user: user._id, role: c.role, addedAt: new Date() });
+        form.collaborators.push({
+          user: user._id,
+          role: c.role,
+          addedAt: new Date(),
+        });
         added.push({ email: c.email, role: c.role, updated: false });
       }
     }
@@ -1142,10 +1300,15 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
       _id: { $in: session.targetResponseIds },
     }).lean();
 
-    const subject = String(overrides.subject || session.draftEmails.subject || "").slice(0, 200);
-    const bodyTpl = String(overrides.body || session.draftEmails.bodyTemplate || "");
-
-    if (!subject || !bodyTpl) throw httpError("Subject and body are required to send.", 400);
+    const subject = String(
+      overrides.subject || session.draftEmails.subject || ""
+    ).slice(0, 200);
+    const bodyTpl = String(
+      overrides.body || session.draftEmails.bodyTemplate || ""
+    );
+    if (!subject || !bodyTpl) {
+      throw httpError("Subject and body are required to send.", 400);
+    }
 
     const overridesMap = new Map();
     for (const o of session.draftEmails.overrides || []) {
@@ -1171,9 +1334,16 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
         score: r.totalScore ?? "",
         maxScore: r.maxScore ?? "",
         percentage: r.percentage ?? "",
-        passed: r.passed === true ? "passed" : r.passed === false ? "did not pass" : "",
+        passed:
+          r.passed === true
+            ? "passed"
+            : r.passed === false
+            ? "did not pass"
+            : "",
         duration: r.durationSeconds ? `${r.durationSeconds}s` : "",
-        submittedAt: r.submittedAt ? new Date(r.submittedAt).toLocaleDateString() : "",
+        submittedAt: r.submittedAt
+          ? new Date(r.submittedAt).toLocaleDateString()
+          : "",
       };
       const ov = overridesMap.get(r.respondentEmail.toLowerCase());
       const finalSubject = ov?.subject || renderTemplate(subject, vars);
@@ -1210,24 +1380,39 @@ export async function confirmSessionCore({ userId, sessionId, overrides = {} }) 
 // ─────────────────────────────────────────────────────────────────────
 export async function patchDraftCore({ userId, sessionId, patch = {} }) {
   if (!isObjectId(sessionId)) throw httpError("Invalid session id.", 400);
-  const session = await FormAiSession.findOne({ _id: sessionId, user: userId });
+  const session = await FormAiSession.findOne({
+    _id: sessionId,
+    user: userId,
+  });
   if (!session) throw httpError("Session not found.", 404);
 
   if (session.mode === "create" || session.mode === "edit") {
     const draft = session.draft || {};
     if (typeof patch.title === "string") draft.title = patch.title.slice(0, 200);
-    if (typeof patch.description === "string") draft.description = patch.description.slice(0, 2000);
-    if (typeof patch.type === "string" && ["form", "quiz", "survey", "feedback", "attendance"].includes(patch.type)) {
+    if (typeof patch.description === "string")
+      draft.description = patch.description.slice(0, 2000);
+    if (typeof patch.type === "string" && FORM_TYPE_IDS.includes(patch.type))
       draft.type = patch.type;
-    }
-    if (patch.visibility === "public" || patch.visibility === "private") {
+    if (patch.visibility === "public" || patch.visibility === "private")
       draft.visibility = patch.visibility;
-    }
     if (Array.isArray(patch.fields)) draft.fields = sanitizeFields(patch.fields);
+    if (Array.isArray(patch.positions))
+      draft.positions = sanitizePositions(patch.positions);
     if (patch.settings && typeof patch.settings === "object") {
-      draft.settings = sanitizeSettings({ ...(draft.settings || {}), ...patch.settings });
+      draft.settings = sanitizeSettings({
+        ...(draft.settings || {}),
+        ...patch.settings,
+      });
     }
-    if (typeof patch.isMultipage === "boolean") draft.isMultipage = patch.isMultipage;
+    if (typeof patch.isMultipage === "boolean")
+      draft.isMultipage = patch.isMultipage;
+    if (patch.startAt === null) draft.startAt = null;
+    else if (patch.startAt)
+      draft.startAt = new Date(patch.startAt).toISOString();
+    if (patch.expiresAt === null) draft.expiresAt = null;
+    else if (patch.expiresAt)
+      draft.expiresAt = new Date(patch.expiresAt).toISOString();
+
     session.draft = draft;
   }
 
@@ -1236,12 +1421,10 @@ export async function patchDraftCore({ userId, sessionId, patch = {} }) {
   }
 
   if (session.mode === "respond" && patch.emails) {
-    if (typeof patch.emails.subject === "string") {
+    if (typeof patch.emails.subject === "string")
       session.draftEmails.subject = patch.emails.subject.slice(0, 200);
-    }
-    if (typeof patch.emails.body === "string") {
+    if (typeof patch.emails.body === "string")
       session.draftEmails.bodyTemplate = patch.emails.body.slice(0, 8000);
-    }
   }
 
   await session.save();
@@ -1253,7 +1436,10 @@ export async function patchDraftCore({ userId, sessionId, patch = {} }) {
 // ─────────────────────────────────────────────────────────────────────
 export async function cancelSessionCore({ userId, sessionId }) {
   if (!isObjectId(sessionId)) throw httpError("Invalid session id.", 400);
-  const session = await FormAiSession.findOne({ _id: sessionId, user: userId });
+  const session = await FormAiSession.findOne({
+    _id: sessionId,
+    user: userId,
+  });
   if (!session) throw httpError("Session not found.", 404);
   session.status = "cancelled";
   session.pendingQuestion = null;
@@ -1263,10 +1449,16 @@ export async function cancelSessionCore({ userId, sessionId }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// HTTP HANDLERS — thin wrappers around the core functions
+// HTTP handlers
 // ─────────────────────────────────────────────────────────────────────
 export const startSession = asyncHandler(async (req, res) => {
-  const { prompt = "", mode = "create", formId, responseIds = [], forceReady = false } = req.body || {};
+  const {
+    prompt = "",
+    mode = "create",
+    formId,
+    responseIds = [],
+    forceReady = false,
+  } = req.body || {};
   const session = await startFormSessionCore({
     userId: req.user._id,
     prompt,
@@ -1320,21 +1512,21 @@ export const confirmSession = asyncHandler(async (req, res) => {
 
 export const cancelSession = asyncHandler(async (req, res) => {
   const { sessionId } = req.body || {};
-  const session = await cancelSessionCore({ userId: req.user._id, sessionId });
+  const session = await cancelSessionCore({
+    userId: req.user._id,
+    sessionId,
+  });
   res.status(200).json({ success: true, session });
 });
 
 export const getSession = asyncHandler(async (req, res) => {
   const { id } = req.params;
-  if (!isObjectId(id)) {
-    res.status(400);
-    throw new Error("Invalid session id.");
-  }
-  const session = await FormAiSession.findOne({ _id: id, user: req.user._id });
-  if (!session) {
-    res.status(404);
-    throw new Error("Session not found.");
-  }
+  if (!isObjectId(id)) throw new Error("Invalid session id.");
+  const session = await FormAiSession.findOne({
+    _id: id,
+    user: req.user._id,
+  });
+  if (!session) throw new Error("Session not found.");
   res.status(200).json({ success: true, session: publicSession(session) });
 });
 
@@ -1342,7 +1534,9 @@ export const listSessions = asyncHandler(async (req, res) => {
   const list = await FormAiSession.find({ user: req.user._id })
     .sort({ updatedAt: -1 })
     .limit(30)
-    .select("mode status initialPrompt targetFormId createdFormId createdAt updatedAt")
+    .select(
+      "mode status initialPrompt targetFormId createdFormId createdAt updatedAt"
+    )
     .lean();
   res.status(200).json({ success: true, sessions: list });
 });

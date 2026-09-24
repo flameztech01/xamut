@@ -82,18 +82,23 @@ const sessionSchema = new mongoose.Schema(
 
     messages: { type: [aiMessageSchema], default: [] },
 
-    // When mode === "create", the AI proposes a draft here. When
-    // mode === "edit", this holds the proposed new version of the
-    // existing form so the user can preview before confirming.
-    draft: {
-      title: { type: String, default: "" },
-      description: { type: String, default: "" },
-      type: { type: String, default: "form" },
-      visibility: { type: String, default: "public" },
-      fields: { type: Array, default: [] },
-      settings: { type: Object, default: {} },
-      isMultipage: { type: Boolean, default: false },
-    },
+    // ── Draft ─────────────────────────────────────────────────────
+    // Mixed, not a typed sub-schema.
+    //
+    // Reason: the draft shape is owned by normalizeDraft() in
+    // formAiController.js, which is driven by config/formCapabilities.js.
+    // A typed sub-schema here would be a second, silent whitelist —
+    // any feature the registry adds (positions, timing, whatever comes
+    // next) would be stripped on save the moment it isn't declared
+    // here too. Mixed means the registry is the only place that has
+    // to know about new features.
+    //
+    // The data is validated upstream before it ever reaches this field:
+    //   • askFormAi() produces the raw shape
+    //   • normalizeDraft() sanitizes it against the registry
+    //   • applyAiResult() assigns the sanitized result here
+    // So Mixed is safe here and prevents a whole class of drift bugs.
+    draft: { type: mongoose.Schema.Types.Mixed, default: null },
 
     // For collaborators mode, the proposed changes
     draftCollaborators: [

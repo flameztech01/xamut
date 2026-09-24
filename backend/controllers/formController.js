@@ -7,6 +7,7 @@ import mongoose from "mongoose";
 
 import Form from "../models/formModel.js";
 import FormResponse from "../models/formResponseModel.js";
+import FormDraft from "../models/formDraftModel.js";
 import User from "../models/userModel.js";
 import { sendEmailSafe } from "../utils/sendMail.js";
 
@@ -19,6 +20,8 @@ const genSlug = () => crypto.randomBytes(6).toString("hex");
 
 const genFieldId = () => `f_${crypto.randomBytes(4).toString("hex")}`;
 const genOptionId = () => `o_${crypto.randomBytes(3).toString("hex")}`;
+const genPositionId = () => `p_${crypto.randomBytes(4).toString("hex")}`;
+const genCandidateId = () => `c_${crypto.randomBytes(4).toString("hex")}`;
 
 const genPassword = () => {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -67,9 +70,12 @@ const assertCanView = (form, userId) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Participant tokens — scoped short-lived token for private forms
+// Tokens
+//   • participant token  → private-form access
+//   • results token      → election live-results access (only after voting)
 // ─────────────────────────────────────────────────────────────────────
 const PARTICIPANT_PURPOSE = "form-participant";
+const RESULTS_PURPOSE = "election-results";
 
 const signParticipantToken = (formId, email) =>
   jwt.sign(
@@ -93,12 +99,34 @@ const verifyParticipantToken = (token) => {
   }
 };
 
-const readParticipantToken = (req) => {
+const signResultsToken = (formId, responseId) =>
+  jwt.sign(
+    {
+      formId: String(formId),
+      responseId: String(responseId),
+      purpose: RESULTS_PURPOSE,
+    },
+    process.env.JWT_SECRET,
+    { expiresIn: "30d" }
+  );
+
+const verifyResultsToken = (token) => {
+  if (!token) return null;
+  try {
+    const payload = jwt.verify(token, process.env.JWT_SECRET);
+    if (payload?.purpose !== RESULTS_PURPOSE) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+};
+
+const readToken = (req, key = "t") => {
   const header = req.headers?.authorization || "";
   if (header.toLowerCase().startsWith("bearer ")) return header.slice(7).trim();
-  if (typeof req.query?.t === "string" && req.query.t) return req.query.t;
-  if (typeof req.body?.token === "string" && req.body.token)
-    return req.body.token;
+  if (typeof req.query?.[key] === "string" && req.query[key])
+    return req.query[key];
+  if (typeof req.body?.[key] === "string" && req.body[key]) return req.body[key];
   return null;
 };
 
@@ -122,8 +150,8 @@ const FIELD_TYPES = new Set([
   "scale",
   "yes_no",
   "file",
-  "image",      // NEW — respondent uploads an image
-  "document",   // NEW — respondent uploads a document (pdf/docx/…)
+  "image",
+  "document",
   "section",
 ]);
 
@@ -134,7 +162,6 @@ const CHOICE_TYPES = new Set([
   "multi_select",
 ]);
 
-// Types whose value is one-or-more Cloudinary URLs
 const MEDIA_TYPES = new Set(["file", "image", "document"]);
 
 const sanitizeFields = (fields) => {
@@ -216,6 +243,70 @@ const sanitizeFields = (fields) => {
   });
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// ELECTION positions
+//   • positions[] supports 1..N positions in one form.
+//   • each position has its own candidates[], maxSelections, required.
+// ─────────────────────────────────────────────────────────────────────
+const sanitizePositions = (positions) => {
+  if (!Array.isArray(positions)) return [];
+  return positions.map((p, idx) => {
+    const maxSel = Number.isFinite(Number(p.maxSelections))
+      ? Math.max(1, Math.min(20, Number(p.maxSelections)))
+      : 1;
+
+    return {
+      id: typeof p.id === "string" && p.id ? p.id : genPositionId(),
+      title: String(p.title || `Position ${idx + 1}`).slice(0, 200),
+      description: String(p.description || "").slice(0, 1000),
+      maxSelections: maxSel,
+      required: p.required !== false,
+      order: typeof p.order === "number" ? p.order : idx,
+      candidates: Array.isArray(p.candidates)
+        ? p.candidates.map((c, i) => ({
+            id: typeof c.id === "string" && c.id ? c.id : genCandidateId(),
+            name: String(c.name || `Candidate ${i + 1}`).slice(0, 200),
+            bio: String(c.bio || "").slice(0, 2000),
+            manifesto: String(c.manifesto || "").slice(0, 5000),
+            photoUrl: String(c.photoUrl || "").slice(0, 1000),
+            slogan: String(c.slogan || "").slice(0, 200),
+            metadata:
+              c.metadata && typeof c.metadata === "object" ? c.metadata : {},
+            order: typeof c.order === "number" ? c.order : i,
+          }))
+        : [],
+    };
+  });
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Access-request extra fields (owner-defined info to collect)
+// ─────────────────────────────────────────────────────────────────────
+const REQUEST_FIELD_TYPES = new Set([
+  "short_text",
+  "long_text",
+  "email",
+  "number",
+  "phone",
+  "url",
+  "date",
+]);
+
+const sanitizeRequestFields = (fields) => {
+  if (!Array.isArray(fields)) return [];
+  return fields.map((f, idx) => ({
+    id: typeof f.id === "string" && f.id ? f.id : genFieldId(),
+    label: String(f.label || `Field ${idx + 1}`).slice(0, 200),
+    type: REQUEST_FIELD_TYPES.has(f.type) ? f.type : "short_text",
+    required: !!f.required,
+    placeholder: String(f.placeholder || "").slice(0, 200),
+    order: typeof f.order === "number" ? f.order : idx,
+  }));
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Settings
+// ─────────────────────────────────────────────────────────────────────
 const sanitizeSettings = (s = {}) => ({
   collectEmail: !!s.collectEmail,
   allowMultipleSubmissions: !!s.allowMultipleSubmissions,
@@ -236,10 +327,21 @@ const sanitizeSettings = (s = {}) => ({
   passPercentage: Number.isFinite(Number(s.passPercentage))
     ? Math.max(0, Math.min(100, Number(s.passPercentage)))
     : 0,
+
+  // Private-form access requests
+  allowAccessRequests: !!s.allowAccessRequests,
+  autoApproveAccess: !!s.autoApproveAccess,
+  requestFields: sanitizeRequestFields(s.requestFields),
+
+  // Election
+  shufflePositions: !!s.shufflePositions,
+  allowAbstain: !!s.allowAbstain,
+  showLiveResults: !!s.showLiveResults,
+  requireAllPositions: s.requireAllPositions !== false,
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// Answer validation
+// Answer validation — regular forms
 // ─────────────────────────────────────────────────────────────────────
 const validateAnswer = (field, rawValue) => {
   if (field.type === "section") return { ok: true, value: null };
@@ -291,7 +393,6 @@ const validateAnswer = (field, rawValue) => {
       }
     }
 
-    // file / image / document → one or more Cloudinary URLs
     case "file":
     case "image":
     case "document": {
@@ -324,10 +425,7 @@ const validateAnswer = (field, rawValue) => {
         try {
           new URL(urlStr);
         } catch {
-          return {
-            ok: false,
-            error: `"${field.label}": invalid file URL.`,
-          };
+          return { ok: false, error: `"${field.label}": invalid file URL.` };
         }
         cleaned.push(urlStr);
       }
@@ -410,6 +508,53 @@ const validateAnswer = (field, rawValue) => {
   }
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// Election vote validation (per position)
+// ─────────────────────────────────────────────────────────────────────
+const validateElectionVote = (position, rawValue, { allowAbstain } = {}) => {
+  const maxSel = position.maxSelections || 1;
+
+  const isEmpty =
+    rawValue == null ||
+    rawValue === "" ||
+    (Array.isArray(rawValue) && rawValue.length === 0);
+
+  if (isEmpty) {
+    if (position.required && !allowAbstain) {
+      return { ok: false, error: `"${position.title}" is required.` };
+    }
+    return { ok: true, value: [] };
+  }
+
+  const arr = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+  if (arr.length > maxSel) {
+    return {
+      ok: false,
+      error: `"${position.title}": you can select at most ${maxSel}.`,
+    };
+  }
+
+  const valid = new Map(position.candidates.map((c) => [String(c.id), c.id]));
+  const cleaned = [];
+  for (const v of arr) {
+    const key = String(v);
+    if (!valid.has(key)) {
+      return {
+        ok: false,
+        error: `"${position.title}": invalid candidate selected.`,
+      };
+    }
+    const real = valid.get(key);
+    if (!cleaned.includes(real)) cleaned.push(real);
+  }
+
+  return { ok: true, value: cleaned };
+};
+
+// ─────────────────────────────────────────────────────────────────────
+// Scoring (quizzes)
+// ─────────────────────────────────────────────────────────────────────
 const scoreAnswer = (field, value) => {
   if (!field.scoring || !field.scoring.points)
     return { score: 0, correct: null };
@@ -432,10 +577,8 @@ const scoreAnswer = (field, value) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Invite emails
+// Emails
 // ─────────────────────────────────────────────────────────────────────
-
-// Participant invite (private form filler, no Xamut account)
 const sendParticipantInviteEmail = async ({ form, participant, password }) => {
   const link = `${frontendUrl()}/forms/${form.slug}`;
   const subject = `You've been invited to fill "${form.title}"`;
@@ -478,7 +621,6 @@ const sendParticipantInviteEmail = async ({ form, participant, password }) => {
   await sendEmailSafe({ to: participant.email, subject, text, html });
 };
 
-// Collaborator invite (no Xamut account yet — they need to sign up)
 const sendCollaboratorInviteEmail = async ({
   form,
   email,
@@ -536,7 +678,6 @@ const sendCollaboratorInviteEmail = async ({
   await sendEmailSafe({ to: email, subject, text, html });
 };
 
-// Collaborator added (they already have a Xamut account)
 const sendCollaboratorAddedEmail = async ({
   form,
   email,
@@ -551,7 +692,6 @@ const sendCollaboratorAddedEmail = async ({
       : "You can look at the form and its responses, but you can't edit it.";
 
   const formUrl = `${frontendUrl()}/forms/${form._id}/edit`;
-
   const inviteName = name || email.split("@")[0];
   const inviterName = invitedBy?.name || "Someone";
 
@@ -594,9 +734,113 @@ const sendCollaboratorAddedEmail = async ({
   await sendEmailSafe({ to: email, subject, text, html });
 };
 
+const sendRequestApprovedEmail = async ({
+  form,
+  email,
+  name,
+  password,
+  note,
+}) => {
+  const link = `${frontendUrl()}/forms/${form.slug}`;
+  const subject = `Your access to "${form.title}" was approved`;
+
+  const text = [
+    `Hi${name ? " " + name : ""},`,
+    "",
+    `Good news — your request to access "${form.title}" has been approved.`,
+    "",
+    note ? `Note from the organiser: ${note}` : "",
+    "",
+    `Open the form: ${link}`,
+    "",
+    "Use these credentials:",
+    `  Email:    ${email}`,
+    `  Password: ${password}`,
+    "",
+    "— Xamut",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `
+    <div style="font-family:Raleway,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1c1917;">
+      <h2 style="margin:0 0 12px;font-size:20px;">You're in ✅</h2>
+      <p style="margin:0 0 16px;color:#44403c;">
+        Hi${name ? " " + name : ""}, your request to access
+        <strong>${form.title}</strong> has been <strong>approved</strong>.
+      </p>
+      ${
+        note
+          ? `<div style="background:#f0fdfa;border:1px solid #99f6e4;border-radius:10px;padding:12px 14px;margin:0 0 18px;color:#134e4a;">
+              <p style="margin:0;font-size:14px;"><strong>Note:</strong> ${note}</p>
+            </div>`
+          : ""
+      }
+      <p style="margin:0 0 20px;">
+        <a href="${link}" style="display:inline-block;background:#0d9488;color:#fff;padding:10px 18px;border-radius:8px;text-decoration:none;font-weight:600;">Open the form</a>
+      </p>
+      <div style="background:#fafaf9;border:1px solid #e7e5e4;border-radius:10px;padding:14px 16px;">
+        <p style="margin:0 0 6px;font-size:13px;color:#78716c;text-transform:uppercase;letter-spacing:.08em;">Your access</p>
+        <p style="margin:0;font-family:monospace;font-size:14px;">Email: <strong>${email}</strong></p>
+        <p style="margin:4px 0 0;font-family:monospace;font-size:14px;">Password: <strong>${password}</strong></p>
+      </div>
+    </div>
+  `;
+
+  await sendEmailSafe({ to: email, subject, text, html });
+};
+
+const sendRequestRejectedEmail = async ({ form, email, name, note }) => {
+  const subject = `Your access request for "${form.title}" was declined`;
+
+  const text = [
+    `Hi${name ? " " + name : ""},`,
+    "",
+    `Unfortunately, your request to access "${form.title}" was declined.`,
+    "",
+    note ? `Reason from the organiser: ${note}` : "",
+    "",
+    "If you believe this is a mistake, please reach out to the organiser.",
+    "",
+    "— Xamut",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const html = `
+    <div style="font-family:Raleway,Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1c1917;">
+      <h2 style="margin:0 0 12px;font-size:20px;">Access request declined</h2>
+      <p style="margin:0 0 16px;color:#44403c;">
+        Hi${name ? " " + name : ""}, your request to access
+        <strong>${form.title}</strong> was <strong>declined</strong>.
+      </p>
+      ${
+        note
+          ? `<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:12px 14px;margin:0 0 18px;color:#7f1d1d;">
+              <p style="margin:0;font-size:14px;"><strong>Reason:</strong> ${note}</p>
+            </div>`
+          : ""
+      }
+      <p style="margin:0;color:#78716c;font-size:13px;">
+        If you believe this is a mistake, please contact the organiser directly.
+      </p>
+    </div>
+  `;
+
+  await sendEmailSafe({ to: email, subject, text, html });
+};
+
 // ─────────────────────────────────────────────────────────────────────
 // FORM CRUD
 // ─────────────────────────────────────────────────────────────────────
+const FORM_TYPES = [
+  "form",
+  "quiz",
+  "survey",
+  "feedback",
+  "attendance",
+  "election",
+];
 
 // POST /api/forms
 export const createForm = asyncHandler(async (req, res) => {
@@ -606,14 +850,14 @@ export const createForm = asyncHandler(async (req, res) => {
     type = "form",
     visibility = "public",
     fields = [],
+    positions = [],
     settings = {},
     coverPhoto = "",
+    startAt = null,
+    expiresAt = null,
   } = req.body || {};
 
-  if (!["form", "quiz", "survey", "feedback", "attendance"].includes(type)) {
-    res.status(400);
-    throw new Error("Unknown form type.");
-  }
+  if (!FORM_TYPES.includes(type)) throw httpError("Unknown form type.");
 
   const form = await Form.create({
     owner: req.user._id,
@@ -625,7 +869,10 @@ export const createForm = asyncHandler(async (req, res) => {
     slug: genSlug(),
     coverPhoto: typeof coverPhoto === "string" ? coverPhoto.slice(0, 1000) : "",
     fields: sanitizeFields(fields),
+    positions: type === "election" ? sanitizePositions(positions) : [],
     settings: sanitizeSettings(settings),
+    startAt: startAt ? new Date(startAt) : null,
+    expiresAt: expiresAt ? new Date(expiresAt) : null,
     sourceConversation:
       req.body?.conversationId && isObjectId(req.body.conversationId)
         ? req.body.conversationId
@@ -641,11 +888,11 @@ export const listForms = asyncHandler(async (req, res) => {
 
   const [owned, collaborated] = await Promise.all([
     Form.find({ owner: userId })
-      .select("-participants.passwordHash")
+      .select("-participants.passwordHash -participantRequests.passwordHash")
       .sort({ updatedAt: -1 })
       .lean(),
     Form.find({ "collaborators.user": userId })
-      .select("-participants.passwordHash")
+      .select("-participants.passwordHash -participantRequests.passwordHash")
       .sort({ updatedAt: -1 })
       .lean(),
   ]);
@@ -661,8 +908,14 @@ export const listForms = asyncHandler(async (req, res) => {
     coverPhoto: f.coverPhoto || "",
     responseCount: f.responseCount || 0,
     fieldsCount: f.fields?.length || 0,
+    positionsCount: f.positions?.length || 0,
     collaboratorsCount: f.collaborators?.length || 0,
     participantsCount: f.participants?.length || 0,
+    pendingRequestsCount: (f.participantRequests || []).filter(
+      (r) => r.status === "pending"
+    ).length,
+    startAt: f.startAt || null,
+    expiresAt: f.expiresAt || null,
     createdAt: f.createdAt,
     updatedAt: f.updatedAt,
     role,
@@ -692,6 +945,20 @@ export const getForm = asyncHandler(async (req, res) => {
       submittedAt: p.submittedAt,
     }));
   }
+  if (obj.participantRequests) {
+    obj.participantRequests = obj.participantRequests.map((r) => ({
+      _id: r._id,
+      email: r.email,
+      name: r.name,
+      note: r.note,
+      extraInfo: r.extraInfo,
+      status: r.status,
+      requestedAt: r.requestedAt,
+      reviewedAt: r.reviewedAt,
+      reviewedBy: r.reviewedBy,
+      reviewNote: r.reviewNote,
+    }));
+  }
 
   res.status(200).json({ success: true, role, form: obj });
 });
@@ -707,32 +974,26 @@ export const updateForm = asyncHandler(async (req, res) => {
     type,
     visibility,
     fields,
+    positions,
     settings,
     isMultipage,
-    expiresAt,
     coverPhoto,
+    startAt,
+    expiresAt,
   } = req.body || {};
 
   if (typeof title === "string") form.title = title.slice(0, 200);
   if (typeof description === "string")
     form.description = description.slice(0, 2000);
-
-  if (typeof coverPhoto === "string") {
+  if (typeof coverPhoto === "string")
     form.coverPhoto = coverPhoto.slice(0, 1000);
-  }
-
-  if (
-    type &&
-    ["form", "quiz", "survey", "feedback", "attendance"].includes(type)
-  ) {
-    form.type = type;
-  }
-  if (visibility === "public" || visibility === "private") {
+  if (type && FORM_TYPES.includes(type)) form.type = type;
+  if (visibility === "public" || visibility === "private")
     form.visibility = visibility;
-  }
-  if (Array.isArray(fields)) {
-    form.fields = sanitizeFields(fields);
-  }
+  if (Array.isArray(fields)) form.fields = sanitizeFields(fields);
+  if (Array.isArray(positions))
+    form.positions = sanitizePositions(positions);
+
   if (settings && typeof settings === "object") {
     const current =
       typeof form.settings?.toObject === "function"
@@ -740,11 +1001,17 @@ export const updateForm = asyncHandler(async (req, res) => {
         : form.settings || {};
     form.settings = sanitizeSettings({ ...current, ...settings });
   }
+
   if (typeof isMultipage === "boolean") form.isMultipage = isMultipage;
 
-  if (expiresAt === null) {
-    form.expiresAt = null;
-  } else if (expiresAt) {
+  if (startAt === null) form.startAt = null;
+  else if (startAt) {
+    const d = new Date(startAt);
+    form.startAt = Number.isNaN(d.getTime()) ? null : d;
+  }
+
+  if (expiresAt === null) form.expiresAt = null;
+  else if (expiresAt) {
     const d = new Date(expiresAt);
     form.expiresAt = Number.isNaN(d.getTime()) ? null : d;
   }
@@ -761,6 +1028,7 @@ export const deleteForm = asyncHandler(async (req, res) => {
   await Promise.all([
     Form.deleteOne({ _id: form._id }),
     FormResponse.deleteMany({ form: form._id }),
+    FormDraft.deleteMany({ form: form._id }),
   ]);
 
   res.status(200).json({ success: true, message: "Form deleted." });
@@ -791,8 +1059,21 @@ export const duplicateForm = asyncHandler(async (req, res) => {
         })),
       };
     }),
+    positions: (form.positions || []).map((p) => {
+      const o = typeof p.toObject === "function" ? p.toObject() : p;
+      return {
+        ...o,
+        id: genPositionId(),
+        candidates: (o.candidates || []).map((c) => ({
+          ...c,
+          id: genCandidateId(),
+        })),
+      };
+    }),
     settings: form.settings,
     isMultipage: form.isMultipage,
+    startAt: form.startAt,
+    expiresAt: form.expiresAt,
   });
 
   res.status(201).json({ success: true, form: copy });
@@ -803,9 +1084,14 @@ export const publishForm = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
-  if (!form.fields.length) {
-    res.status(400);
-    throw new Error("Add at least one field before publishing.");
+  if (form.type === "election") {
+    if (!form.positions?.length)
+      throw httpError("Add at least one position before publishing.");
+    const empty = form.positions.find((p) => !p.candidates?.length);
+    if (empty)
+      throw httpError(`Position "${empty.title}" has no candidates.`);
+  } else if (!form.fields.length) {
+    throw httpError("Add at least one field before publishing.");
   }
 
   form.status = "open";
@@ -833,25 +1119,17 @@ export const closeForm = asyncHandler(async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// COVER PHOTO (Cloudinary)
-// The multer middleware in formRoutes attaches req.file.
+// COVER + editor media uploads
 // ─────────────────────────────────────────────────────────────────────
-
-// POST /api/forms/:id/cover
 export const uploadFormCoverPhoto = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
-  if (!req.file) {
-    res.status(400);
-    throw new Error("No cover image uploaded.");
-  }
+  if (!req.file) throw httpError("No cover image uploaded.");
 
   const imageUrl = req.file.path || req.file.location;
-  if (!imageUrl) {
-    res.status(500);
-    throw new Error("Upload succeeded but no URL was returned.");
-  }
+  if (!imageUrl)
+    throw httpError("Upload succeeded but no URL was returned.", 500);
 
   form.coverPhoto = imageUrl;
   await form.save();
@@ -863,7 +1141,6 @@ export const uploadFormCoverPhoto = asyncHandler(async (req, res) => {
   });
 });
 
-// DELETE /api/forms/:id/cover
 export const removeFormCoverPhoto = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
@@ -878,11 +1155,29 @@ export const removeFormCoverPhoto = asyncHandler(async (req, res) => {
   });
 });
 
+// POST /api/forms/:id/media — owner/editor (candidate photos, etc.)
+export const uploadFormMediaEditor = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  if (!req.file) throw httpError("No file uploaded.");
+
+  const url = req.file.path || req.file.location;
+  if (!url)
+    throw httpError("Upload succeeded but no URL was returned.", 500);
+
+  res.status(200).json({
+    success: true,
+    url,
+    filename: req.file.originalname || "",
+    mimetype: req.file.mimetype || "",
+    size: req.file.size || 0,
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────
 // COLLABORATORS
 // ─────────────────────────────────────────────────────────────────────
-
-// POST /api/forms/:id/collaborators
 export const addCollaborator = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
@@ -890,53 +1185,37 @@ export const addCollaborator = asyncHandler(async (req, res) => {
   const { email, role = "editor", name = "" } = req.body || {};
   const cleanEmail = String(email || "").trim().toLowerCase();
 
-  if (!cleanEmail) {
-    res.status(400);
-    throw new Error("Collaborator email is required.");
-  }
-  if (!["editor", "viewer"].includes(role)) {
-    res.status(400);
-    throw new Error("Role must be 'editor' or 'viewer'.");
-  }
-  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail)) {
-    res.status(400);
-    throw new Error("That doesn't look like a valid email.");
-  }
+  if (!cleanEmail) throw httpError("Collaborator email is required.");
+  if (!["editor", "viewer"].includes(role))
+    throw httpError("Role must be 'editor' or 'viewer'.");
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(cleanEmail))
+    throw httpError("That doesn't look like a valid email.");
 
   const existingUser = await User.findOne({ email: cleanEmail });
 
   if (existingUser) {
-    if (String(existingUser._id) === String(form.owner)) {
-      res.status(400);
-      throw new Error("That's you. You already own this form.");
-    }
+    if (String(existingUser._id) === String(form.owner))
+      throw httpError("That's you. You already own this form.");
 
     const existingCollab = form.collaborators.find(
       (c) => String(c.user) === String(existingUser._id)
     );
 
-    if (existingCollab) {
-      existingCollab.role = role;
-    } else {
+    if (existingCollab) existingCollab.role = role;
+    else
       form.collaborators.push({
         user: existingUser._id,
         role,
         addedAt: new Date(),
       });
-    }
 
     form.pendingCollaborators = (form.pendingCollaborators || []).filter(
       (p) => p.email !== cleanEmail
     );
-
     await form.save();
 
-    console.log(
-      `📧 Collaborator added → ${cleanEmail} on "${form.title}" (${form._id}) [role: ${role}]`
-    );
-
-    let emailSent = false;
-    let emailError = null;
+    let emailSent = false,
+      emailError = null;
     try {
       await sendCollaboratorAddedEmail({
         form,
@@ -946,13 +1225,8 @@ export const addCollaborator = asyncHandler(async (req, res) => {
         invitedBy: req.user,
       });
       emailSent = true;
-      console.log(`✅ Added-collaborator email sent to ${cleanEmail}`);
     } catch (err) {
       emailError = err?.message || String(err);
-      console.error(
-        `❌ Added-collaborator email failed for ${cleanEmail}:`,
-        emailError
-      );
     }
 
     return res.status(200).json({
@@ -993,12 +1267,8 @@ export const addCollaborator = asyncHandler(async (req, res) => {
 
   await form.save();
 
-  console.log(
-    `📧 Collaborator invite → ${cleanEmail} on "${form.title}" (${form._id}) [role: ${role}]`
-  );
-
-  let emailSent = false;
-  let emailError = null;
+  let emailSent = false,
+    emailError = null;
   try {
     await sendCollaboratorInviteEmail({
       form,
@@ -1008,13 +1278,8 @@ export const addCollaborator = asyncHandler(async (req, res) => {
       invitedBy: req.user,
     });
     emailSent = true;
-    console.log(`✅ Collaborator invite sent to ${cleanEmail}`);
   } catch (err) {
     emailError = err?.message || String(err);
-    console.error(
-      `❌ Collaborator invite failed for ${cleanEmail}:`,
-      emailError
-    );
   }
 
   return res.status(200).json({
@@ -1023,15 +1288,10 @@ export const addCollaborator = asyncHandler(async (req, res) => {
     added: false,
     emailSent,
     emailError,
-    pending: {
-      email: cleanEmail,
-      name: name || "",
-      role,
-    },
+    pending: { email: cleanEmail, name: name || "", role },
   });
 });
 
-// GET /api/forms/:id/collaborators
 export const listCollaborators = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -1042,7 +1302,6 @@ export const listCollaborators = asyncHandler(async (req, res) => {
     .lean();
 
   const byId = new Map(users.map((u) => [String(u._id), u]));
-
   const owner = await User.findById(form.owner)
     .select("name email profilePhoto")
     .lean();
@@ -1081,7 +1340,6 @@ export const listCollaborators = asyncHandler(async (req, res) => {
   });
 });
 
-// DELETE /api/forms/:id/collaborators/:userIdOrEmail
 export const removeCollaborator = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
@@ -1094,10 +1352,8 @@ export const removeCollaborator = asyncHandler(async (req, res) => {
     form.pendingCollaborators = (form.pendingCollaborators || []).filter(
       (p) => p.email !== email
     );
-    if ((form.pendingCollaborators?.length || 0) === before) {
-      res.status(404);
-      throw new Error("No pending invite with that email.");
-    }
+    if ((form.pendingCollaborators?.length || 0) === before)
+      throw httpError("No pending invite with that email.", 404);
     await form.save();
     return res
       .status(200)
@@ -1112,32 +1368,25 @@ export const removeCollaborator = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: "Collaborator removed." });
 });
 
-// PUT /api/forms/:id/collaborators/:userId
 export const updateCollaboratorRole = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
 
   const { userId } = req.params;
   const { role } = req.body || {};
-  if (!["editor", "viewer"].includes(role)) {
-    res.status(400);
-    throw new Error("Role must be 'editor' or 'viewer'.");
-  }
+  if (!["editor", "viewer"].includes(role))
+    throw httpError("Role must be 'editor' or 'viewer'.");
 
   const collab = form.collaborators.find(
     (c) => String(c.user) === String(userId)
   );
-  if (!collab) {
-    res.status(404);
-    throw new Error("Collaborator not found on this form.");
-  }
+  if (!collab) throw httpError("Collaborator not found on this form.", 404);
   collab.role = role;
   await form.save();
 
   res.status(200).json({ success: true, collaborators: form.collaborators });
 });
 
-// POST /api/forms/:id/collaborators/:email/resend
 export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertOwner(form, req.user._id);
@@ -1156,11 +1405,11 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
       const already = form.collaborators.find(
         (c) => String(c.user) === String(user._id)
       );
-      if (already) {
+      if (already)
         return res
           .status(200)
           .json({ success: true, message: "They're already a collaborator." });
-      }
+
       form.collaborators.push({
         user: user._id,
         role: "editor",
@@ -1168,8 +1417,8 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
       });
       await form.save();
 
-      let emailSent = false;
-      let emailError = null;
+      let emailSent = false,
+        emailError = null;
       try {
         await sendCollaboratorAddedEmail({
           form,
@@ -1181,10 +1430,6 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
         emailSent = true;
       } catch (err) {
         emailError = err?.message || String(err);
-        console.error(
-          `❌ Added-collaborator email failed for ${email}:`,
-          emailError
-        );
       }
 
       return res.status(200).json({
@@ -1196,17 +1441,14 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
       });
     }
 
-    res.status(404);
-    throw new Error("No pending invite with that email.");
+    throw httpError("No pending invite with that email.", 404);
   }
 
   pending.lastInvitedAt = new Date();
   await form.save();
 
-  console.log(`📧 Resending collaborator invite → ${pending.email}`);
-
-  let emailSent = false;
-  let emailError = null;
+  let emailSent = false,
+    emailError = null;
   try {
     await sendCollaboratorInviteEmail({
       form,
@@ -1216,13 +1458,8 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
       invitedBy: req.user,
     });
     emailSent = true;
-    console.log(`✅ Collaborator invite resent to ${pending.email}`);
   } catch (err) {
     emailError = err?.message || String(err);
-    console.error(
-      `❌ Collaborator invite resend failed for ${pending.email}:`,
-      emailError
-    );
   }
 
   res
@@ -1233,16 +1470,12 @@ export const resendCollaboratorInvite = asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 // PARTICIPANTS
 // ─────────────────────────────────────────────────────────────────────
-
-// POST /api/forms/:id/participants
 export const addParticipants = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
-  if (form.visibility !== "private") {
-    res.status(400);
-    throw new Error("Participants can only be added to private forms.");
-  }
+  if (form.visibility !== "private")
+    throw httpError("Participants can only be added to private forms.");
 
   const input = Array.isArray(req.body?.participants)
     ? req.body.participants
@@ -1250,10 +1483,7 @@ export const addParticipants = asyncHandler(async (req, res) => {
     ? req.body
     : [];
 
-  if (!input.length) {
-    res.status(400);
-    throw new Error("Provide at least one participant.");
-  }
+  if (!input.length) throw httpError("Provide at least one participant.");
 
   const created = [];
 
@@ -1283,24 +1513,25 @@ export const addParticipants = asyncHandler(async (req, res) => {
         completed: false,
       });
     }
-
     created.push({ email, name, passwordPlain: plain });
   }
 
-  if (!created.length) {
-    res.status(400);
-    throw new Error("No valid email addresses were provided.");
-  }
+  if (!created.length)
+    throw httpError("No valid email addresses were provided.");
 
   await form.save();
 
   (async () => {
     for (const c of created) {
-      await sendParticipantInviteEmail({
-        form,
-        participant: { email: c.email, name: c.name },
-        password: c.passwordPlain,
-      });
+      try {
+        await sendParticipantInviteEmail({
+          form,
+          participant: { email: c.email, name: c.name },
+          password: c.passwordPlain,
+        });
+      } catch (err) {
+        console.error(`Participant invite failed for ${c.email}:`, err);
+      }
     }
   })();
 
@@ -1323,7 +1554,6 @@ export const addParticipants = asyncHandler(async (req, res) => {
   });
 });
 
-// GET /api/forms/:id/participants
 export const listParticipants = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -1342,16 +1572,12 @@ export const listParticipants = asyncHandler(async (req, res) => {
   });
 });
 
-// DELETE /api/forms/:id/participants/:participantId
 export const removeParticipant = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
   const { participantId } = req.params;
-  if (!isObjectId(participantId)) {
-    res.status(400);
-    throw new Error("Invalid participant id.");
-  }
+  if (!isObjectId(participantId)) throw httpError("Invalid participant id.");
 
   form.participants = form.participants.filter(
     (p) => String(p._id) !== String(participantId)
@@ -1361,17 +1587,12 @@ export const removeParticipant = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: "Participant removed." });
 });
 
-// POST /api/forms/:id/participants/:participantId/resend
 export const resendParticipantCredentials = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
-  const { participantId } = req.params;
-  const participant = form.participants.id(participantId);
-  if (!participant) {
-    res.status(404);
-    throw new Error("Participant not found.");
-  }
+  const participant = form.participants.id(req.params.participantId);
+  if (!participant) throw httpError("Participant not found.", 404);
 
   const plain = genPassword();
   participant.passwordHash = await bcrypt.hash(plain, 10);
@@ -1398,9 +1619,506 @@ export const resendParticipantCredentials = asyncHandler(async (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
+// ACCESS REQUESTS
+// ─────────────────────────────────────────────────────────────────────
+export const requestAccess = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+
+  if (form.visibility !== "private")
+    throw httpError("This form is public — no request needed.");
+  if (!form.settings?.allowAccessRequests)
+    throw httpError("This form isn't accepting access requests.", 403);
+
+  const email = String(req.body?.email || "").trim().toLowerCase();
+  const name = String(req.body?.name || "").trim().slice(0, 120);
+  const note = String(req.body?.note || "").trim().slice(0, 500);
+  const extraInfo = req.body?.extraInfo || {};
+
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email))
+    throw httpError("A valid email is required.");
+
+  const reqFields = form.settings.requestFields || [];
+  for (const rf of reqFields) {
+    const v = extraInfo?.[rf.id];
+    const empty = v == null || v === "" || (Array.isArray(v) && v.length === 0);
+    if (rf.required && empty)
+      throw httpError(`"${rf.label}" is required.`);
+  }
+
+  if (form.participants.some((p) => p.email === email)) {
+    return res.status(200).json({
+      success: true,
+      alreadyParticipant: true,
+      message:
+        "You already have access to this form. Check your inbox for the original credentials, or use 'Forgot password'.",
+    });
+  }
+
+  let request = (form.participantRequests || []).find((r) => r.email === email);
+  if (request) {
+    if (request.status === "approved") {
+      return res.status(200).json({
+        success: true,
+        alreadyParticipant: true,
+        message: "You've already been approved. Check your inbox.",
+      });
+    }
+    request.name = name || request.name;
+    request.note = note;
+    request.extraInfo = extraInfo;
+    request.status = "pending";
+    request.requestedAt = new Date();
+    request.reviewedAt = null;
+    request.reviewedBy = null;
+    request.reviewNote = "";
+  } else {
+    form.participantRequests.push({
+      email,
+      name,
+      note,
+      extraInfo,
+      status: "pending",
+      requestedAt: new Date(),
+    });
+  }
+
+  await form.save();
+
+  if (form.settings.autoApproveAccess) {
+    const target = form.participantRequests.find((r) => r.email === email);
+    const plain = genPassword();
+    target.status = "approved";
+    target.reviewedAt = new Date();
+    target.reviewNote = "";
+
+    form.participants.push({
+      email,
+      name,
+      passwordHash: await bcrypt.hash(plain, 10),
+      invitedAt: new Date(),
+      lastInvitedAt: new Date(),
+      completed: false,
+    });
+
+    await form.save();
+
+    try {
+      await sendRequestApprovedEmail({
+        form,
+        email,
+        name,
+        password: plain,
+        note: "",
+      });
+    } catch (err) {
+      console.error("Auto-approve email failed:", err);
+    }
+
+    return res.status(201).json({
+      success: true,
+      autoApproved: true,
+      message: "Access granted — check your email for credentials.",
+    });
+  }
+
+  res.status(201).json({
+    success: true,
+    pending: true,
+    message:
+      "Your request has been submitted. You'll get an email once it's reviewed.",
+  });
+});
+
+export const listAccessRequests = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanView(form, req.user._id);
+
+  const status = String(req.query.status || "").trim();
+  let requests = form.participantRequests || [];
+  if (["pending", "approved", "rejected"].includes(status)) {
+    requests = requests.filter((r) => r.status === status);
+  }
+
+  res.status(200).json({
+    success: true,
+    requests: requests.map((r) => ({
+      _id: r._id,
+      email: r.email,
+      name: r.name,
+      note: r.note,
+      extraInfo: r.extraInfo,
+      status: r.status,
+      requestedAt: r.requestedAt,
+      reviewedAt: r.reviewedAt,
+      reviewedBy: r.reviewedBy,
+      reviewNote: r.reviewNote,
+    })),
+  });
+});
+
+export const approveAccessRequest = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  const request = form.participantRequests.id(req.params.requestId);
+  if (!request) throw httpError("Request not found.", 404);
+  if (request.status !== "pending")
+    throw httpError(`This request is already ${request.status}.`);
+
+  const note = String(req.body?.note || "").trim().slice(0, 500);
+  const plain = genPassword();
+  const hash = await bcrypt.hash(plain, 10);
+
+  const existing = form.participants.find((p) => p.email === request.email);
+  if (existing) {
+    existing.passwordHash = hash;
+    existing.name = request.name || existing.name;
+    existing.lastInvitedAt = new Date();
+    existing.completed = false;
+    existing.submittedAt = null;
+    existing.submissionId = null;
+  } else {
+    form.participants.push({
+      email: request.email,
+      name: request.name || "",
+      passwordHash: hash,
+      invitedAt: new Date(),
+      lastInvitedAt: new Date(),
+      completed: false,
+    });
+  }
+
+  request.status = "approved";
+  request.reviewedAt = new Date();
+  request.reviewedBy = req.user._id;
+  request.reviewNote = note;
+
+  await form.save();
+
+  let emailSent = false,
+    emailError = null;
+  try {
+    await sendRequestApprovedEmail({
+      form,
+      email: request.email,
+      name: request.name || "",
+      password: plain,
+      note,
+    });
+    emailSent = true;
+  } catch (err) {
+    emailError = err?.message || String(err);
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Request approved.",
+    emailSent,
+    emailError,
+  });
+});
+
+export const rejectAccessRequest = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  const request = form.participantRequests.id(req.params.requestId);
+  if (!request) throw httpError("Request not found.", 404);
+  if (request.status !== "pending")
+    throw httpError(`This request is already ${request.status}.`);
+
+  const note = String(req.body?.note || "").trim().slice(0, 500);
+
+  request.status = "rejected";
+  request.reviewedAt = new Date();
+  request.reviewedBy = req.user._id;
+  request.reviewNote = note;
+
+  await form.save();
+
+  let emailSent = false,
+    emailError = null;
+  try {
+    await sendRequestRejectedEmail({
+      form,
+      email: request.email,
+      name: request.name || "",
+      note,
+    });
+    emailSent = true;
+  } catch (err) {
+    emailError = err?.message || String(err);
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Request rejected.",
+    emailSent,
+    emailError,
+  });
+});
+
+export const bulkReviewAccessRequests = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanEdit(form, req.user._id);
+
+  const { ids = [], action, note = "" } = req.body || {};
+  if (!["approve", "reject"].includes(action))
+    throw httpError("action must be 'approve' or 'reject'.");
+  if (!Array.isArray(ids) || !ids.length)
+    throw httpError("Provide at least one request id.");
+
+  const noteClean = String(note || "").trim().slice(0, 500);
+  const results = [];
+
+  for (const id of ids) {
+    const request = form.participantRequests.id(id);
+    if (!request || request.status !== "pending") continue;
+
+    if (action === "approve") {
+      const plain = genPassword();
+      const hash = await bcrypt.hash(plain, 10);
+      const existing = form.participants.find(
+        (p) => p.email === request.email
+      );
+      if (existing) {
+        existing.passwordHash = hash;
+        existing.name = request.name || existing.name;
+        existing.lastInvitedAt = new Date();
+        existing.completed = false;
+        existing.submittedAt = null;
+        existing.submissionId = null;
+      } else {
+        form.participants.push({
+          email: request.email,
+          name: request.name || "",
+          passwordHash: hash,
+          invitedAt: new Date(),
+          lastInvitedAt: new Date(),
+          completed: false,
+        });
+      }
+      request.status = "approved";
+      request.reviewedAt = new Date();
+      request.reviewedBy = req.user._id;
+      request.reviewNote = noteClean;
+
+      try {
+        await sendRequestApprovedEmail({
+          form,
+          email: request.email,
+          name: request.name || "",
+          password: plain,
+          note: noteClean,
+        });
+      } catch (err) {
+        console.error("Bulk approve email failed:", err);
+      }
+    } else {
+      request.status = "rejected";
+      request.reviewedAt = new Date();
+      request.reviewedBy = req.user._id;
+      request.reviewNote = noteClean;
+
+      try {
+        await sendRequestRejectedEmail({
+          form,
+          email: request.email,
+          name: request.name || "",
+          note: noteClean,
+        });
+      } catch (err) {
+        console.error("Bulk reject email failed:", err);
+      }
+    }
+
+    results.push({ id, status: request.status });
+  }
+
+  await form.save();
+  res.status(200).json({ success: true, results });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// DRAFTS
+// ─────────────────────────────────────────────────────────────────────
+const identifyDraftOwner = (req, form) => {
+  const out = { user: null, sessionKey: null, email: "" };
+
+  if (req.user?._id) {
+    out.user = req.user._id;
+    out.email = (req.user.email || "").toLowerCase();
+    return out;
+  }
+
+  if (form.visibility === "private") {
+    const token = verifyParticipantToken(readToken(req, "t"));
+    if (token && String(token.formId) === String(form._id)) {
+      out.email = token.email.toLowerCase();
+    }
+  }
+
+  const key = req.body?.sessionKey || req.query?.sessionKey;
+  if (typeof key === "string" && key.length >= 8 && key.length <= 200) {
+    out.sessionKey = key;
+  }
+
+  return out;
+};
+
+export const saveDraft = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+
+  const now = Date.now();
+  if (form.expiresAt && new Date(form.expiresAt).getTime() < now)
+    throw httpError("This form has ended. Drafts can't be saved anymore.", 410);
+
+  const answers = req.body?.answers || {};
+  const identity = identifyDraftOwner(req, form);
+
+  if (!identity.user && !identity.sessionKey && !identity.email)
+    throw httpError(
+      "A sessionKey (or signed-in user) is required to save a draft."
+    );
+
+  const filter = { form: form._id };
+  if (identity.user) filter.user = identity.user;
+  else if (identity.email) {
+    filter.email = identity.email;
+    filter.user = null;
+  } else {
+    filter.sessionKey = identity.sessionKey;
+    filter.user = null;
+  }
+
+  const draft = await FormDraft.findOneAndUpdate(
+    filter,
+    {
+      $set: {
+        answers,
+        email: identity.email || req.body?.email || "",
+        name: req.body?.name || "",
+        userAgent: String(req.headers["user-agent"] || "").slice(0, 400),
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        form: form._id,
+        user: identity.user,
+        sessionKey: identity.sessionKey,
+        startedAt: req.body?.startedAt
+          ? new Date(req.body.startedAt)
+          : new Date(),
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+
+  res.status(200).json({
+    success: true,
+    draftId: draft._id,
+    updatedAt: draft.updatedAt,
+  });
+});
+
+export const getDraft = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+  const identity = identifyDraftOwner(req, form);
+
+  if (!identity.user && !identity.sessionKey && !identity.email)
+    return res.status(200).json({ success: true, draft: null });
+
+  const filter = { form: form._id };
+  if (identity.user) filter.user = identity.user;
+  else if (identity.email) {
+    filter.email = identity.email;
+    filter.user = null;
+  } else {
+    filter.sessionKey = identity.sessionKey;
+    filter.user = null;
+  }
+
+  const draft = await FormDraft.findOne(filter).lean();
+  res.status(200).json({ success: true, draft: draft || null });
+});
+
+export const clearDraft = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+  const identity = identifyDraftOwner(req, form);
+
+  const filter = { form: form._id };
+  if (identity.user) filter.user = identity.user;
+  else if (identity.email) {
+    filter.email = identity.email;
+    filter.user = null;
+  } else if (identity.sessionKey) {
+    filter.sessionKey = identity.sessionKey;
+    filter.user = null;
+  } else {
+    return res.status(200).json({ success: true, deleted: 0 });
+  }
+
+  const out = await FormDraft.deleteMany(filter);
+  res.status(200).json({ success: true, deleted: out.deletedCount || 0 });
+});
+
+export const listMyPendingForms = asyncHandler(async (req, res) => {
+  const drafts = await FormDraft.find({ user: req.user._id })
+    .sort({ updatedAt: -1 })
+    .populate({
+      path: "form",
+      select:
+        "title description type visibility status slug coverPhoto startAt expiresAt fields positions settings",
+    })
+    .lean();
+
+  const now = Date.now();
+  const pending = drafts
+    .filter((d) => d.form)
+    .map((d) => {
+      const f = d.form;
+      const hasStarted = !f.startAt || new Date(f.startAt).getTime() <= now;
+      const notEnded = !f.expiresAt || new Date(f.expiresAt).getTime() >= now;
+      const isOpen = f.status === "open";
+      const accessible = isOpen && hasStarted && notEnded;
+
+      return {
+        draftId: d._id,
+        updatedAt: d.updatedAt,
+        startedAt: d.startedAt,
+        answersCount: Object.keys(d.answers || {}).length,
+        form: {
+          _id: f._id,
+          title: f.title,
+          description: f.description,
+          type: f.type,
+          slug: f.slug,
+          coverPhoto: f.coverPhoto || "",
+          visibility: f.visibility,
+          status: f.status,
+          startAt: f.startAt || null,
+          expiresAt: f.expiresAt || null,
+          fieldsCount: f.fields?.length || 0,
+          positionsCount: f.positions?.length || 0,
+        },
+        accessible,
+        reason: !isOpen
+          ? f.status === "closed"
+            ? "Form closed"
+            : "Form not published yet"
+          : !hasStarted
+          ? "Not started yet"
+          : !notEnded
+          ? "Form has ended"
+          : null,
+      };
+    });
+
+  res.status(200).json({ success: true, pending });
+});
+
+// ─────────────────────────────────────────────────────────────────────
 // PUBLIC / RESPONDENT
 // ─────────────────────────────────────────────────────────────────────
-
 const getFormBySlugOrId = async (slugOrId) => {
   const query = isObjectId(slugOrId) ? { _id: slugOrId } : { slug: slugOrId };
   const form = await Form.findOne(query);
@@ -1425,6 +2143,28 @@ const buildPublicForm = (form) => {
     validation: f.validation,
   }));
 
+  const positions =
+    form.type === "election"
+      ? form.positions.map((p) => ({
+          id: p.id,
+          title: p.title,
+          description: p.description,
+          maxSelections: p.maxSelections,
+          required: p.required,
+          order: p.order,
+          candidates: p.candidates.map((c) => ({
+            id: c.id,
+            name: c.name,
+            bio: c.bio,
+            manifesto: c.manifesto,
+            photoUrl: c.photoUrl,
+            slogan: c.slogan,
+            metadata: c.metadata,
+            order: c.order,
+          })),
+        }))
+      : [];
+
   return {
     _id: form._id,
     slug: form.slug,
@@ -1436,57 +2176,111 @@ const buildPublicForm = (form) => {
     isMultipage: form.isMultipage,
     coverPhoto: form.coverPhoto || "",
     fields,
+    positions,
     settings: {
       collectEmail: form.settings.collectEmail,
       allowMultipleSubmissions: form.settings.allowMultipleSubmissions,
       shuffleQuestions: form.settings.shuffleQuestions,
+      shufflePositions: form.settings.shufflePositions,
       showProgressBar: form.settings.showProgressBar,
       confirmationMessage: form.settings.confirmationMessage,
       successRedirectUrl: form.settings.successRedirectUrl,
       theme: form.settings.theme,
       primaryColor: form.settings.primaryColor,
       showScoreImmediately: form.settings.showScoreImmediately,
+      allowAbstain: form.settings.allowAbstain,
+      showLiveResults: form.settings.showLiveResults,
+      requireAllPositions: form.settings.requireAllPositions,
     },
     publishedAt: form.publishedAt,
-    expiresAt: form.expiresAt,
+    startAt: form.startAt || null,
+    expiresAt: form.expiresAt || null,
   };
 };
 
-const isFormAcceptingResponses = (form) => {
-  if (form.status !== "open") return false;
-  if (form.expiresAt && new Date(form.expiresAt).getTime() < Date.now())
-    return false;
-  return true;
+const buildPublicFormMeta = (form) => ({
+  _id: form._id,
+  slug: form.slug,
+  title: form.title,
+  description: form.description,
+  type: form.type,
+  visibility: form.visibility,
+  coverPhoto: form.coverPhoto || "",
+  startAt: form.startAt || null,
+  expiresAt: form.expiresAt || null,
+});
+
+const responseWindow = (form) => {
+  const now = Date.now();
+  if (form.status !== "open") {
+    if (form.status === "closed") return { ok: false, reason: "closed" };
+    return { ok: false, reason: "not_open" };
+  }
+  if (form.startAt && new Date(form.startAt).getTime() > now)
+    return { ok: false, reason: "not_started", startAt: form.startAt };
+  if (form.expiresAt && new Date(form.expiresAt).getTime() < now)
+    return { ok: false, reason: "ended", expiresAt: form.expiresAt };
+  return { ok: true };
+};
+
+const windowMessage = (reason) => {
+  switch (reason) {
+    case "closed":
+      return "This form is closed.";
+    case "not_open":
+      return "This form isn't open yet.";
+    case "not_started":
+      return "This form hasn't started yet. Check back soon.";
+    case "ended":
+      return "This form has ended. Responses are no longer accepted.";
+    default:
+      return "This form isn't accepting responses.";
+  }
 };
 
 // GET /api/forms/public/:slug
 export const getPublicForm = asyncHandler(async (req, res) => {
   const form = await getFormBySlugOrId(req.params.slug);
+  const w = responseWindow(form);
 
-  if (!isFormAcceptingResponses(form)) {
-    res.status(410);
-    throw new Error(
-      form.status === "closed"
-        ? "This form is closed."
-        : "This form isn't open yet."
-    );
+  if (!w.ok) {
+    return res.status(410).json({
+      success: false,
+      reason: w.reason,
+      message: windowMessage(w.reason),
+      startAt: w.startAt || null,
+      expiresAt: w.expiresAt || null,
+      formMeta: buildPublicFormMeta(form),
+    });
   }
 
   if (form.visibility === "private") {
-    const token = verifyParticipantToken(readParticipantToken(req));
+    const token = verifyParticipantToken(readToken(req, "t"));
+    const participantEmail = token?.email?.toLowerCase();
+
     if (!token || String(token.formId) !== String(form._id)) {
-      res.status(401);
-      throw new Error(
-        "This form is private. Sign in with your email and password."
-      );
+      return res.status(401).json({
+        success: false,
+        requiresAuth: true,
+        canRequestAccess: !!form.settings?.allowAccessRequests,
+        autoApprove: !!form.settings?.autoApproveAccess,
+        requestFields: form.settings?.requestFields || [],
+        message:
+          "This form is private. Sign in with your email and password, or request access.",
+        formMeta: buildPublicFormMeta(form),
+      });
     }
+
     const participant = form.participants.find(
-      (p) => p.email === token.email.toLowerCase()
+      (p) => p.email === participantEmail
     );
     if (!participant) {
-      res.status(403);
-      throw new Error("You are not a participant on this form.");
+      return res.status(403).json({
+        success: false,
+        message: "You are not a participant on this form.",
+      });
     }
+
     return res.status(200).json({
       success: true,
       form: buildPublicForm(form),
@@ -1501,34 +2295,29 @@ export const getPublicForm = asyncHandler(async (req, res) => {
 export const participantLogin = asyncHandler(async (req, res) => {
   const form = await getFormBySlugOrId(req.params.slug);
 
-  if (form.visibility !== "private") {
-    res.status(400);
-    throw new Error("This form doesn't require a password.");
-  }
+  if (form.visibility !== "private")
+    throw httpError("This form doesn't require a password.");
 
-  if (!isFormAcceptingResponses(form)) {
-    res.status(410);
-    throw new Error("This form isn't accepting responses.");
+  const w = responseWindow(form);
+  if (!w.ok) {
+    return res.status(410).json({
+      success: false,
+      reason: w.reason,
+      message: windowMessage(w.reason),
+      startAt: w.startAt || null,
+      expiresAt: w.expiresAt || null,
+    });
   }
 
   const email = String(req.body?.email || "").trim().toLowerCase();
   const password = String(req.body?.password || "");
-  if (!email || !password) {
-    res.status(400);
-    throw new Error("Email and password are required.");
-  }
+  if (!email || !password) throw httpError("Email and password are required.");
 
   const participant = form.participants.find((p) => p.email === email);
-  if (!participant) {
-    res.status(401);
-    throw new Error("Invalid email or password.");
-  }
+  if (!participant) throw httpError("Invalid email or password.", 401);
 
   const ok = await bcrypt.compare(password, participant.passwordHash);
-  if (!ok) {
-    res.status(401);
-    throw new Error("Invalid email or password.");
-  }
+  if (!ok) throw httpError("Invalid email or password.", 401);
 
   const token = signParticipantToken(form._id, participant.email);
 
@@ -1541,42 +2330,33 @@ export const participantLogin = asyncHandler(async (req, res) => {
 });
 
 // POST /api/forms/public/:slug/upload
-// Respondent-uploaded image/document. The returned URL is what the
-// client then puts into the answer value for an `image` / `document` /
-// `file` field. Multer middleware (uploadMedia) attaches req.file.
 export const uploadFormMedia = asyncHandler(async (req, res) => {
   const form = await getFormBySlugOrId(req.params.slug);
-
-  if (!isFormAcceptingResponses(form)) {
-    res.status(410);
-    throw new Error("This form isn't accepting responses.");
+  const w = responseWindow(form);
+  if (!w.ok) {
+    return res.status(410).json({
+      success: false,
+      reason: w.reason,
+      message: windowMessage(w.reason),
+    });
   }
 
   if (form.visibility === "private") {
-    const token = verifyParticipantToken(readParticipantToken(req));
-    if (!token || String(token.formId) !== String(form._id)) {
-      res.status(401);
-      throw new Error("This form is private. Sign in to upload files.");
-    }
+    const token = verifyParticipantToken(readToken(req, "t"));
+    if (!token || String(token.formId) !== String(form._id))
+      throw httpError("This form is private. Sign in to upload files.", 401);
     const participant = form.participants.find(
       (p) => p.email === token.email.toLowerCase()
     );
-    if (!participant) {
-      res.status(403);
-      throw new Error("You are not a participant on this form.");
-    }
+    if (!participant)
+      throw httpError("You are not a participant on this form.", 403);
   }
 
-  if (!req.file) {
-    res.status(400);
-    throw new Error("No file uploaded.");
-  }
+  if (!req.file) throw httpError("No file uploaded.");
 
   const fileUrl = req.file.path || req.file.location;
-  if (!fileUrl) {
-    res.status(500);
-    throw new Error("Upload succeeded but no URL was returned.");
-  }
+  if (!fileUrl)
+    throw httpError("Upload succeeded but no URL was returned.", 500);
 
   res.status(200).json({
     success: true,
@@ -1587,13 +2367,76 @@ export const uploadFormMedia = asyncHandler(async (req, res) => {
   });
 });
 
+// Build election standings (used by both owner stats and voter results)
+const buildElectionResults = (form, responses) => {
+  const positions = form.positions.map((pos) => {
+    const counts = new Map();
+    for (const c of pos.candidates) counts.set(String(c.id), 0);
+
+    let totalVotes = 0;
+    let abstained = 0;
+
+    for (const r of responses) {
+      const a = (r.answers || []).find((x) => x.fieldId === pos.id);
+      const val = a?.value;
+      if (!Array.isArray(val) || !val.length) {
+        abstained++;
+        continue;
+      }
+      for (const cid of val) {
+        const key = String(cid);
+        if (counts.has(key)) {
+          counts.set(key, counts.get(key) + 1);
+          totalVotes++;
+        }
+      }
+    }
+
+    const candidates = pos.candidates
+      .map((c) => {
+        const count = counts.get(String(c.id)) || 0;
+        return {
+          candidateId: c.id,
+          name: c.name,
+          photoUrl: c.photoUrl,
+          slogan: c.slogan,
+          count,
+          percentage: totalVotes
+            ? Math.round((count / totalVotes) * 100)
+            : 0,
+        };
+      })
+      .sort((a, b) => b.count - a.count);
+
+    const top = candidates[0]?.count ?? 0;
+    const winners = candidates.filter((c) => c.count === top && top > 0);
+
+    return {
+      positionId: pos.id,
+      title: pos.title,
+      description: pos.description,
+      maxSelections: pos.maxSelections,
+      totalVotes,
+      abstained,
+      candidates,
+      winners: winners.map((w) => w.candidateId),
+      tie: winners.length > 1,
+    };
+  });
+
+  return positions;
+};
+
 // POST /api/forms/public/:slug/submit
 export const submitResponse = asyncHandler(async (req, res) => {
   const form = await getFormBySlugOrId(req.params.slug);
-
-  if (!isFormAcceptingResponses(form)) {
-    res.status(410);
-    throw new Error("This form isn't accepting responses.");
+  const w = responseWindow(form);
+  if (!w.ok) {
+    return res.status(410).json({
+      success: false,
+      reason: w.reason,
+      message: windowMessage(w.reason),
+    });
   }
 
   const {
@@ -1605,31 +2448,118 @@ export const submitResponse = asyncHandler(async (req, res) => {
     userAgent,
   } = req.body || {};
 
+  // Private form — require participant token
   let participant = null;
   if (form.visibility === "private") {
-    const token = verifyParticipantToken(readParticipantToken(req));
-    if (!token || String(token.formId) !== String(form._id)) {
-      res.status(401);
-      throw new Error("You need to sign in with your email and password.");
-    }
+    const token = verifyParticipantToken(readToken(req, "t"));
+    if (!token || String(token.formId) !== String(form._id))
+      throw httpError(
+        "You need to sign in with your email and password.",
+        401
+      );
     participant = form.participants.find(
       (p) => p.email === token.email.toLowerCase()
     );
-    if (!participant) {
-      res.status(403);
-      throw new Error("You are not a participant on this form.");
-    }
-    if (participant.completed && !form.settings.allowMultipleSubmissions) {
-      res.status(409);
-      throw new Error("You've already submitted this form.");
-    }
+    if (!participant)
+      throw httpError("You are not a participant on this form.", 403);
+    if (participant.completed && !form.settings.allowMultipleSubmissions)
+      throw httpError("You've already submitted this form.", 409);
   }
 
-  const map = new Map();
-  for (const [k, v] of Object.entries(answers || {})) map.set(k, v);
-
+  const isElection = form.type === "election";
   const validated = [];
   const errors = [];
+
+  if (isElection) {
+    // ── Election: one vote per position (or multi if maxSelections > 1) ──
+    const allowAbstain = !!form.settings.allowAbstain;
+    for (const pos of form.positions) {
+      const raw = answers?.[pos.id];
+      const result = validateElectionVote(pos, raw, { allowAbstain });
+      if (!result.ok) {
+        errors.push(result.error);
+        continue;
+      }
+      validated.push({
+        fieldId: pos.id,
+        value: result.value,
+        score: 0,
+        correct: null,
+      });
+    }
+
+    if (errors.length) throw httpError(errors.slice(0, 4).join(" "));
+
+    const respondentEmail =
+      participant?.email ||
+      (form.settings.collectEmail
+        ? String(email || "").trim().toLowerCase()
+        : "") ||
+      "";
+
+    const response = await FormResponse.create({
+      form: form._id,
+      respondentEmail,
+      respondentName:
+        participant?.name || String(name || "").slice(0, 120),
+      participantId: participant?._id || null,
+      answers: validated,
+      totalScore: 0,
+      maxScore: 0,
+      percentage: 0,
+      passed: null,
+      startedAt: startedAt ? new Date(startedAt) : new Date(),
+      submittedAt: new Date(),
+      durationSeconds: Number(durationSeconds) || 0,
+      userAgent: String(userAgent || req.headers["user-agent"] || "").slice(
+        0,
+        400
+      ),
+    });
+
+    form.responseCount = (form.responseCount || 0) + 1;
+    if (participant) {
+      participant.completed = true;
+      participant.submittedAt = new Date();
+      participant.submissionId = response._id;
+    }
+    await form.save();
+
+    // Clear the draft so it doesn't leak back
+    try {
+      const identity = identifyDraftOwner(req, form);
+      const filter = { form: form._id };
+      if (identity.user) filter.user = identity.user;
+      else if (identity.email) filter.email = identity.email;
+      else if (identity.sessionKey) filter.sessionKey = identity.sessionKey;
+      if (Object.keys(filter).length > 1) await FormDraft.deleteMany(filter);
+    } catch {}
+
+    // Only issue a results token if owner enabled live results.
+    let resultsToken = null;
+    let liveResults = null;
+
+    if (form.settings.showLiveResults) {
+      resultsToken = signResultsToken(form._id, response._id);
+      const all = await FormResponse.find({ form: form._id }).lean();
+      liveResults = buildElectionResults(form, all);
+    }
+
+    return res.status(201).json({
+      success: true,
+      responseId: response._id,
+      confirmationMessage: form.settings.confirmationMessage,
+      successRedirectUrl: form.settings.successRedirectUrl || "",
+      score: null,
+      // Only present if live results are enabled
+      resultsToken,
+      liveResults,
+    });
+  }
+
+  // ── Regular form / quiz ────────────────────────────────────────
+  const map = new Map();
+  for (const [k, v] of Object.entries(answers || {})) map.set(k, v);
 
   for (const field of form.fields) {
     if (field.type === "section") continue;
@@ -1640,18 +2570,10 @@ export const submitResponse = asyncHandler(async (req, res) => {
       continue;
     }
     const { score, correct } = scoreAnswer(field, result.value);
-    validated.push({
-      fieldId: field.id,
-      value: result.value,
-      score,
-      correct,
-    });
+    validated.push({ fieldId: field.id, value: result.value, score, correct });
   }
 
-  if (errors.length) {
-    res.status(400);
-    throw new Error(errors.slice(0, 4).join(" "));
-  }
+  if (errors.length) throw httpError(errors.slice(0, 4).join(" "));
 
   const maxScore = form.fields.reduce(
     (sum, f) => sum + (f.scoring?.points || 0),
@@ -1693,14 +2615,21 @@ export const submitResponse = asyncHandler(async (req, res) => {
   });
 
   form.responseCount = (form.responseCount || 0) + 1;
-
   if (participant) {
     participant.completed = true;
     participant.submittedAt = new Date();
     participant.submissionId = response._id;
   }
-
   await form.save();
+
+  try {
+    const identity = identifyDraftOwner(req, form);
+    const filter = { form: form._id };
+    if (identity.user) filter.user = identity.user;
+    else if (identity.email) filter.email = identity.email;
+    else if (identity.sessionKey) filter.sessionKey = identity.sessionKey;
+    if (Object.keys(filter).length > 1) await FormDraft.deleteMany(filter);
+  } catch {}
 
   const isQuiz = form.type === "quiz" || maxScore > 0;
   const showScore = isQuiz && form.settings.showScoreImmediately;
@@ -1714,11 +2643,69 @@ export const submitResponse = asyncHandler(async (req, res) => {
   });
 });
 
+// GET /api/forms/public/:slug/results
+//
+// Requires a valid resultsToken that was issued on successful vote submit.
+// This is what enforces "results only visible after you've voted".
+export const getPublicElectionResults = asyncHandler(async (req, res) => {
+  const form = await getFormBySlugOrId(req.params.slug);
+
+  if (form.type !== "election") throw httpError("Not an election form.", 400);
+  if (!form.settings?.showLiveResults)
+    throw httpError("Live results are disabled for this form.", 403);
+
+  const token = verifyResultsToken(readToken(req, "rt"));
+  if (!token || String(token.formId) !== String(form._id)) {
+    return res.status(401).json({
+      success: false,
+      requiresVote: true,
+      message: "Live results are only visible after you've voted.",
+    });
+  }
+
+  // Confirm the response id on the token actually exists for this form.
+  const voted = await FormResponse.exists({
+    _id: token.responseId,
+    form: form._id,
+  });
+  if (!voted) {
+    return res.status(401).json({
+      success: false,
+      requiresVote: true,
+      message: "Live results are only visible after you've voted.",
+    });
+  }
+
+  const responses = await FormResponse.find({ form: form._id }).lean();
+  const results = buildElectionResults(form, responses);
+
+  res.status(200).json({
+    success: true,
+    totalResponses: responses.length,
+    results,
+  });
+});
+
+// GET /api/forms/:id/election-results  (owner / collaborator, always allowed)
+export const getOwnerElectionResults = asyncHandler(async (req, res) => {
+  const form = await findFormOrFail(req.params.id);
+  assertCanView(form, req.user._id);
+
+  if (form.type !== "election") throw httpError("Not an election form.");
+
+  const responses = await FormResponse.find({ form: form._id }).lean();
+  const results = buildElectionResults(form, responses);
+
+  res.status(200).json({
+    success: true,
+    totalResponses: responses.length,
+    results,
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────
 // RESPONSES
 // ─────────────────────────────────────────────────────────────────────
-
-// GET /api/forms/:id/responses?page=1&limit=50&q=
 export const listResponses = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -1750,49 +2737,35 @@ export const listResponses = asyncHandler(async (req, res) => {
   });
 });
 
-// GET /api/forms/:id/responses/:responseId
 export const getResponse = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
 
   const { responseId } = req.params;
-  if (!isObjectId(responseId)) {
-    res.status(400);
-    throw new Error("Invalid response id.");
-  }
+  if (!isObjectId(responseId)) throw httpError("Invalid response id.");
 
   const response = await FormResponse.findOne({
     _id: responseId,
     form: form._id,
   }).lean();
 
-  if (!response) {
-    res.status(404);
-    throw new Error("Response not found.");
-  }
+  if (!response) throw httpError("Response not found.", 404);
 
   res.status(200).json({ success: true, response });
 });
 
-// DELETE /api/forms/:id/responses/:responseId
 export const deleteResponse = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanEdit(form, req.user._id);
 
   const { responseId } = req.params;
-  if (!isObjectId(responseId)) {
-    res.status(400);
-    throw new Error("Invalid response id.");
-  }
+  if (!isObjectId(responseId)) throw httpError("Invalid response id.");
 
   const deleted = await FormResponse.findOneAndDelete({
     _id: responseId,
     form: form._id,
   });
-  if (!deleted) {
-    res.status(404);
-    throw new Error("Response not found.");
-  }
+  if (!deleted) throw httpError("Response not found.", 404);
 
   if (deleted.participantId) {
     const participant = form.participants.id(deleted.participantId);
@@ -1812,8 +2785,6 @@ export const deleteResponse = asyncHandler(async (req, res) => {
 // ─────────────────────────────────────────────────────────────────────
 // STATS
 // ─────────────────────────────────────────────────────────────────────
-
-// GET /api/forms/:id/stats
 export const getStats = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -1827,6 +2798,18 @@ export const getStats = asyncHandler(async (req, res) => {
   const avgDuration = durations.length
     ? Math.round(durations.reduce((a, b) => a + b, 0) / durations.length)
     : 0;
+
+  // Elections → per-position standings (owner always sees them).
+  if (form.type === "election") {
+    return res.status(200).json({
+      success: true,
+      totalResponses: total,
+      averageDurationSeconds: avgDuration,
+      isElection: true,
+      showLiveResults: !!form.settings.showLiveResults,
+      positions: buildElectionResults(form, responses),
+    });
+  }
 
   const isQuiz =
     form.type === "quiz" || form.fields.some((f) => f.scoring?.points > 0);
@@ -1846,9 +2829,8 @@ export const getStats = asyncHandler(async (req, res) => {
   const passedCount = responses.filter((r) => r.passed === true).length;
 
   const fields = form.fields.map((f) => {
-    if (f.type === "section") {
+    if (f.type === "section")
       return { fieldId: f.id, label: f.label, type: f.type, isSection: true };
-    }
 
     const values = responses
       .map((r) => r.answers.find((a) => a.fieldId === f.id))
@@ -1870,9 +2852,8 @@ export const getStats = asyncHandler(async (req, res) => {
       for (const o of f.options) counts.set(o.value, 0);
       for (const a of values) {
         const arr = Array.isArray(a.value) ? a.value : [a.value];
-        for (const v of arr) {
+        for (const v of arr)
           counts.set(String(v), (counts.get(String(v)) || 0) + 1);
-        }
       }
       const options = f.options.map((o) => {
         const c = counts.get(o.value) || 0;
@@ -1903,8 +2884,8 @@ export const getStats = asyncHandler(async (req, res) => {
     }
 
     if (f.type === "yes_no") {
-      let yes = 0;
-      let no = 0;
+      let yes = 0,
+        no = 0;
       for (const a of values) {
         if (a.value === true) yes++;
         else if (a.value === false) no++;
@@ -1930,19 +2911,12 @@ export const getStats = asyncHandler(async (req, res) => {
       };
     }
 
-    // image / document / file — just return the latest URLs as samples.
     if (MEDIA_TYPES.has(f.type)) {
-      const samples = values
-        .slice(-30)
-        .reverse()
-        .map((a) => a.value);
+      const samples = values.slice(-30).reverse().map((a) => a.value);
       return { ...base, samples };
     }
 
-    const samples = values
-      .slice(-30)
-      .reverse()
-      .map((a) => String(a.value));
+    const samples = values.slice(-30).reverse().map((a) => String(a.value));
 
     let correctRate = null;
     if (f.scoring?.points) {
@@ -1974,13 +2948,6 @@ export const getStats = asyncHandler(async (req, res) => {
   });
 });
 
-// GET /api/forms/:id/leaderboard
-//
-// `answers` is included in the payload so the client can run the same
-// name/email fallback chain it uses for the responses list — a
-// respondent with no respondentName/respondentEmail but a "Full name"
-// or "Email" field answer still shows their real identity instead of
-// "Anonymous".
 export const getLeaderboard = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -2009,7 +2976,6 @@ export const getLeaderboard = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, leaderboard });
 });
 
-// GET /api/forms/:id/export
 export const exportResponses = asyncHandler(async (req, res) => {
   const form = await findFormOrFail(req.params.id);
   assertCanView(form, req.user._id);
@@ -2018,6 +2984,54 @@ export const exportResponses = asyncHandler(async (req, res) => {
     .sort({ submittedAt: -1 })
     .lean();
 
+  // ── Election export ──────────────────────────────────────────────
+  if (form.type === "election") {
+    const columns = [
+      { id: "_id", label: "Response ID" },
+      { id: "submittedAt", label: "Submitted at" },
+      { id: "respondentEmail", label: "Email" },
+      { id: "respondentName", label: "Name" },
+      { id: "durationSeconds", label: "Duration (s)" },
+      ...form.positions.map((p) => ({
+        id: p.id,
+        label: p.title,
+        type: "election",
+      })),
+    ];
+
+    const rows = responses.map((r) => {
+      const row = {
+        _id: r._id,
+        submittedAt: r.submittedAt,
+        respondentEmail: r.respondentEmail,
+        respondentName: r.respondentName,
+        durationSeconds: r.durationSeconds,
+      };
+      for (const pos of form.positions) {
+        const a = (r.answers || []).find((x) => x.fieldId === pos.id);
+        const ids = Array.isArray(a?.value) ? a.value : [];
+        const names = ids
+          .map((cid) => pos.candidates.find((c) => c.id === cid)?.name || "")
+          .filter(Boolean);
+        row[pos.id] = names.join(", ") || "Abstained";
+      }
+      return row;
+    });
+
+    return res.status(200).json({
+      success: true,
+      form: {
+        _id: form._id,
+        title: form.title,
+        type: form.type,
+        coverPhoto: form.coverPhoto || "",
+      },
+      columns,
+      rows,
+    });
+  }
+
+  // ── Regular export ───────────────────────────────────────────────
   const columns = [
     { id: "_id", label: "Response ID" },
     { id: "submittedAt", label: "Submitted at" },
@@ -2081,6 +3095,7 @@ export default {
 
   uploadFormCoverPhoto,
   removeFormCoverPhoto,
+  uploadFormMediaEditor,
 
   addCollaborator,
   listCollaborators,
@@ -2093,10 +3108,23 @@ export default {
   removeParticipant,
   resendParticipantCredentials,
 
+  requestAccess,
+  listAccessRequests,
+  approveAccessRequest,
+  rejectAccessRequest,
+  bulkReviewAccessRequests,
+
+  saveDraft,
+  getDraft,
+  clearDraft,
+  listMyPendingForms,
+
   getPublicForm,
   participantLogin,
   uploadFormMedia,
   submitResponse,
+  getPublicElectionResults,
+  getOwnerElectionResults,
 
   listResponses,
   getResponse,

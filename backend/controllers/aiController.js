@@ -8,6 +8,7 @@ import Conversation from "../models/conversationModel.js";
 import Document from "../models/documentModel.js";
 import UserMemory from "../models/userMemoryModel.js";
 import { startFormSessionCore } from "./formAiController.js";
+import { buildIntentFeatureList } from "../config/formCapabilities.js";
 import {
   groqText,
   groqJSON,
@@ -26,6 +27,8 @@ import {
   researchPerson,
   estimateTokens,
 } from "../utils/xamutAI.js";
+
+const FORM_INTENT_FEATURE_LIST = buildIntentFeatureList();
 
 // ─────────────────────────────────────────────────────────────────────
 // Size discipline
@@ -75,10 +78,10 @@ try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null;
 // their OWN forms rather than a request to create a new one?
 // ─────────────────────────────────────────────────────────────────────
 const FORM_LOOKUP_RE =
-  /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded)\b|\bhow many (people )?(filled|finished|completed|submitted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bapplication form\b|\b(my|the)\s+application\b/i;
+  /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?|elections?|votes?|ballots?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|standings?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers|votes?)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded|voted)\b|\bhow many (people )?(filled|finished|completed|submitted|voted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bwho('s| is) winning\b|\bcurrent (standings?|results?)\b/i;
 
 const FORM_STATS_INTENT_RE =
-  /\b(stats?|statistics|responses?|submissions?|leaderboard|scores?|results?|analytics?|average|pass rate|how many|who (submitted|filled|answered|responded))\b/i;
+  /\b(stats?|statistics|responses?|submissions?|leaderboard|scores?|results?|standings?|analytics?|average|pass rate|how many|who (submitted|filled|answered|responded|voted)|who('s| is) winning)\b/i;
 
 // ─────────────────────────────────────────────────────────────────────
 // Persona (unchanged — this is deliberate design)
@@ -711,7 +714,7 @@ Return JSON exactly:
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Intent detection — classifier prompts unchanged, inputs capped
+// Intent detection — prompt now feature-list driven, inputs capped
 // ─────────────────────────────────────────────────────────────────────
 async function detectGenerationIntent({ message, history, forceType = null }) {
   const capped = capForClassifier(message, history);
@@ -729,109 +732,33 @@ async function detectGenerationIntent({ message, history, forceType = null }) {
           content: `You classify whether a user wants an AI-generated deliverable file RIGHT NOW.
 
 Three deliverables:
-1. "document" — an essay, report, chapter, thesis, paper, assignment,
-   letter, article, proposal, memo, brief, notes, summary, study guide,
-   review, analysis, write-up. Any prose deliverable that reads as pages.
+1. "document" — essay, report, chapter, thesis, paper, assignment, letter,
+   article, proposal, memo, brief, notes, summary, study guide, review,
+   analysis, write-up. Any prose deliverable that reads as pages.
 2. "presentation" — slide deck, slides, slideshow, pitch deck, keynote, PPT.
-3. "form" — anything people fill in and send back. Forms, questionnaires,
-   surveys, quizzes, exams, tests, assessments, polls, ballots, RSVPs,
-   sign-up sheets, registrations, attendance sheets, intake sheets,
-   feedback forms, worksheets, homework sheets, practice tests,
-   response sheets, anything used to collect answers or information
-   from a group of people.
+3. "form" — anything people fill in and send back.
 
-=== FORM DETECTION (read this carefully) ===
-
-"form" is broader than the word "form". Trigger on ANY request where
-the user wants a way to collect information from people, including:
-
-Signal words:
-  form, questionnaire, survey, quiz, exam, test, assessment, poll,
-  ballot, RSVP, sign-up, signup, registration, attendance, intake,
-  worksheet, homework, practice test, feedback sheet, response sheet,
-  "collect responses", "collect info", "collect data", "gather info",
-  "gather responses", "ask people", "ask attendees", "ask students",
-  "ask the team", "collect emails", "collect phone numbers"
-
-Sentences that ARE form requests even without a keyword:
-  - "I want you to set an exam for my students" → form (quiz)
-  - "I want to collect data about X" → form (survey)
-  - "I need something people can fill in for X" → form
-  - "make me something to ask my team about X" → form
-  - "I want to gather feedback on X" → form
-  - "help me set up a sign-up for X" → form
-  - "I want a sheet to track X" → form
-  - "make a multiple choice test on X" → form (quiz)
-  - "I want to ask people about X" → form
-  - "set questions for my class on X" → form (quiz)
-  - "build me a quiz" → form
-  - "I need to survey my users" → form
-
-Decide from the MEANING of the sentence, not from a keyword match.
-If the request is "I want a way to collect X from Y", it's a form.
+${FORM_INTENT_FEATURE_LIST}
 
 === LOOKUPS ARE NOT GENERATION (read this too) ===
 
 Do NOT set "form" when the user is asking about a form that ALREADY
-EXISTS. Any of these phrasings means the user wants you to look
-something up, not create something new:
-
-  - "what's the stats on my attendance form" → NOT a form request
-  - "how many responses on my quiz" → NOT a form request
-  - "show me my forms" → NOT a form request
-  - "how many forms have I made" → NOT a form request
-  - "list my surveys" → NOT a form request
-  - "who submitted to my feedback form" → NOT a form request
-  - "what's on my form" → NOT a form request
-  - "how did people answer my quiz" → NOT a form request
-  - "average score on my exam" → NOT a form request
-  - "leaderboard for my test" → NOT a form request
-  - "pass rate on my quiz" → NOT a form request
-  - "top scores in my survey" → NOT a form request
-  - "how many people filled out my form" → NOT a form request
-
-Possessive markers that mean lookup, not create:
-  "my form", "my forms", "my quiz", "my attendance form", "my survey",
-  "the form I made", "the quiz I created", "the survey I set up"
-
-Retrieval markers that mean lookup, not create:
-  "stats", "statistics", "how many", "list", "show me", "responses",
-  "submissions", "leaderboard", "scores", "results", "analytics",
-  "average score", "pass rate", "who answered", "who submitted",
-  "how did people answer", "what did people answer", "how many people"
-
-If a form word AND a possessive/retrieval marker both appear, the
-request is a lookup. Set wantsGeneration = false.
-
-Only set wantsGeneration = true for "form" when the user is asking
-you to CREATE a new form for them to send out.
-
-=== DOCUMENT / PRESENTATION DETECTION ===
-
-Signal words for "document":
-  chapter, chapters, essay, report, thesis, dissertation, paper, assignment,
-  letter, article, proposal, memo, brief, notes, summary, guide, review,
-  analysis, write-up, "write me", "write a", "draft a", "compose"
-
-Signal words for "presentation":
-  slide, slides, slideshow, deck, pitch deck, keynote, PPT, powerpoint,
-  "presentation", "present to", "presentation on", "make slides"
+EXISTS. Possessive markers ("my form", "my quiz", "my attendance form",
+"the survey I made") and retrieval markers ("stats", "how many", "list",
+"show me", "responses", "submissions", "leaderboard", "scores",
+"results", "average", "pass rate", "who submitted") mean the user
+wants a lookup, not a creation. Set wantsGeneration = false.
 
 === RULES ===
 
-- NEVER set "presentation" unless one of the presentation words appears.
-- Check the LOOKUP rules before defaulting to "form". If the user
-  is asking about something they already have, wantsGeneration = false.
-- If no signal words appear and none of the FORM sentences match:
+- NEVER set "presentation" unless a presentation word appears.
+- Check the LOOKUP rules before defaulting to "form".
+- If no signal words appear:
     - academic or school topic → "document"
     - business pitch or talk → "presentation"
     - anything else → "document"
-- If no clear topic, wantsGeneration = false.
-- If the user is just chatting, wantsGeneration = false.
-- Personal, intimate, or advice questions are NEVER generation requests.
-- "Who is X" and "tell me about X" are NEVER generation requests, they
-  are research questions and should be answered in chat with the web
-  search tools.
+- If the request is just chatting, advice, personal questions, or
+  "who is X", set wantsGeneration = false.
 
 Return STRICT JSON only.`,
         },
