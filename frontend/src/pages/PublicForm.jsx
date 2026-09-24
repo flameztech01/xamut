@@ -1721,9 +1721,11 @@ const PublicForm = () => {
   const isElection = form?.type === "election";
 
   useDocumentMeta({
-    title: form?.title ? `${form.title} — Xamut` : undefined,
-    description: form?.description || undefined,
-  });
+  title: form?.title ? `${form.title} — Xamut` : undefined,
+  description: form?.description || undefined,
+  image: form?.coverPhoto || undefined,
+  url: typeof window !== "undefined" ? window.location.href : undefined,
+});
 
   // ── Handle auth / window errors from the query ─────────────
   useEffect(() => {
