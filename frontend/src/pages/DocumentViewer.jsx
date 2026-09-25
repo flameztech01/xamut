@@ -18,6 +18,59 @@ import {
 } from "../features/templates/PowerPointDesigns";
 
 // ─────────────────────────────────────────────────────────────
+// A4 words-per-page reference (mirrors backend)
+// ─────────────────────────────────────────────────────────────
+const A4_WORDS_PER_PAGE = {
+  10: { 1.0: 600, 1.15: 520, 1.5: 400, 2.0: 300 },
+  11: { 1.0: 550, 1.15: 480, 1.5: 370, 2.0: 275 },
+  12: { 1.0: 500, 1.15: 435, 1.5: 335, 2.0: 250 },
+  13: { 1.0: 450, 1.15: 390, 1.5: 300, 2.0: 225 },
+  14: { 1.0: 400, 1.15: 350, 1.5: 270, 2.0: 200 },
+  15: { 1.0: 355, 1.15: 310, 1.5: 240, 2.0: 180 },
+  16: { 1.0: 320, 1.15: 280, 1.5: 215, 2.0: 160 },
+  18: { 1.0: 260, 1.15: 225, 1.5: 175, 2.0: 130 },
+};
+
+const computeWordsPerPage = ({ bodyFontSize = 12, lineSpacing = 1.5 } = {}) => {
+  const table = A4_WORDS_PER_PAGE[bodyFontSize] || A4_WORDS_PER_PAGE[12];
+  const keys = Object.keys(table).map(Number);
+  const nearest = keys.reduce((a, b) =>
+    Math.abs(b - lineSpacing) < Math.abs(a - lineSpacing) ? b : a
+  );
+  return table[nearest];
+};
+
+const DEFAULT_FONT_SETTINGS = {
+  bodyFontSize: 12,
+  headingFontSize: 16,
+  fontFamily: "Calibri",
+  lineSpacing: 1.5,
+};
+
+// Kind → pretty label. Purely cosmetic; the renderer itself doesn't
+// branch on kind.
+const KIND_LABEL = {
+  assignment: "Assignment",
+  essay: "Essay",
+  letter: "Letter",
+  report: "Report",
+  memo: "Memo",
+  notes: "Notes",
+  guide: "Guide",
+  manual: "Manual",
+  article: "Article",
+  proposal: "Proposal",
+  speech: "Speech",
+  bio: "Bio",
+  summary: "Summary",
+  "study-guide": "Study guide",
+  story: "Story",
+  tutorial: "Tutorial",
+  other: "Document",
+  document: "Document",
+};
+
+// ─────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────
 const slugify = (text, fallback = "Xamut_File") =>
@@ -34,9 +87,6 @@ const useDebouncedEffect = (fn, deps, delay) => {
   }, deps);
 };
 
-// Look up a template defensively. If the saved theme.templateId is a
-// presentation id on a document (or vice versa), we fall through to the
-// correct default instead of rendering the wrong design.
 const resolveTemplate = (map, list, defaultId, templateId) => {
   const isKnown = list.some((t) => t.id === templateId);
   if (isKnown && map[templateId]) return map[templateId];
@@ -44,7 +94,366 @@ const resolveTemplate = (map, list, defaultId, templateId) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Page
+// Reusable UI atoms
+// ─────────────────────────────────────────────────────────────
+const Section = ({ title, children }) => (
+  <div className="mb-5 last:mb-0">
+    <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+      {title}
+    </p>
+    <div className="space-y-2">{children}</div>
+  </div>
+);
+
+const ColorField = ({ label, value, onChange }) => (
+  <div>
+    <label className="mb-1 block text-[11px] font-semibold text-stone-500 dark:text-stone-400">
+      {label}
+    </label>
+    <div className="flex items-center gap-2">
+      <input
+        type="color"
+        value={`#${value || "000000"}`}
+        onChange={(e) => onChange(e.target.value.replace("#", "").toUpperCase())}
+        className="h-8 w-9 cursor-pointer rounded-md border border-stone-200 bg-white dark:border-stone-700 dark:bg-stone-800"
+      />
+      <input
+        type="text"
+        value={value || ""}
+        onChange={(e) => {
+          const v = e.target.value.replace("#", "").toUpperCase().slice(0, 6);
+          if (/^[0-9A-F]{0,6}$/.test(v)) onChange(v);
+        }}
+        className="flex-1 rounded-md border border-stone-200 bg-white px-2.5 py-1.5 font-mono text-[11.5px] text-stone-700 outline-none transition-colors focus:border-teal-400 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-200 dark:focus:border-teal-500/60"
+      />
+    </div>
+  </div>
+);
+
+const NumberRow = ({
+  label,
+  hint,
+  value,
+  min,
+  max,
+  step = 1,
+  unit = "",
+  onChange,
+}) => {
+  const safe = Number.isFinite(Number(value)) ? Number(value) : "";
+  return (
+    <div className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <p className="text-[12px] font-medium text-stone-700 dark:text-stone-200">
+          {label}
+        </p>
+        {hint ? (
+          <p className="mt-0.5 text-[10.5px] leading-snug text-stone-400 dark:text-stone-500">
+            {hint}
+          </p>
+        ) : null}
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        <input
+          type="number"
+          min={min}
+          max={max}
+          step={step}
+          value={safe}
+          onChange={(e) => {
+            if (e.target.value === "") return onChange(null);
+            const n = Number(e.target.value);
+            if (Number.isNaN(n)) return;
+            onChange(Math.min(Math.max(n, min), max));
+          }}
+          className="w-16 rounded-md border border-stone-200 bg-white px-2 py-1 text-center text-[12px] font-semibold text-stone-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
+        />
+        {unit ? (
+          <span className="text-[11px] text-stone-400 dark:text-stone-500">
+            {unit}
+          </span>
+        ) : null}
+      </div>
+    </div>
+  );
+};
+
+const SegmentedControl = ({ value, onChange, options }) => (
+  <div className="grid grid-cols-4 gap-0.5 rounded-md border border-stone-200/70 bg-stone-50/70 p-0.5 dark:border-stone-800/70 dark:bg-stone-900/50">
+    {options.map((o) => {
+      const active = value === o.value;
+      return (
+        <button
+          key={o.value}
+          type="button"
+          onClick={() => onChange(o.value)}
+          className={`rounded-md py-1 text-[10.5px] font-semibold leading-tight transition-colors ${
+            active
+              ? "bg-white text-teal-600 shadow-sm ring-1 ring-stone-900/5 dark:bg-stone-800 dark:text-teal-400 dark:ring-stone-100/5"
+              : "text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200"
+          }`}
+        >
+          {o.label}
+        </button>
+      );
+    })}
+  </div>
+);
+
+const ToggleRow = ({ label, hint, checked, onChange }) => (
+  <label className="flex cursor-pointer select-none items-start justify-between gap-3">
+    <span className="min-w-0">
+      <span className="block text-[12px] font-medium text-stone-700 dark:text-stone-200">
+        {label}
+      </span>
+      {hint ? (
+        <span className="mt-0.5 block text-[10.5px] leading-snug text-stone-400 dark:text-stone-500">
+          {hint}
+        </span>
+      ) : null}
+    </span>
+    <span className="relative mt-0.5 inline-flex h-5 w-9 shrink-0">
+      <input
+        type="checkbox"
+        checked={!!checked}
+        onChange={(e) => onChange(e.target.checked)}
+        className="peer sr-only"
+      />
+      <span className="absolute inset-0 rounded-full bg-stone-200 transition-colors peer-checked:bg-teal-500 dark:bg-stone-700 dark:peer-checked:bg-teal-500" />
+      <span className="pointer-events-none absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4 dark:bg-stone-100" />
+    </span>
+  </label>
+);
+
+// ─────────────────────────────────────────────────────────────
+// Theme + typography + structure panel
+// ─────────────────────────────────────────────────────────────
+const ThemePanel = ({
+  theme,
+  fontSettings,
+  meta,
+  templateList,
+  isPresentation,
+  dirty,
+  bare = false,
+  onClose,
+  onChangeTheme,
+  onChangeFont,
+  onChangeMeta,
+}) => {
+  if (!theme || !fontSettings || !meta) return null;
+
+  const wordsPerPage = computeWordsPerPage(fontSettings);
+  const activeTemplate = templateList.find((t) => t.id === theme.templateId);
+
+  return (
+    <div>
+      {!bare && (
+        <div className="mb-4 flex items-center justify-between">
+          <h2 className="text-[13px] font-semibold tracking-tight text-stone-900 dark:text-stone-100">
+            Customize
+          </h2>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="rounded-md p-1 text-stone-400 transition-colors hover:bg-stone-100 hover:text-stone-700 dark:hover:bg-stone-800 dark:hover:text-stone-200"
+              aria-label="Close"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                className="h-3.5 w-3.5"
+              >
+                <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
+              </svg>
+            </button>
+          )}
+        </div>
+      )}
+
+      <Section title="Colors">
+        <ColorField
+          label="Primary"
+          value={theme.primaryColor}
+          onChange={(v) => onChangeTheme({ primaryColor: v })}
+        />
+        <ColorField
+          label="Background"
+          value={theme.secondaryColor}
+          onChange={(v) => onChangeTheme({ secondaryColor: v })}
+        />
+        <ColorField
+          label="Accent"
+          value={theme.accentColor}
+          onChange={(v) => onChangeTheme({ accentColor: v })}
+        />
+        <ColorField
+          label="Text"
+          value={theme.textColor}
+          onChange={(v) => onChangeTheme({ textColor: v })}
+        />
+        <button
+          type="button"
+          onClick={() => {
+            if (!activeTemplate) return;
+            onChangeTheme({
+              primaryColor: activeTemplate.primary,
+              secondaryColor: activeTemplate.secondary,
+              accentColor: activeTemplate.accent,
+            });
+          }}
+          className="mt-1 w-full rounded-md border border-stone-200 bg-white py-1.5 text-[11.5px] font-semibold text-stone-600 transition-colors hover:border-teal-300 hover:bg-teal-50 hover:text-teal-700 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10 dark:hover:text-teal-400"
+        >
+          Reset to template default
+        </button>
+      </Section>
+
+      <div className="mb-5 border-t border-stone-100 pt-4 dark:border-stone-800">
+        <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+          Typography
+        </p>
+        <div className="space-y-3">
+          <NumberRow
+            label="Body size"
+            hint={`≈ ${wordsPerPage} words / A4 page`}
+            value={fontSettings.bodyFontSize}
+            min={8}
+            max={32}
+            unit="pt"
+            onChange={(v) => v != null && onChangeFont({ bodyFontSize: v })}
+          />
+          <NumberRow
+            label="Heading size"
+            value={fontSettings.headingFontSize}
+            min={10}
+            max={40}
+            unit="pt"
+            onChange={(v) => v != null && onChangeFont({ headingFontSize: v })}
+          />
+          <div>
+            <p className="mb-1.5 text-[12px] font-medium text-stone-700 dark:text-stone-200">
+              Line spacing
+            </p>
+            <SegmentedControl
+              value={fontSettings.lineSpacing}
+              onChange={(v) => onChangeFont({ lineSpacing: v })}
+              options={[
+                { value: 1, label: "1.0" },
+                { value: 1.15, label: "1.15" },
+                { value: 1.5, label: "1.5" },
+                { value: 2, label: "2.0" },
+              ]}
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-[12px] font-medium text-stone-700 dark:text-stone-200">
+              Font family
+            </label>
+            <select
+              value={fontSettings.fontFamily}
+              onChange={(e) => onChangeFont({ fontFamily: e.target.value })}
+              className="w-full rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] text-stone-800 outline-none focus:border-teal-400 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-800 dark:text-stone-100"
+            >
+              {[
+                "Calibri",
+                "Arial",
+                "Georgia",
+                "Times New Roman",
+                "Helvetica",
+                "Cambria",
+                "Garamond",
+              ].map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </div>
+
+      {!isPresentation && (
+        <div className="border-t border-stone-100 pt-4 dark:border-stone-800">
+          <p className="mb-2 text-[10px] font-bold uppercase tracking-[0.14em] text-stone-400 dark:text-stone-500">
+            Page structure
+          </p>
+          <div className="space-y-3">
+            <NumberRow
+              label="Target page count"
+              hint="Guides the AI on regenerate"
+              value={meta.pageCount ?? ""}
+              min={1}
+              max={40}
+              unit="pp"
+              onChange={(v) => onChangeMeta({ pageCount: v })}
+            />
+            <ToggleRow
+              label="Cover page"
+              hint="Title + subtitle page at the top"
+              checked={meta.includeCoverPage}
+              onChange={(v) => onChangeMeta({ includeCoverPage: v })}
+            />
+            <ToggleRow
+              label="Table of contents"
+              hint="Sections with page numbers"
+              checked={meta.includeTableOfContents}
+              onChange={(v) => onChangeMeta({ includeTableOfContents: v })}
+            />
+          </div>
+        </div>
+      )}
+
+      {dirty && (
+        <p className="mt-4 text-center text-[10px] text-stone-400 dark:text-stone-500">
+          Saving…
+        </p>
+      )}
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Thumbnail wrapper
+// ─────────────────────────────────────────────────────────────
+const TemplateThumb = ({
+  Template,
+  page,
+  theme,
+  fontSettings,
+  pageNumber,
+  totalPages,
+  aspectRatioNum,
+}) => {
+  const scale = 0.28;
+  return (
+    <div
+      className="pointer-events-none h-full w-full origin-top-left overflow-hidden"
+      style={{ transform: `scale(${scale})` }}
+    >
+      <div
+        style={{
+          width: `${100 / scale}%`,
+          height: `${100 / scale}%`,
+          aspectRatio: aspectRatioNum,
+          containerType: "inline-size",
+        }}
+      >
+        <Template
+          page={page}
+          theme={theme}
+          fontSettings={fontSettings}
+          pageNumber={pageNumber}
+          totalPages={totalPages}
+        />
+      </div>
+    </div>
+  );
+};
+
+// ─────────────────────────────────────────────────────────────
+// Main page
 // ─────────────────────────────────────────────────────────────
 const DocumentViewer = () => {
   const { id } = useParams();
@@ -65,23 +474,59 @@ const DocumentViewer = () => {
   const [showTemplatePicker, setShowTemplatePicker] = useState(false);
   const [showMobileSheet, setShowMobileSheet] = useState(false);
   const [downloading, setDownloading] = useState(false);
-  const [theme, setTheme] = useState(null);
-  const [themeDirty, setThemeDirty] = useState(false);
 
-  const previewRef = useRef(null);
+  const [theme, setTheme] = useState(null);
+  const [fontSettings, setFontSettings] = useState(null);
+  const [meta, setMeta] = useState(null);
+
+  const [themeDirty, setThemeDirty] = useState(false);
+  const [fontDirty, setFontDirty] = useState(false);
+  const [metaDirty, setMetaDirty] = useState(false);
+
   const hiddenRef = useRef(null);
 
   useEffect(() => {
-    if (doc?.theme && !theme) setTheme({ ...doc.theme });
-  }, [doc, theme]);
+    if (!doc) return;
+    setTheme({ ...doc.theme });
+    setFontSettings({
+      ...DEFAULT_FONT_SETTINGS,
+      ...(doc.fontSettings || {}),
+    });
+    setMeta({
+      pageCount: doc.pageCount ?? null,
+      includeCoverPage: doc.includeCoverPage === true,
+      includeTableOfContents: doc.includeTableOfContents === true,
+    });
+    setCurrentPage(0);
+    setThemeDirty(false);
+    setFontDirty(false);
+    setMetaDirty(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc?._id]);
+
+  const anyDirty = themeDirty || fontDirty || metaDirty;
 
   useDebouncedEffect(
     () => {
-      if (!themeDirty || !doc?._id || !theme) return;
-      updateDocument({ id: doc._id, theme }).unwrap().catch(() => {});
-      setThemeDirty(false);
+      if (!anyDirty || !doc?._id) return;
+      const payload = {};
+      if (themeDirty && theme) payload.theme = theme;
+      if (fontDirty && fontSettings) payload.fontSettings = fontSettings;
+      if (metaDirty && meta) {
+        payload.pageCount = meta.pageCount ?? null;
+        payload.includeCoverPage = !!meta.includeCoverPage;
+        payload.includeTableOfContents = !!meta.includeTableOfContents;
+      }
+      updateDocument({ id: doc._id, ...payload })
+        .unwrap()
+        .catch(() => {})
+        .finally(() => {
+          setThemeDirty(false);
+          setFontDirty(false);
+          setMetaDirty(false);
+        });
     },
-    [themeDirty, theme],
+    [anyDirty, theme, fontSettings, meta],
     600
   );
 
@@ -107,6 +552,16 @@ const DocumentViewer = () => {
   const updateTheme = (patch) => {
     setTheme((t) => ({ ...t, ...patch }));
     setThemeDirty(true);
+  };
+
+  const updateFont = (patch) => {
+    setFontSettings((f) => ({ ...f, ...patch }));
+    setFontDirty(true);
+  };
+
+  const updateMeta = (patch) => {
+    setMeta((m) => ({ ...m, ...patch }));
+    setMetaDirty(true);
   };
 
   const handleSelectTemplate = (templateId) => {
@@ -202,7 +657,7 @@ const DocumentViewer = () => {
             color: "888888",
             align: "right",
           });
-        } else {
+        } else if (p.role === "toc") {
           slide.background = { color: bg };
           slide.addShape(pptx.ShapeType.rect, {
             x: 0,
@@ -212,11 +667,42 @@ const DocumentViewer = () => {
             fill: { color: primary },
             line: { color: primary },
           });
+          slide.addText(p.heading || "Agenda", {
+            x: 0.8,
+            y: 0.45,
+            w: 11.5,
+            h: 0.9,
+            fontSize: 26,
+            bold: true,
+            color: dark,
+          });
+          const entries = (p.blocks || [])
+            .filter((b) => b.type === "toc-entry")
+            .map((b) => ({
+              text: b.text || "",
+              options: {
+                bullet: { code: "25AA", color: primary },
+                fontSize: 18,
+                color: "2B2B2B",
+                paraSpaceAfter: 12,
+              },
+            }));
+          if (entries.length) {
+            slide.addText(entries, {
+              x: 0.9,
+              y: 1.6,
+              w: 11.3,
+              h: 5.2,
+              valign: "top",
+            });
+          }
+        } else {
+          slide.background = { color: bg };
           slide.addShape(pptx.ShapeType.rect, {
-            x: 0.5,
-            y: 0.55,
-            w: 0.12,
-            h: 0.7,
+            x: 0,
+            y: 0,
+            w: 13.33,
+            h: 0.14,
             fill: { color: primary },
             line: { color: primary },
           });
@@ -229,26 +715,37 @@ const DocumentViewer = () => {
             bold: true,
             color: dark,
           });
-          const bullets = (p.bullets || []).map((b) => ({
-            text: b,
-            options: {
-              bullet: { code: "25AA", color: primary },
-              fontSize: 18,
-              color: "2B2B2B",
-              paraSpaceAfter: 10,
-            },
-          }));
-          if (bullets.length) {
-            slide.addText(bullets, {
-              x: 0.9,
-              y: 1.6,
-              w: 11.3,
-              h: 5.2,
-              valign: "top",
-            });
+
+          const bulletItems = [];
+          const bodyParas = [];
+          for (const b of p.blocks || []) {
+            if (b.type === "bullets" || b.type === "numbered") {
+              for (const it of b.items || []) bulletItems.push(it);
+            } else if (b.type === "paragraph") {
+              bodyParas.push(b.text || "");
+            }
           }
-          if (p.paragraphs?.length) {
-            slide.addText(p.paragraphs.join(" "), {
+          if (!bulletItems.length)
+            for (const b of p.bullets || []) bulletItems.push(b);
+          if (!bodyParas.length)
+            for (const pp of p.paragraphs || []) bodyParas.push(pp);
+
+          if (bulletItems.length) {
+            slide.addText(
+              bulletItems.map((t) => ({
+                text: t,
+                options: {
+                  bullet: { code: "25AA", color: primary },
+                  fontSize: 18,
+                  color: "2B2B2B",
+                  paraSpaceAfter: 10,
+                },
+              })),
+              { x: 0.9, y: 1.6, w: 11.3, h: 5.2, valign: "top" }
+            );
+          }
+          if (bodyParas.length) {
+            slide.addText(bodyParas.join(" "), {
               x: 0.9,
               y: 5.2,
               w: 11.3,
@@ -293,9 +790,9 @@ const DocumentViewer = () => {
   // ─── Loading / error ───────────────────────────────────────
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-stone-100">
-        <div className="flex items-center gap-3 text-stone-500">
-          <span className="h-5 w-5 animate-spin rounded-full border-2 border-stone-300 border-t-orange-500" />
+      <div className="flex h-screen items-center justify-center bg-stone-100 dark:bg-stone-950">
+        <div className="flex items-center gap-3 text-stone-500 dark:text-stone-400">
+          <span className="h-5 w-5 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500 dark:border-stone-700 dark:border-t-teal-400" />
           Loading document…
         </div>
       </div>
@@ -304,16 +801,16 @@ const DocumentViewer = () => {
 
   if (error || !doc) {
     return (
-      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-stone-100 px-6 text-center">
-        <p className="text-lg font-semibold text-stone-800">
+      <div className="flex h-screen flex-col items-center justify-center gap-4 bg-stone-100 px-6 text-center dark:bg-stone-950">
+        <p className="text-lg font-semibold text-stone-800 dark:text-stone-100">
           Document not found
         </p>
-        <p className="max-w-sm text-sm text-stone-500">
+        <p className="max-w-sm text-sm text-stone-500 dark:text-stone-400">
           It may have been deleted, or the link is incorrect.
         </p>
         <Link
           to="/chat"
-          className="rounded-full bg-orange-500 px-6 py-2.5 text-sm font-semibold text-white shadow-md shadow-orange-500/25 hover:bg-orange-600"
+          className="rounded-md bg-teal-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm shadow-teal-500/25 hover:bg-teal-700 dark:bg-teal-500 dark:hover:bg-teal-400"
         >
           Back to chat
         </Link>
@@ -321,22 +818,21 @@ const DocumentViewer = () => {
     );
   }
 
-  // ─── Aspect-ratio driven sizing ────────────────────────────
-  // The wrapper uses container queries so we can express:
-  //   "take min(container width, max px, container height × aspectRatio)"
-  // This guarantees the rendered page fits the viewport in BOTH
-  // dimensions and never gets squashed into a wrong shape.
   const aspect = isPresentation ? "16 / 9" : "8.5 / 11";
   const aspectRatioNum = isPresentation ? 16 / 9 : 8.5 / 11;
   const maxPx = isPresentation ? 1100 : 820;
 
+  const kindKey = (doc.kind || "").toLowerCase();
+  const kindLabel = isPresentation
+    ? "Slides"
+    : KIND_LABEL[kindKey] || "Document";
+
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-stone-100 text-stone-900">
-      {/* ─── Header ─────────────────────────────────────────── */}
-      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-stone-200 bg-white px-3 sm:px-5">
+    <div className="flex h-screen w-screen flex-col overflow-hidden bg-stone-100 text-stone-900 antialiased dark:bg-stone-950 dark:text-stone-100">
+      <header className="flex h-14 shrink-0 items-center gap-2 border-b border-stone-200/70 bg-white px-3 dark:border-stone-800/70 dark:bg-stone-950 sm:gap-3 sm:px-5">
         <button
           onClick={() => navigate(-1)}
-          className="rounded-lg p-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900"
+          className="rounded-md p-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
           aria-label="Back"
         >
           <svg
@@ -357,10 +853,10 @@ const DocumentViewer = () => {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <span
-              className={`inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+              className={`inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-[9.5px] font-bold uppercase tracking-wider ${
                 isPresentation
-                  ? "bg-orange-100 text-orange-700"
-                  : "bg-blue-100 text-blue-700"
+                  ? "bg-teal-50 text-teal-700 dark:bg-teal-500/15 dark:text-teal-400"
+                  : "bg-blue-50 text-blue-700 dark:bg-blue-500/15 dark:text-blue-400"
               }`}
             >
               {isPresentation ? (
@@ -389,15 +885,20 @@ const DocumentViewer = () => {
                   <path d="M14 2v6h6" strokeLinecap="round" />
                 </svg>
               )}
-              {isPresentation ? "Slides" : "Document"}
+              {kindLabel}
             </span>
-            <h1 className="truncate text-sm font-semibold text-stone-900">
+            <h1 className="truncate text-sm font-semibold text-stone-900 dark:text-stone-100">
               {doc.title || "Untitled"}
             </h1>
           </div>
-          <p className="truncate text-[11px] text-stone-400">
+          <p className="truncate text-[11px] text-stone-400 dark:text-stone-500">
             Page {currentPage + 1} of {totalPages} ·{" "}
-            {isPresentation ? "Landscape 16:9" : "A4 Portrait"}
+            {isPresentation
+              ? "Landscape 16:9"
+              : `${fontSettings?.bodyFontSize || 12}pt · A4 Portrait`}
+            {!isPresentation && meta?.pageCount
+              ? ` · target ${meta.pageCount}pp`
+              : ""}
           </p>
         </div>
 
@@ -405,7 +906,7 @@ const DocumentViewer = () => {
         <div className="relative hidden sm:block">
           <button
             onClick={() => setShowTemplatePicker((s) => !s)}
-            className="flex items-center gap-2 rounded-full border border-stone-200 bg-white px-3 py-1.5 text-xs font-semibold text-stone-600 transition-colors hover:border-orange-300 hover:text-orange-600"
+            className="flex items-center gap-2 rounded-md border border-stone-200 bg-white px-3 py-1.5 text-[12px] font-semibold text-stone-600 transition-colors hover:border-teal-300 hover:bg-teal-50 hover:text-teal-700 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-300 dark:hover:border-teal-500/50 dark:hover:bg-teal-500/10 dark:hover:text-teal-400"
           >
             <span
               className="h-3 w-3 rounded-full"
@@ -430,9 +931,11 @@ const DocumentViewer = () => {
                 className="fixed inset-0 z-20"
                 onClick={() => setShowTemplatePicker(false)}
               />
-              <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded-2xl border border-stone-200 bg-white p-2 shadow-xl">
-                <p className="px-2 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400">
-                  {isPresentation ? "Presentation templates" : "Document templates"}
+              <div className="absolute right-0 top-full z-30 mt-2 w-72 rounded-lg border border-stone-200 bg-white p-2 shadow-xl shadow-stone-900/10 dark:border-stone-700 dark:bg-stone-900 dark:shadow-black/40">
+                <p className="px-2 pb-1.5 pt-1 text-[10px] font-semibold uppercase tracking-wider text-stone-400 dark:text-stone-500">
+                  {isPresentation
+                    ? "Presentation templates"
+                    : "Document templates"}
                 </p>
                 <div className="grid max-h-72 grid-cols-1 gap-1 overflow-y-auto">
                   {templateList.map((t) => {
@@ -441,14 +944,14 @@ const DocumentViewer = () => {
                       <button
                         key={t.id}
                         onClick={() => handleSelectTemplate(t.id)}
-                        className={`flex items-center gap-3 rounded-xl px-3 py-2 text-left text-sm transition-colors ${
+                        className={`flex items-center gap-3 rounded-md px-3 py-2 text-left text-sm transition-colors ${
                           active
-                            ? "bg-orange-50 text-orange-900"
-                            : "text-stone-700 hover:bg-stone-100"
+                            ? "bg-teal-50 text-teal-900 dark:bg-teal-500/15 dark:text-teal-200"
+                            : "text-stone-700 hover:bg-stone-100 dark:text-stone-300 dark:hover:bg-stone-800"
                         }`}
                       >
                         <span
-                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-lg"
+                          className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md"
                           style={{ background: `#${t.primary}` }}
                         >
                           <span
@@ -465,7 +968,7 @@ const DocumentViewer = () => {
                             fill="none"
                             stroke="currentColor"
                             strokeWidth="2.5"
-                            className="h-3.5 w-3.5 text-orange-500"
+                            className="h-3.5 w-3.5 text-teal-500 dark:text-teal-400"
                           >
                             <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
                           </svg>
@@ -482,12 +985,12 @@ const DocumentViewer = () => {
         {/* Theme panel toggle (desktop) */}
         <button
           onClick={() => setShowThemePanel((s) => !s)}
-          className={`hidden rounded-lg p-2 transition-colors md:block ${
+          className={`hidden rounded-md p-2 transition-colors md:block ${
             showThemePanel
-              ? "bg-orange-50 text-orange-600"
-              : "text-stone-500 hover:bg-stone-100 hover:text-stone-900"
+              ? "bg-teal-50 text-teal-600 dark:bg-teal-500/15 dark:text-teal-400"
+              : "text-stone-500 hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100"
           }`}
-          aria-label="Customize colors"
+          aria-label="Customize"
         >
           <svg
             viewBox="0 0 24 24"
@@ -507,7 +1010,7 @@ const DocumentViewer = () => {
         {/* Mobile: sheet toggle */}
         <button
           onClick={() => setShowMobileSheet(true)}
-          className="rounded-lg p-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 md:hidden"
+          className="rounded-md p-2 text-stone-500 transition-colors hover:bg-stone-100 hover:text-stone-900 dark:text-stone-400 dark:hover:bg-stone-800 dark:hover:text-stone-100 md:hidden"
           aria-label="Options"
         >
           <svg
@@ -527,7 +1030,7 @@ const DocumentViewer = () => {
         <button
           onClick={handleDelete}
           disabled={isDeleting}
-          className="hidden rounded-lg p-2 text-stone-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-40 sm:block"
+          className="hidden rounded-md p-2 text-stone-400 transition-colors hover:bg-red-50 hover:text-red-500 disabled:opacity-40 dark:hover:bg-red-500/10 sm:block"
           aria-label="Delete document"
         >
           <svg
@@ -548,7 +1051,7 @@ const DocumentViewer = () => {
         <button
           onClick={isPresentation ? downloadPptx : downloadPdf}
           disabled={downloading}
-          className="flex items-center gap-1.5 rounded-full bg-orange-500 px-4 py-2 text-xs font-semibold text-white shadow-md shadow-orange-500/25 transition-all hover:bg-orange-600 disabled:opacity-60"
+          className="flex items-center gap-1.5 rounded-md bg-teal-600 px-3.5 py-2 text-[12px] font-semibold text-white shadow-sm shadow-teal-500/25 transition-all hover:bg-teal-700 active:scale-[0.97] disabled:opacity-60 dark:bg-teal-500 dark:hover:bg-teal-400"
         >
           {downloading ? (
             <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
@@ -577,29 +1080,25 @@ const DocumentViewer = () => {
         </button>
       </header>
 
-      {/* ─── Body ───────────────────────────────────────────── */}
       <div className="flex min-h-0 flex-1">
-        {/* Thumbnails rail (desktop) */}
-        <aside className="hidden w-44 shrink-0 overflow-y-auto border-r border-stone-200 bg-white/60 p-3 md:block">
+        <aside className="hidden w-44 shrink-0 overflow-y-auto border-r border-stone-200/70 bg-white/60 p-3 dark:border-stone-800/70 dark:bg-stone-900/40 md:block">
           <div className="space-y-2">
             {pages.map((p, i) => (
               <button
                 key={i}
                 onClick={() => setCurrentPage(i)}
-                className={`group relative block w-full overflow-hidden rounded-lg border-2 transition-all ${
+                className={`group relative block w-full overflow-hidden rounded-md border-2 transition-all ${
                   currentPage === i
-                    ? "border-orange-500 shadow-md shadow-orange-500/20"
-                    : "border-stone-200 hover:border-stone-300"
+                    ? "border-teal-500 shadow-md shadow-teal-500/20"
+                    : "border-stone-200 hover:border-stone-300 dark:border-stone-700 dark:hover:border-stone-600"
                 }`}
               >
-                <div
-                  className="w-full bg-white"
-                  style={{ aspectRatio: aspect }}
-                >
+                <div className="w-full bg-white" style={{ aspectRatio: aspect }}>
                   <TemplateThumb
                     Template={Template}
                     page={p}
                     theme={theme}
+                    fontSettings={fontSettings}
                     pageNumber={i + 1}
                     totalPages={totalPages}
                     aspectRatioNum={aspectRatioNum}
@@ -613,7 +1112,6 @@ const DocumentViewer = () => {
           </div>
         </aside>
 
-        {/* Preview */}
         <main className="flex min-w-0 flex-1 flex-col">
           <div
             className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden p-4 sm:p-8"
@@ -621,36 +1119,37 @@ const DocumentViewer = () => {
           >
             {Template && pages[currentPage] ? (
               <div
-                ref={previewRef}
                 className={`overflow-hidden bg-white ${
                   isPresentation
-                    ? "rounded-lg shadow-[0_25px_50px_-12px_rgba(28,25,23,0.35)]"
-                    : "rounded-sm border border-stone-200/80 shadow-[0_1px_3px_rgba(28,25,23,0.06),0_20px_40px_-24px_rgba(28,25,23,0.28)]"
+                    ? "rounded-lg shadow-[0_25px_50px_-12px_rgba(28,25,23,0.35)] dark:shadow-[0_25px_50px_-12px_rgba(0,0,0,0.7)]"
+                    : "rounded-lg border border-stone-200/80 shadow-[0_1px_3px_rgba(28,25,23,0.06),0_20px_40px_-24px_rgba(28,25,23,0.28)] dark:border-stone-800"
                 }`}
                 style={{
-                  // min(container width, max px, container height * aspect ratio)
                   width: `min(100cqw, ${maxPx}px, calc(100cqh * ${aspectRatioNum}))`,
                   aspectRatio: aspect,
+                  containerType: "inline-size",
                 }}
               >
                 <Template
                   page={pages[currentPage]}
                   theme={theme}
+                  fontSettings={fontSettings}
                   pageNumber={currentPage + 1}
                   totalPages={totalPages}
                 />
               </div>
             ) : (
-              <p className="text-sm text-stone-500">Nothing to preview.</p>
+              <p className="text-sm text-stone-500 dark:text-stone-400">
+                Nothing to preview.
+              </p>
             )}
           </div>
 
-          {/* Page nav */}
-          <div className="flex shrink-0 items-center justify-center gap-2 border-t border-stone-200 bg-white/70 px-4 py-3 backdrop-blur">
+          <div className="flex shrink-0 items-center justify-center gap-2 border-t border-stone-200/70 bg-white/70 px-4 py-3 backdrop-blur dark:border-stone-800/70 dark:bg-stone-950/70">
             <button
               onClick={() => setCurrentPage((i) => Math.max(0, i - 1))}
               disabled={currentPage === 0}
-              className="rounded-full border border-stone-200 bg-white p-2 text-stone-500 transition-colors hover:border-orange-300 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-stone-200 bg-white p-2 text-stone-500 transition-colors hover:border-teal-300 hover:text-teal-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400 dark:hover:border-teal-500/50 dark:hover:text-teal-400"
               aria-label="Previous page"
             >
               <svg
@@ -674,9 +1173,11 @@ const DocumentViewer = () => {
                   const n = Number(e.target.value);
                   if (n >= 1 && n <= totalPages) setCurrentPage(n - 1);
                 }}
-                className="w-12 rounded-lg border border-stone-200 bg-white py-1 text-center text-sm font-semibold text-stone-800 outline-none focus:border-orange-400"
+                className="w-12 rounded-md border border-stone-200 bg-white py-1 text-center text-sm font-semibold text-stone-800 outline-none focus:border-teal-400 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100"
               />
-              <span className="text-xs text-stone-400">/ {totalPages}</span>
+              <span className="text-xs text-stone-400 dark:text-stone-500">
+                / {totalPages}
+              </span>
             </div>
 
             <button
@@ -684,7 +1185,7 @@ const DocumentViewer = () => {
                 setCurrentPage((i) => Math.min(totalPages - 1, i + 1))
               }
               disabled={currentPage === totalPages - 1}
-              className="rounded-full border border-stone-200 bg-white p-2 text-stone-500 transition-colors hover:border-orange-300 hover:text-orange-600 disabled:cursor-not-allowed disabled:opacity-40"
+              className="rounded-md border border-stone-200 bg-white p-2 text-stone-500 transition-colors hover:border-teal-300 hover:text-teal-600 disabled:cursor-not-allowed disabled:opacity-40 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-400 dark:hover:border-teal-500/50 dark:hover:text-teal-400"
               aria-label="Next page"
             >
               <svg
@@ -700,32 +1201,35 @@ const DocumentViewer = () => {
           </div>
         </main>
 
-        {/* Theme panel (desktop) */}
         {showThemePanel && (
-          <aside className="hidden w-72 shrink-0 overflow-y-auto border-l border-stone-200 bg-white p-4 md:block">
+          <aside className="hidden w-72 shrink-0 overflow-y-auto border-l border-stone-200/70 bg-white p-4 dark:border-stone-800/70 dark:bg-stone-950 md:block">
             <ThemePanel
               theme={theme}
+              fontSettings={fontSettings}
+              meta={meta}
               templateList={templateList}
-              onChange={updateTheme}
+              isPresentation={isPresentation}
+              dirty={anyDirty}
+              onChangeTheme={updateTheme}
+              onChangeFont={updateFont}
+              onChangeMeta={updateMeta}
               onClose={() => setShowThemePanel(false)}
-              themeDirty={themeDirty}
             />
           </aside>
         )}
       </div>
 
-      {/* ─── Mobile bottom sheet ────────────────────────────── */}
       {showMobileSheet && (
         <>
           <div
             className="fixed inset-0 z-40 bg-stone-900/40 backdrop-blur-sm md:hidden"
             onClick={() => setShowMobileSheet(false)}
           />
-          <div className="fixed inset-x-0 bottom-0 z-50 max-h-[80vh] overflow-y-auto rounded-t-3xl border-t border-stone-200 bg-white p-5 pb-8 shadow-2xl md:hidden">
-            <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-stone-200" />
+          <div className="fixed inset-x-0 bottom-0 z-50 max-h-[85vh] overflow-y-auto rounded-t-xl border-t border-stone-200 bg-white p-5 pb-8 shadow-2xl dark:border-stone-800 dark:bg-stone-950 md:hidden">
+            <div className="mx-auto mb-4 h-1.5 w-12 rounded-full bg-stone-200 dark:bg-stone-700" />
 
             <div className="mb-5">
-              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-stone-400">
+              <p className="mb-2 text-[10px] font-bold uppercase tracking-wider text-stone-400 dark:text-stone-500">
                 {isPresentation ? "Presentation template" : "Document template"}
               </p>
               <div className="grid grid-cols-1 gap-1.5">
@@ -735,14 +1239,14 @@ const DocumentViewer = () => {
                     <button
                       key={t.id}
                       onClick={() => handleSelectTemplate(t.id)}
-                      className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 text-left text-sm transition-colors ${
+                      className={`flex items-center gap-3 rounded-md border px-3 py-2.5 text-left text-sm transition-colors ${
                         active
-                          ? "border-orange-300 bg-orange-50 text-orange-900"
-                          : "border-stone-200 text-stone-700 hover:bg-stone-50"
+                          ? "border-teal-300 bg-teal-50 text-teal-900 dark:border-teal-500/50 dark:bg-teal-500/15 dark:text-teal-200"
+                          : "border-stone-200 text-stone-700 hover:bg-stone-50 dark:border-stone-700 dark:text-stone-300 dark:hover:bg-stone-800"
                       }`}
                     >
                       <span
-                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg"
+                        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md"
                         style={{ background: `#${t.primary}` }}
                       >
                         <span
@@ -759,7 +1263,7 @@ const DocumentViewer = () => {
                           fill="none"
                           stroke="currentColor"
                           strokeWidth="2.5"
-                          className="h-4 w-4 text-orange-500"
+                          className="h-4 w-4 text-teal-500 dark:text-teal-400"
                         >
                           <path d="M20 6L9 17l-5-5" strokeLinecap="round" />
                         </svg>
@@ -770,12 +1274,17 @@ const DocumentViewer = () => {
               </div>
             </div>
 
-            <div className="mb-5 border-t border-stone-100 pt-5">
+            <div className="mb-5 border-t border-stone-100 pt-5 dark:border-stone-800">
               <ThemePanel
                 theme={theme}
+                fontSettings={fontSettings}
+                meta={meta}
                 templateList={templateList}
-                onChange={updateTheme}
-                themeDirty={themeDirty}
+                isPresentation={isPresentation}
+                dirty={anyDirty}
+                onChangeTheme={updateTheme}
+                onChangeFont={updateFont}
+                onChangeMeta={updateMeta}
                 bare
               />
             </div>
@@ -783,7 +1292,7 @@ const DocumentViewer = () => {
             <button
               onClick={handleDelete}
               disabled={isDeleting}
-              className="flex w-full items-center justify-center gap-2 rounded-full border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50"
+              className="flex w-full items-center justify-center gap-2 rounded-md border border-red-200 bg-red-50 px-4 py-2.5 text-sm font-semibold text-red-600 transition-colors hover:bg-red-100 disabled:opacity-50 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
             >
               <svg
                 viewBox="0 0 24 24"
@@ -803,7 +1312,6 @@ const DocumentViewer = () => {
         </>
       )}
 
-      {/* ─── Hidden full render for PDF export ──────────────── */}
       <div
         ref={hiddenRef}
         aria-hidden
@@ -825,157 +1333,20 @@ const DocumentViewer = () => {
               pageBreakAfter: i < pages.length - 1 ? "always" : "auto",
               overflow: "hidden",
               background: "#FFFFFF",
+              containerType: "inline-size",
             }}
           >
             {Template && (
               <Template
                 page={p}
                 theme={theme}
+                fontSettings={fontSettings}
                 pageNumber={i + 1}
                 totalPages={totalPages}
               />
             )}
           </div>
         ))}
-      </div>
-    </div>
-  );
-};
-
-// ─────────────────────────────────────────────────────────────
-// Sub-components
-// ─────────────────────────────────────────────────────────────
-const ThemePanel = ({
-  theme,
-  templateList,
-  onChange,
-  onClose,
-  themeDirty,
-  bare = false,
-}) => (
-  <div className={bare ? "" : ""}>
-    {!bare && (
-      <div className="mb-4 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-stone-900">Customize</h2>
-        {onClose && (
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-stone-400 hover:bg-stone-100 hover:text-stone-700"
-            aria-label="Close"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              className="h-3.5 w-3.5"
-            >
-              <path d="M18 6L6 18M6 6l12 12" strokeLinecap="round" />
-            </svg>
-          </button>
-        )}
-      </div>
-    )}
-
-    <ColorField
-      label="Primary"
-      value={theme?.primaryColor}
-      onChange={(v) => onChange({ primaryColor: v })}
-    />
-    <ColorField
-      label="Background"
-      value={theme?.secondaryColor}
-      onChange={(v) => onChange({ secondaryColor: v })}
-    />
-    <ColorField
-      label="Accent"
-      value={theme?.accentColor}
-      onChange={(v) => onChange({ accentColor: v })}
-    />
-    <ColorField
-      label="Text"
-      value={theme?.textColor}
-      onChange={(v) => onChange({ textColor: v })}
-    />
-
-    <button
-      onClick={() => {
-        const def = templateList.find((t) => t.id === theme?.templateId);
-        if (!def) return;
-        onChange({
-          primaryColor: def.primary,
-          secondaryColor: def.secondary,
-          accentColor: def.accent,
-        });
-      }}
-      className="mt-4 w-full rounded-full border border-stone-200 bg-white py-2 text-xs font-semibold text-stone-600 transition-colors hover:border-orange-300 hover:text-orange-600"
-    >
-      Reset to template default
-    </button>
-
-    {themeDirty && (
-      <p className="mt-3 text-center text-[10px] text-stone-400">Saving…</p>
-    )}
-  </div>
-);
-
-const ColorField = ({ label, value, onChange }) => (
-  <div className="mb-3">
-    <label className="mb-1.5 block text-[11px] font-semibold uppercase tracking-wider text-stone-500">
-      {label}
-    </label>
-    <div className="flex items-center gap-2">
-      <input
-        type="color"
-        value={`#${value || "000000"}`}
-        onChange={(e) =>
-          onChange(e.target.value.replace("#", "").toUpperCase())
-        }
-        className="h-9 w-10 cursor-pointer rounded-lg border border-stone-200 bg-white"
-      />
-      <input
-        type="text"
-        value={value || ""}
-        onChange={(e) => {
-          const v = e.target.value.replace("#", "").toUpperCase().slice(0, 6);
-          if (/^[0-9A-F]{0,6}$/.test(v)) onChange(v);
-        }}
-        className="flex-1 rounded-lg border border-stone-200 bg-white px-3 py-2 font-mono text-xs text-stone-700 outline-none focus:border-orange-400"
-      />
-    </div>
-  </div>
-);
-
-// Renders the real template at 100% width and scales it down with a
-// CSS transform. `aspectRatioNum` is passed so the inner wrapper can
-// match the target aspect exactly.
-const TemplateThumb = ({
-  Template,
-  page,
-  theme,
-  pageNumber,
-  totalPages,
-  aspectRatioNum,
-}) => {
-  // Render target is 100px wide; scale factor below fits it in the rail.
-  const innerWidth = 100; // %
-  const innerHeight = 100 / aspectRatioNum; // % of width
-  const scale = 0.28;
-
-  return (
-    <div className="pointer-events-none h-full w-full origin-top-left overflow-hidden" style={{ transform: `scale(${scale})` }}>
-      <div
-        style={{
-          width: `${(100 / scale)}%`,
-          height: `${(100 / scale)}%`,
-        }}
-      >
-        <Template
-          page={page}
-          theme={theme}
-          pageNumber={pageNumber}
-          totalPages={totalPages}
-        />
       </div>
     </div>
   );

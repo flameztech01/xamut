@@ -22,6 +22,7 @@ import {
   getTextModel,
   getVisionModel,
   resolveVisionModel,
+  resolveTextModel,
   extractUserMemories,
   publicImageSources,
   researchPerson,
@@ -30,52 +31,307 @@ import {
 
 const FORM_INTENT_FEATURE_LIST = buildIntentFeatureList();
 
+// ═════════════════════════════════════════════════════════════════════
+// DOCUMENT SHAPE — top-level knobs
+// ═════════════════════════════════════════════════════════════════════
+
+// When FALSE (the default), a cover / front-matter page is only added
+// when the user literally asked for one ("with a cover page", "add a
+// title page", ...). Formal documents like "3-page assignment on X"
+// come out as plain documents with a title line, not a full cover.
+//
+// Flip to TRUE if you later want formal academic / business requests
+// to get a cover page automatically even without the user asking.
+const COVER_FOR_FORMAL_DOCS = false;
+
+// Looks like a real academic or professional deliverable.
+const FORMAL_DOC_RE =
+  /\b(assignment|report|thesis|dissertation|term[\s-]?paper|research\s+paper|case\s+study|proposal|business\s+plan|essay|formal\s+report|project\s+work|capstone|white\s?paper|briefing|memorandum|memo)\b/i;
+
+// User literally asked for a cover / title / front page.
+const EXPLICIT_COVER_RE =
+  /\b(cover\s+page|title\s+page|front\s+page|with\s+a\s+cover|add\s+a\s+cover|include\s+a\s+cover|with\s+a\s+title\s+page|add\s+a\s+title\s+page)\b/i;
+
 // ─────────────────────────────────────────────────────────────────────
 // Size discipline
-//
-// Free-tier TPM ceilings are small (gpt-oss-120b: 8K, qwen3.8-27b: 7K).
-// The persona alone is ~4K tokens, and the tool schemas another ~3K.
-// That leaves very little room for history + user content + attachments.
-//
-// Everything dynamic that we feed to the model MUST be capped here.
-// The xamutAI.js layer also clamps, but clamping in the controller
-// preserves context (better to send 3 useful messages than 0 useful
-// messages after the AI layer chops history entirely).
 // ─────────────────────────────────────────────────────────────────────
-
-// History: fewer messages, shorter messages.
 const HISTORY_MAX_MESSAGES = 10;
 const HISTORY_MAX_CHARS_PER_MESSAGE = 1000;
-
-// Memory block: cap total characters so a chatty user with 30
-// memories doesn't add 5K tokens to every single turn.
 const MEMORY_BLOCK_MAX_CHARS = 1500;
-
-// Classifier input: the intent/research classifiers only need to see
-// enough of the message to know what the user wants. A 20K-token paste
-// doesn't need to be classified at full length — a 3K-char window is
-// plenty to read "summarize this report" or "make me a quiz".
 const CLASSIFIER_MESSAGE_CHAR_CAP = 3000;
 const CLASSIFIER_HISTORY_TURNS = 4;
 const CLASSIFIER_HISTORY_CHARS = 250;
-
-// Attachments: cap per-doc extracted text and total doc block size.
 const MAX_ATTACHMENTS = 3;
 const MAX_DOC_TEXT_CHARS = 8000;
 const MAX_DOC_BLOCK_CHARS = 18000;
 
-// Form media types — used when phrasing the "draft is ready" reply so
-// we can call out that the form accepts uploads.
 const FORM_MEDIA_TYPES = new Set(["file", "image", "document"]);
 
+// ─────────────────────────────────────────────────────────────────────
+// A4 page math — the ground truth for "N pages" requests.
+// ─────────────────────────────────────────────────────────────────────
+const A4_WORDS_PER_PAGE = {
+  10: { 1.0: 600, 1.15: 520, 1.5: 400, 2.0: 300 },
+  11: { 1.0: 550, 1.15: 480, 1.5: 370, 2.0: 275 },
+  12: { 1.0: 500, 1.15: 435, 1.5: 335, 2.0: 250 }, // default
+  13: { 1.0: 450, 1.15: 390, 1.5: 300, 2.0: 225 },
+  14: { 1.0: 400, 1.15: 350, 1.5: 270, 2.0: 200 },
+  15: { 1.0: 355, 1.15: 310, 1.5: 240, 2.0: 180 },
+  16: { 1.0: 320, 1.15: 280, 1.5: 215, 2.0: 160 },
+  18: { 1.0: 260, 1.15: 225, 1.5: 175, 2.0: 130 },
+};
+
+function computeWordsPerPage({ fontSize = 12, lineSpacing = 1.5 } = {}) {
+  const table = A4_WORDS_PER_PAGE[fontSize] || A4_WORDS_PER_PAGE[12];
+  const keys = Object.keys(table).map(Number);
+  const nearest = keys.reduce((a, b) =>
+    Math.abs(b - lineSpacing) < Math.abs(a - lineSpacing) ? b : a
+  );
+  return table[nearest];
+}
+
+const DEFAULT_FONT_SETTINGS = {
+  bodyFontSize: 12,
+  headingFontSize: 16,
+  fontFamily: "Calibri",
+  lineSpacing: 1.5,
+};
+
+function buildFontSettings({ fontSize, lineSpacing, fontFamily } = {}) {
+  return {
+    ...DEFAULT_FONT_SETTINGS,
+    ...(Number.isFinite(+fontSize) ? { bodyFontSize: Math.min(Math.max(+fontSize, 8), 32) } : {}),
+    ...(Number.isFinite(+lineSpacing) ? { lineSpacing: Math.min(Math.max(+lineSpacing, 1), 3) } : {}),
+    ...(typeof fontFamily === "string" ? { fontFamily } : {}),
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Inline formatting rules injected into every writer prompt.
+// ─────────────────────────────────────────────────────────────────────
+const RICH_RULES = `Formatting (the renderer supports it, use it):
+- **bold**, *italic*, __underline__ inside text and items.
+- {color:#C62828}colored text{/color} for emphasis or warnings.
+- {size:14}larger text{/size} to enlarge body copy (pt, 8-32). Body default is 12pt.
+- Do NOT use markdown headers (#). Use a "heading" block instead.
+- Do NOT use markdown bullet characters inside paragraphs. Use a "bullets" block.
+- Do NOT use markdown numbered lists inside paragraphs. Use a "numbered" block.
+- No tables, no code fences, no links, no images unless the user asked.`;
+
+// ─────────────────────────────────────────────────────────────────────
+// Per-section format directives.
+// ─────────────────────────────────────────────────────────────────────
+const SECTION_FORMATS = new Set([
+  "prose", "mixed", "bullets", "steps", "qa", "list", "dialogue",
+]);
+
+function buildFormatDirective(fmt) {
+  switch (fmt) {
+    case "prose":
+      return `Structure: fully flowing paragraphs. NO bullet lists, NO numbered lists, NO subheadings. Just prose.`;
+    case "bullets":
+      return `Structure: mostly bullet blocks. Lead with a one-sentence paragraph if it helps, then bullet the rest. Level-2 heading blocks are welcome to group bullets.`;
+    case "steps":
+      return `Structure: numbered list of steps. Optionally one intro paragraph, then a "numbered" block, then an optional closing paragraph. Use level-2 heading blocks if the steps fall into phases.`;
+    case "qa":
+      return `Structure: a sequence of Q&A pairs. Use a "heading" block (level 3) for each question, then a "paragraph" block for the answer. Keep answers focused.`;
+    case "list":
+      return `Structure: an enumerated list of items, each with a short bold lead-in. Use "bullets" or "numbered" blocks. Add a short intro and outro paragraph.`;
+    case "dialogue":
+      return `Structure: alternating paragraphs that read as back-and-forth dialogue. Prefix each line with the speaker's name in bold, e.g. "**Alex:** ...".`;
+    case "mixed":
+    default:
+      return `Structure: a mix. Mostly paragraphs, but use "bullets" or "numbered" blocks where the content is genuinely a list, and level-2 "heading" blocks for real sub-topics. Don't force a list where prose reads better.`;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Front matter block sanitizers.
+//
+// Front matter is a freestanding ORDERED block list. The order IS the
+// layout. Whatever the AI emits, we keep it in order and just clamp
+// sizes and enums so nothing breaks the renderer.
+// ─────────────────────────────────────────────────────────────────────
+const FM_TEXT_SIZES = new Set(["sm", "md", "lg", "xl", "2xl"]);
+const FM_SPACER_SIZES = new Set(["sm", "md", "lg", "xl"]);
+const FM_ALIGN = new Set(["left", "center", "right"]);
+
+// Reject any block whose text still contains a placeholder marker.
+// "[Your Name]", "[Date]", "[Course]" — the LLM loves these and they
+// look terrible on a rendered cover.
+const PLACEHOLDER_RE = /\[[^\]]{0,40}\]/;
+
+function sanitizeFrontMatterBlocks(raw) {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .slice(0, 40)
+    .map((b) => {
+      if (!b || typeof b !== "object") return null;
+
+      if (b.type === "spacer") {
+        const size = FM_SPACER_SIZES.has(b.size) ? b.size : "md";
+        return { type: "spacer", size };
+      }
+      if (b.type === "divider") return { type: "divider" };
+
+      if (b.type === "heading") {
+        const text = String(b.text || "");
+        if (!text || PLACEHOLDER_RE.test(text)) return null;
+        return {
+          type: "heading",
+          level: Math.min(Math.max(Number(b.level) || 1, 1), 3),
+          text: text.slice(0, 300),
+          align: FM_ALIGN.has(b.align) ? b.align : "center",
+        };
+      }
+
+      if (b.type === "label-value") {
+        const label = String(b.label || "").trim();
+        const value = String(b.value || "").trim();
+        // A label-value with an empty value is a placeholder in
+        // disguise. Drop it entirely.
+        if (!label || !value) return null;
+        if (PLACEHOLDER_RE.test(value) || PLACEHOLDER_RE.test(label)) return null;
+        return {
+          type: "label-value",
+          label: label.slice(0, 80),
+          value: value.slice(0, 300),
+          align: FM_ALIGN.has(b.align) ? b.align : "left",
+        };
+      }
+
+      // default: text
+      const text = String(b.text || "");
+      if (!text || PLACEHOLDER_RE.test(text)) return null;
+      return {
+        type: "text",
+        text: text.slice(0, 300),
+        size: FM_TEXT_SIZES.has(b.size) ? b.size : "md",
+        weight: b.weight === "bold" ? "bold" : "normal",
+        align: FM_ALIGN.has(b.align) ? b.align : "center",
+      };
+    })
+    .filter(Boolean);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Block cleanup helpers
+// ─────────────────────────────────────────────────────────────────────
+const normalizeHeadingText = (t) =>
+  String(t || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+function dedupeSectionHeading(blocks, sectionHeading) {
+  const target = normalizeHeadingText(sectionHeading);
+  if (!target) return blocks;
+  return blocks.filter((b) => {
+    if (b?.type !== "heading") return true;
+    return normalizeHeadingText(b.text) !== target;
+  });
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Hard page-fit safety net
+// ─────────────────────────────────────────────────────────────────────
+const BLOCK_OVERHEAD_WORDS = {
+  heading: 4,
+  bulletItem: 5,
+  divider: 3,
+  quote: 3,
+  code: 3,
+};
+
+const countWords = (s) =>
+  String(s || "").trim().split(/\s+/).filter(Boolean).length;
+
+const truncateToWords = (text, maxWords) => {
+  if (maxWords <= 0) return "";
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return words.slice(0, maxWords).join(" ").replace(/[.,;:]+$/, "") + "…";
+};
+
+function capBlocksToWordBudget(blocks, maxWords) {
+  if (!Array.isArray(blocks) || !Number.isFinite(maxWords) || maxWords <= 0) {
+    return blocks || [];
+  }
+
+  const out = [];
+  let used = 0;
+
+  for (const b of blocks) {
+    if (!b) continue;
+    const remaining = maxWords - used;
+    if (remaining <= 0) break;
+
+    if (b.type === "heading") {
+      const cost = countWords(b.text) + BLOCK_OVERHEAD_WORDS.heading;
+      if (cost > remaining) break;
+      out.push(b);
+      used += cost;
+      continue;
+    }
+
+    if (b.type === "bullets" || b.type === "numbered") {
+      const items = Array.isArray(b.items) ? b.items : [];
+      const kept = [];
+      for (const item of items) {
+        const cost = countWords(item) + BLOCK_OVERHEAD_WORDS.bulletItem;
+        if (used + cost > maxWords) break;
+        kept.push(item);
+        used += cost;
+      }
+      if (kept.length) out.push({ ...b, items: kept });
+      if (kept.length < items.length) break;
+      continue;
+    }
+
+    if (b.type === "paragraph") {
+      const words = countWords(b.text);
+      if (words <= remaining) {
+        out.push(b);
+        used += words;
+      } else {
+        const trimmed = truncateToWords(b.text, remaining);
+        if (trimmed) out.push({ ...b, text: trimmed });
+        used = maxWords;
+        break;
+      }
+      continue;
+    }
+
+    if (b.type === "quote" || b.type === "code") {
+      const cost = countWords(b.text) + BLOCK_OVERHEAD_WORDS.quote;
+      if (cost > remaining) break;
+      out.push(b);
+      used += cost;
+      continue;
+    }
+
+    if (b.type === "divider") {
+      if (BLOCK_OVERHEAD_WORDS.divider > remaining) break;
+      out.push(b);
+      used += BLOCK_OVERHEAD_WORDS.divider;
+      continue;
+    }
+
+    out.push(b);
+  }
+
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Optional packages
+// ─────────────────────────────────────────────────────────────────────
 let mammoth, pdfParse;
 try { mammoth = (await import("mammoth")).default; } catch { mammoth = null; }
 try { pdfParse = (await import("pdf-parse")).default; } catch { pdfParse = null; }
 
 // ─────────────────────────────────────────────────────────────────────
-// Heuristic guard: does the user's message look like a lookup against
-// their OWN forms rather than a request to create a new one?
+// Form lookup heuristic
 // ─────────────────────────────────────────────────────────────────────
 const FORM_LOOKUP_RE =
   /\b(my|the)\s+(forms?|quizzes|quiz|surveys?|exams?|tests?|polls?|assessments?|feedback|questionnaires?|responses?|submissions?|elections?|votes?|ballots?)\b|\b(stats?|responses?|submissions?|leaderboard|scores?|results?|standings?|analytics?)\s+(on|for|of|from)\b|\bhow many (forms?|responses?|submissions?|people|entries|answers|votes?)\b|\blist my\b|\bshow me my\b|\bwhat('s| is| are) on my\b|\bhow did people\b|\bwho (submitted|filled|answered|responded|voted)\b|\bhow many (people )?(filled|finished|completed|submitted|voted)\b|\baverage score\b|\bpass rate\b|\btop scores?\b|\bwho('s| is) winning\b|\bcurrent (standings?|results?)\b/i;
@@ -84,7 +340,7 @@ const FORM_STATS_INTENT_RE =
   /\b(stats?|statistics|responses?|submissions?|leaderboard|scores?|results?|standings?|analytics?|average|pass rate|how many|who (submitted|filled|answered|responded|voted)|who('s| is) winning)\b/i;
 
 // ─────────────────────────────────────────────────────────────────────
-// Persona (unchanged — this is deliberate design)
+// Persona
 // ─────────────────────────────────────────────────────────────────────
 const BASE_RULES = `
 You are Xamut. You are not an AI assistant, you are a friend with a
@@ -335,8 +591,6 @@ const makeTitle = (text = "") => {
 
 const stripControl = (s = "") => s.replace(/[\u0000-\u001f\u007f]/g, " ").trim();
 
-// Cap each history message so a single long reply can't blow the
-// budget for the whole conversation.
 const toHistory = (messages, limit = HISTORY_MAX_MESSAGES) =>
   messages
     .slice(-limit)
@@ -346,9 +600,6 @@ const toHistory = (messages, limit = HISTORY_MAX_MESSAGES) =>
       content: String(m.content || "").slice(0, HISTORY_MAX_CHARS_PER_MESSAGE),
     }));
 
-// Classifier input: cap the message and history. The intent and
-// research classifiers don't need to see a 20K-token paste — the
-// first 3K chars are enough to classify.
 const capForClassifier = (message, history) => ({
   message: String(message || "").slice(0, CLASSIFIER_MESSAGE_CHAR_CAP),
   history: history.slice(-CLASSIFIER_HISTORY_TURNS).map((m) => ({
@@ -395,14 +646,11 @@ async function loadUserMemories(userId, limit = 30) {
   if (byCategory.fact?.length)
     sections.push(`Other facts:\n- ${byCategory.fact.join("\n- ")}`);
 
-  // Cap the total size so a chatty user doesn't add thousands of
-  // tokens to every single turn.
   return sections.join("\n\n").slice(0, MEMORY_BLOCK_MAX_CHARS);
 }
 
 async function saveUserMemories({ userId, conversationId, memories }) {
   if (!memories?.length) return;
-
   const ops = memories.map((m) => ({
     updateOne: {
       filter: { user: userId, category: m.category, text: m.text },
@@ -419,7 +667,6 @@ async function saveUserMemories({ userId, conversationId, memories }) {
       upsert: true,
     },
   }));
-
   try {
     await UserMemory.bulkWrite(ops, { ordered: false });
   } catch (err) {
@@ -430,7 +677,7 @@ async function saveUserMemories({ userId, conversationId, memories }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Colors + templates (unchanged)
+// Colors + templates
 // ─────────────────────────────────────────────────────────────────────
 const HEX_RE = /^#?[0-9a-fA-F]{6}$/;
 
@@ -501,123 +748,422 @@ function resolveTheme({ type, templateId, primaryColor, secondaryColor }) {
   };
 }
 
-const MARKDOWN_RULES = `Formatting: you may use **bold** and *italics* sparingly. No headers (#), no code fences, no links, no tables, no nested lists.`;
+// ═════════════════════════════════════════════════════════════════════
+// DOCUMENT GENERATION — blueprint-driven
+// ═════════════════════════════════════════════════════════════════════
 
-// ─────────────────────────────────────────────────────────────────────
-// CONTENT GENERATORS (unchanged)
-// ─────────────────────────────────────────────────────────────────────
-const DOC_SECTION_COUNTS = { short: 3, medium: 5, long: 8 };
-const DOC_TARGET_WORDS = { short: 400, medium: 900, long: 1800 };
-
-async function generateDocumentContent({
-  userId, conversationId, topic, instructions = "", style = "academic",
-  length = "medium", templateId, primaryColor, secondaryColor,
-  sourcePrompt = "", onStatus,
+async function planDocumentBlueprint({
+  topic, instructions, style, targetPages,
+  wordsPerPage, sectionCount, wordsPerSection, fontSettings, report,
 }) {
-  const report = typeof onStatus === "function" ? onStatus : () => {};
+  report("Designing the document");
 
-  const targetWords = DOC_TARGET_WORDS[length] || DOC_TARGET_WORDS.medium;
-  const sectionCount = DOC_SECTION_COUNTS[length] || DOC_SECTION_COUNTS.medium;
-  const wordsPerSection = Math.round(targetWords / sectionCount);
-
-  report("Planning the document outline");
-
-  const outline = await groqJSON({
+  const blueprint = await groqJSON({
     messages: [
-      { role: "system", content: "You are a document architect. Return STRICT JSON only." },
+      {
+        role: "system",
+        content: `You are a document architect. You plan the ENTIRE shape of a document before any of it is written.
+
+You decide, from the user's request:
+  1. What kind of document this is.
+  2. Whether it needs a FRONT PAGE (title page / cover page).
+  3. If yes, what goes on it and IN WHAT ORDER — top to bottom.
+  4. Whether it needs a TABLE OF CONTENTS.
+  5. The sections, each with its own format hint.
+  6. Whether it needs a CLOSING page.
+
+════════════════════════════════════════════════════════════════
+RULE 1 — FRONT MATTER IS OFF BY DEFAULT. READ THIS TWICE.
+════════════════════════════════════════════════════════════════
+"frontMatter.enabled" must be FALSE unless the user's request is
+CLEARLY one of these:
+  • an academic deliverable: assignment, essay, term paper, thesis,
+    dissertation, research paper, case study, lab report, project work
+  • a business / professional deliverable: report, proposal, business
+    plan, white paper, briefing, formal memo
+  • the user EXPLICITLY asked for one: "with a cover page", "add a
+    title page", "I need a cover"
+
+For EVERYTHING ELSE — explainers, "how does X work", "tell me about X",
+study notes, summaries, guides, tutorials, letters, quick write-ups,
+casual articles, anything short, anything that just answers a
+question — frontMatter.enabled is FALSE. Don't think about it. Turn
+it off.
+
+When in doubt, FALSE.
+
+════════════════════════════════════════════════════════════════
+RULE 2 — NEVER INVENT PLACEHOLDER TEXT.
+════════════════════════════════════════════════════════════════
+The user did NOT give you their name, matric number, course code,
+department, or date. Do NOT write "[Your Name]", "[Student Name]",
+"[Date]", "[Course Code]", "[University]", "Name:", or any other
+bracketed placeholder. It looks broken and users hate it.
+
+If the user didn't provide a value, DON'T include a block for it.
+Only put a "label-value" block on the front matter when the value
+comes from the request itself.
+
+If front matter is enabled and you have nothing real to put on it
+beyond the title, then either:
+  • put just the title (centered) and nothing else, OR
+  • turn front matter off entirely.
+
+════════════════════════════════════════════════════════════════
+RULE 3 — TABLE OF CONTENTS IS ALSO OFF BY DEFAULT.
+════════════════════════════════════════════════════════════════
+Turn it on ONLY when the document has 5 or more sections AND it's
+one of the formal kinds above. Otherwise FALSE.
+
+════════════════════════════════════════════════════════════════
+FRONT MATTER — HOW TO BUILD IT WHEN YOU DO ENABLE IT
+════════════════════════════════════════════════════════════════
+Front matter is a freestanding ORDERED list of blocks. The order is
+the layout — first block is at the top, last block is at the bottom.
+
+Available block types:
+  - { "type": "text", "text": "...", "size": "sm|md|lg|xl|2xl", "weight": "normal|bold", "align": "left|center|right" }
+  - { "type": "heading", "text": "...", "level": 1|2|3, "align": "left|center|right" }
+  - { "type": "label-value", "label": "Student Name", "value": "Jane Doe", "align": "left|center|right" }
+  - { "type": "spacer", "size": "sm|md|lg|xl" }
+  - { "type": "divider" }
+
+Use spacers to push content to the top / middle / bottom. A typical
+academic cover looks like:
+  [top]    University / course line (small)
+  [spacer]
+  [middle] Title (heading level 1, centered)
+  [spacer]
+  [bottom] Student name / ID / date — ONLY if the user gave them
+
+If the user gave you their name, use it. If they didn't, leave that
+row out.
+
+════════════════════════════════════════════════════════════════
+SECTION FORMAT HINTS — one per section.
+════════════════════════════════════════════════════════════════
+  - "prose"    — flowing paragraphs, no lists
+  - "mixed"    — some prose, maybe a bullet list where it earns its place
+  - "bullets"  — mostly a bullet list
+  - "steps"    — numbered steps
+  - "qa"       — question / answer pairs
+  - "list"     — a flat list of items with short prose leads
+  - "dialogue" — conversational exchange
+
+Match the format to what the section actually needs. A method
+section is prose. A procedure is steps. A comparison is a list.
+An explainer is usually "prose" or "mixed".
+
+════════════════════════════════════════════════════════════════
+CLOSING — almost always FALSE.
+════════════════════════════════════════════════════════════════
+Only set closing.enabled = true for reports or speeches that need a
+signature line, acknowledgement block, or "thank you for reading".
+For a plain document, closing is FALSE.
+
+Return STRICT JSON only.`,
+      },
       {
         role: "user",
-        content: `Plan a ${style} document about: ${topic}.
-Extra instructions: ${instructions || "none"}
-Produce exactly ${sectionCount} sections.
-This is a written prose document, not a slide deck.
+        content: `Request:
+${topic}
 
-Return JSON with this exact shape:
+Extra instructions: ${instructions || "none"}
+Style: ${style}
+Target length: ~${targetPages} A4 pages at ${fontSettings.bodyFontSize}pt / ${fontSettings.lineSpacing} spacing.
+Aim for about ${sectionCount} sections, roughly ${wordsPerSection} words each. You may adjust.
+
+Return JSON exactly:
 {
+  "kind": "assignment|essay|letter|report|memo|notes|guide|manual|article|proposal|speech|bio|summary|study-guide|story|tutorial|other",
   "title": "string",
-  "subtitle": "string (optional)",
+  "subtitle": "string or empty",
+  "author": "string or empty",
+  "frontMatter": {
+    "enabled": boolean,
+    "blocks": [ ...front matter blocks in top-to-bottom order... ]
+  },
+  "tableOfContents": {
+    "enabled": boolean,
+    "title": "string (default 'Table of Contents')"
+  },
   "sections": [
-    { "heading": "string", "brief": "one sentence describing what this section should cover" }
-  ]
+    {
+      "heading": "string",
+      "brief": "one sentence describing what this section covers",
+      "format": "prose|mixed|bullets|steps|qa|list|dialogue"
+    }
+  ],
+  "closing": {
+    "enabled": boolean,
+    "heading": "string or empty",
+    "blocks": [ ...optional closing blocks, same shape as front matter... ]
+  }
 }
 No markdown, no code fences, no commentary.`,
       },
     ],
-    temperature: 0.6,
-    maxTokens: 700,
+    temperature: 0.7,
+    maxTokens: 1600,
   });
 
+  return blueprint;
+}
+
+async function generateDocumentContent({
+  userId, conversationId, topic, instructions = "", style = "academic",
+  length = "medium", pageCount,
+  fontSize, lineSpacing, fontFamily,
+  includeCoverPage,
+  includeTableOfContents,
+  templateId, primaryColor, secondaryColor,
+  sourcePrompt = "", onStatus,
+}) {
+  const report = typeof onStatus === "function" ? onStatus : () => {};
+
+  const fontSettings = buildFontSettings({ fontSize, lineSpacing, fontFamily });
+
+  const lengthPages = { short: 3, medium: 6, long: 12 }[length] || 6;
+  const targetPages =
+    Number.isFinite(+pageCount) && +pageCount > 0
+      ? Math.min(Math.max(Math.round(+pageCount), 1), 40)
+      : lengthPages;
+
+  const wordsPerPage = computeWordsPerPage(fontSettings);
+  const bodyGuess = Math.max(targetPages - 1, 1);
+  const targetBodyWords = bodyGuess * wordsPerPage;
+
+  const sectionCount = Math.min(Math.max(Math.round(bodyGuess * 1.2), 3), 14);
+  const wordsPerSection = Math.max(Math.round(targetBodyWords / sectionCount), 120);
+
+  const pageWordBudget = Math.max(Math.round(wordsPerPage * 0.9), 100);
+
+  // ── PHASE 1 — architect ────────────────────────────────────────
+  let bp;
+  try {
+    bp = await planDocumentBlueprint({
+      topic,
+      instructions,
+      style,
+      targetPages,
+      wordsPerPage,
+      sectionCount,
+      wordsPerSection,
+      fontSettings,
+      report,
+    });
+  } catch (err) {
+    console.warn(
+      "⚠️ Blueprint phase failed, falling back to minimal shape:",
+      err.message
+    );
+    bp = null;
+  }
+
+  // ── Decide front matter for real ───────────────────────────────
+  // Precedence:
+  //   1. User explicitly told the classifier (includeCoverPage is a
+  //      boolean) → obey them exactly.
+  //   2. Prompt literally says "cover page" / "title page" → on.
+  //   3. (Optional, off by default) Formal doc + architect said yes.
+  //   4. Otherwise → OFF, regardless of what the architect emitted.
+  const promptBlob = `${topic} ${instructions || ""}`;
+  const explicitCover = EXPLICIT_COVER_RE.test(promptBlob);
+  const looksFormal = FORMAL_DOC_RE.test(promptBlob);
+
+  const frontMatterEnabled =
+    typeof includeCoverPage === "boolean"
+      ? includeCoverPage
+      : explicitCover ||
+        (COVER_FOR_FORMAL_DOCS && looksFormal && bp?.frontMatter?.enabled === true);
+
+  // TOC only makes sense on long formal docs, and only when the user
+  // explicitly asked or the doc is formal.
+  const tocEnabled =
+    typeof includeTableOfContents === "boolean"
+      ? includeTableOfContents
+      : looksFormal && bp?.tableOfContents?.enabled === true;
+
+  const blueprint = {
+    kind: bp?.kind || "document",
+    title: bp?.title || topic,
+    subtitle: bp?.subtitle || "",
+    author: bp?.author || "Xamut",
+    frontMatter: {
+      enabled: frontMatterEnabled,
+      blocks: frontMatterEnabled
+        ? sanitizeFrontMatterBlocks(bp?.frontMatter?.blocks || [])
+        : [],
+    },
+    tableOfContents: {
+      enabled: tocEnabled,
+      title: bp?.tableOfContents?.title || "Table of Contents",
+    },
+    sections:
+      Array.isArray(bp?.sections) && bp.sections.length
+        ? bp.sections
+        : [{ heading: topic, brief: "Cover the topic.", format: "prose" }],
+    closing: {
+      enabled: looksFormal && bp?.closing?.enabled === true,
+      heading: bp?.closing?.heading || "",
+      blocks:
+        looksFormal && bp?.closing?.enabled === true
+          ? sanitizeFrontMatterBlocks(bp?.closing?.blocks || [])
+          : [],
+    },
+  };
+
+  // ── PHASE 2 — build pages ──────────────────────────────────────
   const pages = [];
-  pages.push({
-    role: "cover",
-    heading: outline.title || topic,
-    subheading: outline.subtitle || "",
-    paragraphs: [], bullets: [], notes: "",
-  });
 
-  const sections = outline.sections || [];
-  for (let idx = 0; idx < sections.length; idx++) {
-    const s = sections[idx];
-    report(`Writing section ${idx + 1} of ${sections.length}`);
+  if (blueprint.frontMatter.enabled) {
+    pages.push({
+      role: "cover",
+      heading: blueprint.title,
+      subheading: blueprint.subtitle,
+      paragraphs: [],
+      bullets: [],
+      blocks: blueprint.frontMatter.blocks,
+      notes: "",
+    });
+  }
+
+  if (blueprint.tableOfContents.enabled && blueprint.sections.length >= 3) {
+    pages.push({
+      role: "toc",
+      heading: blueprint.tableOfContents.title,
+      subheading: "",
+      paragraphs: [],
+      bullets: [],
+      blocks: blueprint.sections.map((s) => ({
+        type: "toc-entry",
+        text: s.heading,
+        level: 1,
+        style: { fontSize: fontSettings.bodyFontSize },
+      })),
+      notes: "",
+    });
+  }
+
+  for (let idx = 0; idx < blueprint.sections.length; idx++) {
+    const s = blueprint.sections[idx];
+    report(`Writing section ${idx + 1} of ${blueprint.sections.length}`);
+
+    const fmt = SECTION_FORMATS.has(s.format) ? s.format : "mixed";
+    const formatDirective = buildFormatDirective(fmt);
 
     const body = await groqJSON({
       messages: [
-        { role: "system", content: "You write one section of a document at a time. Return STRICT JSON only." },
+        {
+          role: "system",
+          content:
+            "You write one section of a document at a time. Return STRICT JSON only.",
+        },
         {
           role: "user",
-          content: `Document topic: ${topic}
+          content: `Document kind: ${blueprint.kind}
+Document title: ${blueprint.title}
 Section heading: ${s.heading}
 What this section should cover: ${s.brief || ""}
-Target length: about ${wordsPerSection} words.
+Target length: about ${wordsPerSection} words. Do not significantly exceed this — it needs to fit on one A4 page.
 Style: ${style}
 
-Write flowing prose paragraphs. Not a slide deck. No bullets unless the content is genuinely a list.
-${MARKDOWN_RULES}
+${RICH_RULES}
 
-Return JSON with this exact shape:
-{ "paragraphs": ["string", "..."], "bullets": ["string", "..."] }
-"bullets" can be an empty array.`,
+${formatDirective}
+
+Never repeat the section's own title as a heading block — it's already rendered above the body.
+
+Return JSON exactly:
+{
+  "blocks": [
+    { "type": "paragraph", "text": "..." },
+    { "type": "heading", "level": 2, "text": "..." },
+    { "type": "bullets", "items": ["...", "..."] },
+    { "type": "numbered", "items": ["...", "..."] }
+  ]
+}
+Only the four block types above.`,
         },
       ],
-      temperature: 0.6,
-      maxTokens: 1100,
+      temperature: 0.65,
+      maxTokens: 2400,
     });
+
+    const deduped = dedupeSectionHeading(
+      Array.isArray(body.blocks) ? body.blocks : [],
+      s.heading
+    );
+    const blocks = capBlocksToWordBudget(deduped, pageWordBudget);
 
     pages.push({
       role: "section",
       heading: s.heading,
       subheading: "",
-      paragraphs: body.paragraphs || [],
-      bullets: body.bullets || [],
+      paragraphs: [],
+      bullets: [],
+      blocks,
+      notes: "",
+    });
+  }
+
+  if (blueprint.closing.enabled && blueprint.closing.blocks.length) {
+    pages.push({
+      role: "closing",
+      heading: blueprint.closing.heading || "",
+      subheading: "",
+      paragraphs: [],
+      bullets: [],
+      blocks: blueprint.closing.blocks,
       notes: "",
     });
   }
 
   report("Assembling the document");
 
-  const theme = resolveTheme({ type: "document", templateId, primaryColor, secondaryColor });
+  const theme = resolveTheme({
+    type: "document",
+    templateId,
+    primaryColor,
+    secondaryColor,
+  });
 
   return await Document.create({
     user: userId,
     conversation: conversationId || null,
     type: "document",
-    title: outline.title || topic,
-    subtitle: outline.subtitle || "",
-    author: "Xamut",
+    kind: blueprint.kind,
+    title: blueprint.title,
+    subtitle: blueprint.subtitle,
+    author: blueprint.author,
     pages,
     theme,
+    fontSettings,
+    pageCount: targetPages,
+    includeCoverPage: blueprint.frontMatter.enabled,
+    includeTableOfContents: blueprint.tableOfContents.enabled,
     sourcePrompt,
     status: "ready",
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Presentation generator — untouched behavior
+// ─────────────────────────────────────────────────────────────────────
 async function generatePresentationContent({
   userId, conversationId, topic, instructions = "", slides = 10,
-  companyName = "", templateId, primaryColor, secondaryColor,
+  companyName = "", includeTableOfContents = null,
+  templateId, primaryColor, secondaryColor,
   sourcePrompt = "", onStatus,
 }) {
   const report = typeof onStatus === "function" ? onStatus : () => {};
-  const count = Math.min(Math.max(Number(slides) || 10, 4), 25);
+  const totalSlides = Math.min(Math.max(Number(slides) || 10, 4), 30);
+
+  const innerBudget = totalSlides - 2;
+  const wantToc =
+    includeTableOfContents === true ||
+    (includeTableOfContents !== false && innerBudget >= 6);
+  const contentSlides = Math.max(innerBudget - (wantToc ? 1 : 0), 2);
 
   report("Planning the slide structure");
 
@@ -626,9 +1172,12 @@ async function generatePresentationContent({
       { role: "system", content: "You are a presentation architect. Return STRICT JSON only." },
       {
         role: "user",
-        content: `Plan a ${count}-slide presentation about: ${topic}.
+        content: `Plan a presentation about: ${topic}.
 Extra instructions: ${instructions || "none"}
-This is a slide deck with bullets and speaker notes.
+Produce exactly ${contentSlides} CONTENT slides.
+Cover${wantToc ? ", agenda," : ""} and closing slides are added separately.
+Each content slide: 3-5 short bullets, 5-8 words per bullet.
+Slides are glanceable, not paragraphs.
 
 Return JSON exactly:
 {
@@ -638,20 +1187,40 @@ Return JSON exactly:
     { "title": "string", "brief": "one sentence on what this slide should cover" }
   ]
 }
-Produce exactly ${count} entries. No markdown, no code fences, no commentary.`,
+No markdown, no code fences, no commentary.`,
       },
     ],
     temperature: 0.6,
-    maxTokens: 700,
+    maxTokens: 900,
   });
 
   const pages = [];
+
   pages.push({
     role: "cover",
     heading: outline.title || topic,
     subheading: outline.subtitle || "",
-    paragraphs: [], bullets: [], notes: "",
+    paragraphs: [],
+    bullets: [],
+    blocks: [],
+    notes: "",
   });
+
+  if (wantToc) {
+    pages.push({
+      role: "toc",
+      heading: "Agenda",
+      subheading: "",
+      paragraphs: [],
+      bullets: [],
+      blocks: (outline.slides || []).map((s) => ({
+        type: "toc-entry",
+        text: s.title,
+        level: 1,
+      })),
+      notes: "",
+    });
+  }
 
   const slideList = outline.slides || [];
   for (let idx = 0; idx < slideList.length; idx++) {
@@ -660,21 +1229,25 @@ Produce exactly ${count} entries. No markdown, no code fences, no commentary.`,
 
     const body = await groqJSON({
       messages: [
-        { role: "system", content: "You write the content for one slide. Return STRICT JSON only." },
+        {
+          role: "system",
+          content: "You write the content for one slide. Return STRICT JSON only.",
+        },
         {
           role: "user",
           content: `Presentation topic: ${topic}
 Slide title: ${s.title}
 What this slide should cover: ${s.brief || ""}
-${MARKDOWN_RULES}
+
+${RICH_RULES}
 
 Return JSON exactly:
-{ "bullets": ["string", "..."], "notes": "string (speaker notes, 1-2 sentences)" }
-3 to 5 short bullets. No markdown, no commentary.`,
+{ "bullets": ["...", "..."], "notes": "1-2 sentence speaker note" }
+3-5 bullets, 5-8 words each. Phrases, not sentences. No markdown headers.`,
         },
       ],
       temperature: 0.6,
-      maxTokens: 500,
+      maxTokens: 400,
     });
 
     pages.push({
@@ -682,7 +1255,8 @@ Return JSON exactly:
       heading: s.title,
       subheading: "",
       paragraphs: [],
-      bullets: body.bullets || [],
+      bullets: (body.bullets || []).slice(0, 5),
+      blocks: [],
       notes: body.notes || "",
     });
   }
@@ -691,7 +1265,10 @@ Return JSON exactly:
     role: "closing",
     heading: "Thank You",
     subheading: companyName || outline.title || topic,
-    paragraphs: [], bullets: [], notes: "",
+    paragraphs: [],
+    bullets: [],
+    blocks: [],
+    notes: "",
   });
 
   report("Assembling the presentation");
@@ -708,13 +1285,17 @@ Return JSON exactly:
     companyName: companyName || "",
     pages,
     theme,
+    fontSettings: buildFontSettings({}),
+    pageCount: pages.length,
+    includeCoverPage: true,
+    includeTableOfContents: wantToc,
     sourcePrompt,
     status: "ready",
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Intent detection — prompt now feature-list driven, inputs capped
+// Generation intent detection
 // ─────────────────────────────────────────────────────────────────────
 async function detectGenerationIntent({ message, history, forceType = null }) {
   const capped = capForClassifier(message, history);
@@ -760,6 +1341,41 @@ wants a lookup, not a creation. Set wantsGeneration = false.
 - If the request is just chatting, advice, personal questions, or
   "who is X", set wantsGeneration = false.
 
+=== EXTRACTION DETAILS ===
+
+- pageCount: if the user says "5 pages", "a 10-page report", "3 pages
+  long", set pageCount to that integer. DOCUMENTS ONLY. Never set
+  pageCount for a presentation.
+- slideCount: if the user says "8 slides", "12-slide deck", set
+  slideCount. PRESENTATIONS ONLY. Never set slideCount for a document.
+- fontSize: only set when the user explicitly mentions body font size
+  ("12pt", "14 point", "bigger font", "smaller font"). Map "bigger"
+  to 14 and "smaller" to 10. Default is 12, so leave null otherwise.
+- lineSpacing: "single spaced" → 1.0, "1.5 spaced" → 1.5,
+  "double spaced" → 2.0. Any value 1.0-2.0 is valid. Default is 1.5,
+  so leave null unless the user says something.
+
+- includeCoverPage: ONLY set this when the user EXPLICITLY says
+  something about a cover / front / title page. "with a cover", "add
+  a cover page", "I need a title page" → true. "no cover", "skip the
+  cover", "no front page" → false. Anything else → null. The system
+  will NOT add a cover page unless this field is explicitly true, so
+  do not set it based on guessing what kind of document this is.
+
+- includeTableOfContents: ONLY set this when the user EXPLICITLY
+  mentions a table of contents / TOC / contents / agenda. "add a
+  TOC", "with a table of contents" → true. "no TOC", "no table of
+  contents", "skip the contents page", "straight up, no TOC" → false.
+  Anything else → null.
+
+- instructions: capture ANY formatting, structure, or style request the
+  user gives — "add bullet points", "use subheadings", "emphasize key
+  terms", "add my name is Jane", "more formal tone", "name at the top
+  and title in the middle", "just write it like a letter". Preserve
+  their actual wording where possible instead of paraphrasing it away.
+  This is the single most important field for making the output
+  dynamic — don't drop anything from it.
+
 Return STRICT JSON only.`,
         },
         {
@@ -780,7 +1396,12 @@ Return JSON exactly:
   "instructions": "string or null",
   "style": "string or null",
   "length": "short" | "medium" | "long" | null,
+  "pageCount": number or null,
   "slideCount": number or null,
+  "fontSize": number or null,
+  "lineSpacing": number or null,
+  "includeCoverPage": boolean or null,
+  "includeTableOfContents": boolean or null,
   "templateId": "string or null",
   "primaryColor": "string or null",
   "secondaryColor": "string or null"
@@ -788,7 +1409,7 @@ Return JSON exactly:
         },
       ],
       temperature: 0,
-      maxTokens: 500,
+      maxTokens: 600,
     });
   } catch (err) {
     console.warn("⚠️ Intent detection failed:", err.message);
@@ -803,7 +1424,7 @@ Return JSON exactly:
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Research intent detection — classifier prompt unchanged, inputs capped
+// Research intent detection
 // ─────────────────────────────────────────────────────────────────────
 async function detectResearchIntent({ message, history }) {
   const capped = capForClassifier(message, history);
@@ -905,7 +1526,6 @@ async function executeChatTurn({
 
   if (conversationId && agent && convo.agent !== agent) convo.agent = agent;
 
-  // Cap attachments: max 3, per-doc extracted text to MAX_DOC_TEXT_CHARS.
   const cleanAttachments = (attachments || [])
     .slice(0, MAX_ATTACHMENTS)
     .map((a) => ({
@@ -940,8 +1560,6 @@ async function executeChatTurn({
     (a) => a.type === "document" && a.extractedText
   );
 
-  // When docs are attached, cap the total doc block so 3 x 8000-char
-  // extracts don't produce a 24K-char prepend.
   let effectiveText = trimmed;
   if (docs.length) {
     const docBlock = docs
@@ -962,7 +1580,6 @@ async function executeChatTurn({
   const replyAttachments = [];
 
   try {
-    // Only classify if the message is worth classifying.
     const wordCount = trimmed.split(/\s+/).filter(Boolean).length;
     const worthClassifying = trimmed.length >= 6 && wordCount >= 2;
 
@@ -982,7 +1599,7 @@ async function executeChatTurn({
       }
     }
 
-    // ── Forced, deterministic form lookup ──────────────────────
+    // ── Forced form lookup ─────────────────────────────────────
     if (looksLikeFormLookup && !images.length && !docs.length && trimmed) {
       report("Checking your forms");
       try {
@@ -1051,7 +1668,7 @@ Do not guess which one they mean and do not pick the most recent one. Ask the us
       }
     }
 
-    // Forced research lookup
+    // ── Forced research lookup ─────────────────────────────────
     if (
       !intent.wantsGeneration &&
       intent.type !== "form" &&
@@ -1097,11 +1714,11 @@ ${sourceLines || "(none found)"}`;
       }
     }
 
+    // ── Generation ─────────────────────────────────────────────
     if (intent.wantsGeneration && intent.readyToGenerate && intent.topic) {
       // FORM
       if (intent.type === "form") {
         report("Building your form");
-
         try {
           const session = await startFormSessionCore({
             userId: user._id,
@@ -1121,7 +1738,6 @@ ${sourceLines || "(none found)"}`;
             const redirect = session.draft.settings?.successRedirectUrl || "";
 
             const lines = [];
-
             lines.push(
               `Built a draft with **${fieldCount}** question${
                 fieldCount === 1 ? "" : "s"
@@ -1199,6 +1815,10 @@ ${sourceLines || "(none found)"}`;
           instructions: intent.instructions || "",
           slides: intent.slideCount || 10,
           companyName: intent.companyName || "",
+          includeTableOfContents:
+            typeof intent.includeTableOfContents === "boolean"
+              ? intent.includeTableOfContents
+              : null,
           templateId: intent.templateId || undefined,
           primaryColor: intent.primaryColor || undefined,
           secondaryColor: intent.secondaryColor || undefined,
@@ -1228,6 +1848,17 @@ ${sourceLines || "(none found)"}`;
           instructions: intent.instructions || "",
           style: intent.style || "academic",
           length: intent.length || "medium",
+          pageCount: intent.pageCount || undefined,
+          fontSize: intent.fontSize || undefined,
+          lineSpacing: intent.lineSpacing || undefined,
+          includeCoverPage:
+            typeof intent.includeCoverPage === "boolean"
+              ? intent.includeCoverPage
+              : undefined,
+          includeTableOfContents:
+            typeof intent.includeTableOfContents === "boolean"
+              ? intent.includeTableOfContents
+              : undefined,
           templateId: intent.templateId || undefined,
           primaryColor: intent.primaryColor || undefined,
           secondaryColor: intent.secondaryColor || undefined,
@@ -1241,10 +1872,12 @@ ${sourceLines || "(none found)"}`;
           documentType: "document",
           title: built.title,
           pageCount: built.pages.length,
+          targetPages: built.pageCount,
           templateId: built.theme.templateId,
         });
 
-        reply = `Done. **${built.title}**. Tap to open and download.`;
+        const pagesWord = built.pageCount === 1 ? "page" : "pages";
+        reply = `Done. **${built.title}**, about ${built.pageCount} ${pagesWord} at ${built.fontSettings.bodyFontSize}pt. Tap to open and download.`;
         usedModel = "xamut-writer";
       }
     }
@@ -1280,14 +1913,10 @@ ${sourceLines || "(none found)"}`;
           replyWhereToFind.push(...(refine.whereToFind || []));
         }
       } else {
-        // Diagnostic — shows the budget breakdown per turn.
         console.log(
           `[turn] sys=${estimateTokens(systemPrompt)}t hist=${estimateTokens(history)}t user=${estimateTokens(effectiveText)}t`
         );
 
-        // runSmartTurn: small turns fall through to runAgentTurn unchanged.
-        // Big single-turn pasted documents get split across the key pool
-        // via map-reduce instead of being clamped down to nothing.
         const turn = await runSmartTurn({
           systemPrompt,
           history,
@@ -1387,8 +2016,8 @@ ${sourceLines || "(none found)"}`;
             memories: mems,
           });
         }
-      } catch (err) {
-        // never surface memory errors
+      } catch {
+        /* never surface memory errors */
       }
     })();
   }
@@ -1619,7 +2248,7 @@ export const sendMessageStream = async (req, res) => {
 };
 
 // ─────────────────────────────────────────────────────────────────────
-// Conversations CRUD (unchanged)
+// Conversations CRUD
 // ─────────────────────────────────────────────────────────────────────
 export const listConversations = asyncHandler(async (req, res) => {
   const list = await Conversation.find({ user: req.user._id, isArchived: false })
@@ -1807,7 +2436,12 @@ export const getImageSources = asyncHandler(async (req, res) => {
 // Direct generators
 // ─────────────────────────────────────────────────────────────────────
 export const generateDocument = asyncHandler(async (req, res) => {
-  const { topic, instructions, style, length, templateId, primaryColor, secondaryColor } = req.body || {};
+  const {
+    topic, instructions, style, length,
+    pageCount, fontSize, lineSpacing, fontFamily,
+    includeCoverPage, includeTableOfContents,
+    templateId, primaryColor, secondaryColor,
+  } = req.body || {};
   if (!topic?.trim()) {
     res.status(400);
     throw new Error("topic is required.");
@@ -1819,6 +2453,16 @@ export const generateDocument = asyncHandler(async (req, res) => {
     instructions,
     style,
     length,
+    pageCount,
+    fontSize,
+    lineSpacing,
+    fontFamily,
+    includeCoverPage:
+      typeof includeCoverPage === "boolean" ? includeCoverPage : undefined,
+    includeTableOfContents:
+      typeof includeTableOfContents === "boolean"
+        ? includeTableOfContents
+        : undefined,
     templateId,
     primaryColor,
     secondaryColor,
@@ -1828,7 +2472,11 @@ export const generateDocument = asyncHandler(async (req, res) => {
 });
 
 export const generatePresentation = asyncHandler(async (req, res) => {
-  const { topic, instructions, slides, companyName, templateId, primaryColor, secondaryColor } = req.body || {};
+  const {
+    topic, instructions, slides, companyName,
+    includeTableOfContents,
+    templateId, primaryColor, secondaryColor,
+  } = req.body || {};
   if (!topic?.trim()) {
     res.status(400);
     throw new Error("topic is required.");
@@ -1840,6 +2488,8 @@ export const generatePresentation = asyncHandler(async (req, res) => {
     instructions,
     slides,
     companyName,
+    includeTableOfContents:
+      typeof includeTableOfContents === "boolean" ? includeTableOfContents : null,
     templateId,
     primaryColor,
     secondaryColor,
@@ -1852,7 +2502,6 @@ export const generatePresentation = asyncHandler(async (req, res) => {
 // GET /api/ai/models — diagnostics
 // ─────────────────────────────────────────────────────────────────────
 export const getResolvedModels = asyncHandler(async (req, res) => {
-  const { resolveTextModel } = await import("../utils/xamutAI.js");
   const [text, vision] = await Promise.all([resolveTextModel(), resolveVisionModel()]);
   res.status(200).json({ success: true, textModel: text, visionModel: vision });
 });
