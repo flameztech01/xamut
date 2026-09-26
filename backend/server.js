@@ -60,8 +60,12 @@ app.get("/api/health", (req, res) => {
 // meta tags. This endpoint serves a tiny HTML doc with those tags for
 // any bot that hits /forms/:slug.
 //
-// Real browsers skip this entirely — the catch-all below hands them
-// the SPA's index.html and React Router renders /forms/:slug normally.
+// Real browsers get the frontend's LIVE index.html fetched and returned
+// directly (not a redirect — a redirect back to the same domain would
+// loop straight back into this same rewrite rule). Fetching and
+// returning the content means we always serve whatever's actually
+// live on the frontend's own static hosting, so this never goes stale
+// even if this backend's own bundled copy of the SPA is out of date.
 // ─────────────────────────────────────────────────────────────────────
 const CRAWLER_RE =
   /(whatsapp|facebookexternalhit|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|embedly|quora link preview|showyoubot|outbrain|pinterest|vkShare|W3C_Validator|redditbot|applebot|googlebot|bingbot|yandex|duckduckbot|skypeuripreview)/i;
@@ -77,15 +81,33 @@ app.get("/forms/:slug", async (req, res, next) => {
   const ua = req.headers["user-agent"] || "";
   const isCrawler = CRAWLER_RE.test(ua);
 
-  // Human browsers → send them straight to the real frontend host.
-  // Don't rely on this backend's own bundled copy of the SPA — it can
-  // go stale relative to the frontend's actual live deployment.
+  // ── Real browsers: fetch the frontend's own live index.html and
+  // return it directly. This is NOT a redirect — redirecting back to
+  // the same domain would just loop into this same /forms/* rewrite
+  // rule forever. Fetching the root path ("/") sidesteps that rule
+  // entirely (it only matches /forms/*), so we always get the
+  // frontend's current, freshly-deployed build.
   if (!isCrawler) {
     const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+
     if (frontend) {
-      return res.redirect(302, `${frontend}/forms/${req.params.slug}`);
+      try {
+        const resp = await fetch(`${frontend}/`);
+        if (resp.ok) {
+          const html = await resp.text();
+          return res
+            .status(200)
+            .set("Content-Type", "text/html; charset=utf-8")
+            .send(html);
+        }
+      } catch (err) {
+        console.error("Failed to proxy frontend index.html:", err.message);
+      }
     }
-    return next(); // fallback if FRONTEND_URL isn't set
+
+    // Fallback: this backend's own bundled copy, if the fetch above
+    // failed or FRONTEND_URL isn't set.
+    return next();
   }
 
   try {
@@ -170,6 +192,12 @@ app.use("/api/whatsapp", whatsappRoutes);
 // Directory is set to the repo root). If someone later chooses to
 // copy dist into backend/public during build, that path is also
 // checked first.
+//
+// NOTE: this is now only a FALLBACK for human traffic — the /forms/:slug
+// route above fetches the frontend's live index.html directly instead
+// of relying on this bundled copy staying in sync. This still matters
+// for any other non-API route a human might hit directly on the
+// backend's own domain.
 // ─────────────────────────────────────────────────────────────────────
 const PUBLIC_CANDIDATES = [
   path.join(__dirname, "public"), // prod fallback: build copies dist here
