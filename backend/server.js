@@ -77,8 +77,16 @@ app.get("/forms/:slug", async (req, res, next) => {
   const ua = req.headers["user-agent"] || "";
   const isCrawler = CRAWLER_RE.test(ua);
 
-  // Human browsers fall through — SPA catch-all will render the form.
-  if (!isCrawler) return next();
+  // Human browsers → send them straight to the real frontend host.
+  // Don't rely on this backend's own bundled copy of the SPA — it can
+  // go stale relative to the frontend's actual live deployment.
+  if (!isCrawler) {
+    const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+    if (frontend) {
+      return res.redirect(302, `${frontend}/forms/${req.params.slug}`);
+    }
+    return next(); // fallback if FRONTEND_URL isn't set
+  }
 
   try {
     const form = await Form.findOne({ slug: req.params.slug })
