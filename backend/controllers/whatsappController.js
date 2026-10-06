@@ -32,7 +32,7 @@ import asyncHandler from "express-async-handler";
 import mongoose from "mongoose";
 
 import XamutWhatsAppSession from "../models/xamutWhatsAppSessionModel.js";
-import XamutWhatsAppMessage from "../models/xamutWhatsAppMessageModel.js";
+import XamutWhatsAppMessage from "../models/xamutWhatsappMessageModel.js";
 import WhatsAppLinkCode from "../models/whatsappLinkCodeModel.js";
 import User from "../models/userModel.js";
 
