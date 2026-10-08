@@ -10,12 +10,13 @@ const FEATURES = [
   "Print straight to a cyber café",
 ];
 
-const XamutMark = ({ className = "h-11 w-11" }) => (
-  <div
-    className={`${className} flex shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-teal-400 via-teal-500 to-teal-600 text-lg font-bold text-white shadow-md shadow-teal-500/40`}
-  >
-    X
-  </div>
+const XamutLogo = ({ className = "h-9 w-auto" }) => (
+  <img
+    src="/xamut-logo.png"
+    alt="Xamut"
+    draggable={false}
+    className={`${className} shrink-0 select-none object-contain`}
+  />
 );
 
 const Welcome = () => {
@@ -88,11 +89,8 @@ const Welcome = () => {
 
         <div className="relative mx-auto w-full max-w-lg md:mx-0">
           {/* Brand */}
-          <div className="mb-6 flex items-center gap-2.5">
-            <XamutMark className="h-11 w-11" />
-            <span className="text-2xl font-bold tracking-tight text-white md:text-stone-900 md:dark:text-stone-100">
-              Xamut
-            </span>
+          <div className="mb-6 flex items-center">
+            <XamutLogo className="h-11 w-auto brightness-0 invert md:brightness-100 md:invert-0 md:dark:brightness-0 md:dark:invert" />
           </div>
 
           {/* Headline */}
