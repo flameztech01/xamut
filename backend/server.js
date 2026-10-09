@@ -54,19 +54,19 @@ app.get("/api/health", (req, res) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────
-// OG / link-preview endpoint
+// OG / link-preview + SPA passthrough for /forms/*
 //
-// Crawlers (WhatsApp, Twitter, FB, LinkedIn, Telegram, Slack, Discord)
-// don't run JavaScript. They read raw HTML and look for og:* / twitter:*
-// meta tags. This endpoint serves a tiny HTML doc with those tags for
-// any bot that hits /forms/:slug.
+// Handles ALL /forms/* paths:
+//   • /forms/:slug        → single segment (public form)
+//   • /forms/:id/edit     → deep editor routes
+//   • /forms/:id/responses, /forms/:id/preview, etc.
 //
-// Real browsers get the frontend's LIVE index.html fetched and returned
-// directly (not a redirect — a redirect back to the same domain would
-// loop straight back into this same rewrite rule). Fetching and
-// returning the content means we always serve whatever's actually
-// live on the frontend's own static hosting, so this never goes stale
-// even if this backend's own bundled copy of the SPA is out of date.
+// Crawlers on a single-segment URL get dynamic OG tags from Mongo.
+// Everyone else (humans on any /forms/* path, and crawlers on deep
+// routes) gets the frontend's LIVE index.html fetched from
+// FRONTEND_URL — never the backend's own bundled copy, which can go
+// stale relative to the static site's hashed asset filenames and
+// cause 404s → blank page on reload.
 // ─────────────────────────────────────────────────────────────────────
 const CRAWLER_RE =
   /(whatsapp|facebookexternalhit|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|embedly|quora link preview|showyoubot|outbrain|pinterest|vkShare|W3C_Validator|redditbot|applebot|googlebot|bingbot|yandex|duckduckbot|skypeuripreview)/i;
@@ -78,62 +78,63 @@ const escapeHtml = (s = "") =>
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
 
-app.get("/forms/:slug", async (req, res, next) => {
+// Tiny in-memory cache for the fetched index.html, so a burst of
+// editor reloads doesn't hammer the static site. 30s TTL means a new
+// deploy propagates within half a minute.
+let _indexCache = { html: "", at: 0 };
+const INDEX_TTL_MS = 30_000;
+
+async function getLiveIndexHtml() {
+  const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+  if (!frontend) return null;
+
+  const now = Date.now();
+  if (_indexCache.html && now - _indexCache.at < INDEX_TTL_MS) {
+    return _indexCache.html;
+  }
+
+  const resp = await fetch(`${frontend}/`);
+  if (!resp.ok) return null;
+  const html = await resp.text();
+  _indexCache = { html, at: now };
+  return html;
+}
+
+app.get(/^\/forms\/.+/, async (req, res, next) => {
   const ua = req.headers["user-agent"] || "";
   const isCrawler = CRAWLER_RE.test(ua);
 
-  // ── Real browsers: fetch the frontend's own live index.html and
-  // return it directly. This is NOT a redirect — redirecting back to
-  // the same domain would just loop into this same /forms/* rewrite
-  // rule forever. Fetching the root path ("/") sidesteps that rule
-  // entirely (it only matches /forms/*), so we always get the
-  // frontend's current, freshly-deployed build.
-  if (!isCrawler) {
-    const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+  // Path after "/forms/", ignoring a trailing slash.
+  const rest = req.path.replace(/^\/forms\//, "").replace(/\/$/, "");
+  const segments = rest.split("/").filter(Boolean);
+  const isSingleSegment = segments.length === 1;
 
-    if (frontend) {
-      try {
-        const resp = await fetch(`${frontend}/`);
-        if (resp.ok) {
-          const html = await resp.text();
-          return res
-            .status(200)
-            .set("Content-Type", "text/html; charset=utf-8")
-            .send(html);
-        }
-      } catch (err) {
-        console.error("Failed to proxy frontend index.html:", err.message);
+  // ── Crawler on a single-segment URL → serve OG HTML ───────────────
+  if (isCrawler && isSingleSegment) {
+    const slug = segments[0];
+    try {
+      const form = await Form.findOne({ slug })
+        .select("title description coverPhoto type slug")
+        .lean();
+
+      if (!form) {
+        return res
+          .status(404)
+          .type("html")
+          .send(
+            `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Form not found</title></head><body><p>Form not found.</p></body></html>`
+          );
       }
-    }
 
-    // Fallback: this backend's own bundled copy, if the fetch above
-    // failed or FRONTEND_URL isn't set.
-    return next();
-  }
+      const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
+      const url = `${frontend}/forms/${form.slug}`;
+      const title = `${form.title} — Xamut`;
+      const desc = (
+        form.description || `A ${form.type} on Xamut. Fill it out here.`
+      ).slice(0, 300);
+      const img = form.coverPhoto || "";
 
-  try {
-    const form = await Form.findOne({ slug: req.params.slug })
-      .select("title description coverPhoto type slug")
-      .lean();
-
-    if (!form) {
-      return res
-        .status(404)
-        .type("html")
-        .send(
-          `<!DOCTYPE html><html><head><meta charset="utf-8"><title>Form not found</title></head><body><p>Form not found.</p></body></html>`
-        );
-    }
-
-    const frontend = (process.env.FRONTEND_URL || "").replace(/\/$/, "");
-    const url = `${frontend}/forms/${form.slug}`;
-    const title = `${form.title} — Xamut`;
-    const desc = (
-      form.description || `A ${form.type} on Xamut. Fill it out here.`
-    ).slice(0, 300);
-    const img = form.coverPhoto || "";
-
-    const html = `<!DOCTYPE html>
+      const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
@@ -165,15 +166,43 @@ app.get("/forms/:slug", async (req, res, next) => {
 </body>
 </html>`;
 
-    res
-      .status(200)
-      .set("Content-Type", "text/html; charset=utf-8")
-      .set("Cache-Control", "public, max-age=60, s-maxage=300")
-      .send(html);
-  } catch (err) {
-    console.error("OG render failed:", err.message);
-    next();
+      return res
+        .status(200)
+        .set("Content-Type", "text/html; charset=utf-8")
+        .set("Cache-Control", "public, max-age=60, s-maxage=300")
+        .send(html);
+    } catch (err) {
+      console.error("OG render failed:", err.message);
+      return next();
+    }
   }
+
+  // ── Everyone else → serve the frontend's LIVE index.html ──────────
+  //
+  // Covers humans on /forms/:slug, humans on deep routes like
+  // /forms/:id/edit or /forms/:id/responses, and crawlers on deep
+  // routes (who'd just get the SPA shell — fine, they don't index
+  // editor URLs).
+  //
+  // We fetch from FRONTEND_URL instead of res.sendFile() so we never
+  // serve the backend's bundled copy, whose asset hashes can drift
+  // from the static site's current deploy and cause a 404 on the JS
+  // chunk → blank React page.
+  try {
+    const html = await getLiveIndexHtml();
+    if (html) {
+      return res
+        .status(200)
+        .set("Content-Type", "text/html; charset=utf-8")
+        .set("Cache-Control", "no-cache")
+        .send(html);
+    }
+  } catch (err) {
+    console.error("Failed to proxy frontend index.html:", err.message);
+  }
+
+  // Fallback: bundled copy, if FRONTEND_URL isn't set or the fetch failed.
+  return next();
 });
 
 // ─────────────────────────────────────────────────────────────────────
@@ -186,24 +215,17 @@ app.use("/api/form-ai", formAiRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 
 // ─────────────────────────────────────────────────────────────────────
-// Serve the built React SPA
+// Serve the built React SPA (fallback only)
 //
-// We look in a few candidate locations so this works both locally
-// (frontend/dist) and on Render (frontend/dist again, since Root
-// Directory is set to the repo root). If someone later chooses to
-// copy dist into backend/public during build, that path is also
-// checked first.
-//
-// NOTE: this is now only a FALLBACK for human traffic — the /forms/:slug
-// route above fetches the frontend's live index.html directly instead
-// of relying on this bundled copy staying in sync. This still matters
-// for any other non-API route a human might hit directly on the
-// backend's own domain.
+// Only reached when /forms/* doesn't match (e.g. /chat, /dashboard),
+// or when the /forms/* handler called next() because FRONTEND_URL
+// wasn't set or the fetch failed. If someone deploys the frontend
+// bundle alongside the backend, this serves it; otherwise it warns.
 // ─────────────────────────────────────────────────────────────────────
 const PUBLIC_CANDIDATES = [
-  path.join(__dirname, "public"), // prod fallback: build copies dist here
-  path.join(__dirname, "..", "frontend", "dist"), // local + Render monorepo
-  path.join(__dirname, "..", "dist"), // alt monorepo layout
+  path.join(__dirname, "public"),
+  path.join(__dirname, "..", "frontend", "dist"),
+  path.join(__dirname, "..", "dist"),
 ];
 
 let PUBLIC_DIR = null;
