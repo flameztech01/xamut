@@ -139,6 +139,23 @@ const REQUEST_FIELD_TYPES = [
 const genId = (prefix = "f") =>
   `${prefix}_${Math.random().toString(36).slice(2, 10)}`;
 
+// Make sure a form coming from the server (or from a mutation response)
+// always has the shapes the UI reads without guards.
+const normalizeForm = (f) => {
+  if (!f) return null;
+  return {
+    ...f,
+    title: f.title || "",
+    description: f.description || "",
+    fields: Array.isArray(f.fields) ? f.fields : [],
+    positions: Array.isArray(f.positions) ? f.positions : [],
+    settings: f.settings || {},
+    participantRequests: Array.isArray(f.participantRequests)
+      ? f.participantRequests
+      : [],
+  };
+};
+
 const defaultField = (type = "short_text") => {
   const base = {
     id: genId(),
@@ -722,31 +739,33 @@ const FieldTypePicker = ({ open, onClose, onPick }) => {
 // Options editor
 // ─────────────────────────────────────────────────────────────
 const OptionsEditor = ({ field, onChange }) => {
+  const options = field.options || [];
+
   const updateOption = (idx, key, value) => {
-    const options = [...field.options];
-    options[idx] = { ...options[idx], [key]: value };
-    if (key === "label") options[idx].value = value;
-    onChange({ options });
+    const next = [...options];
+    next[idx] = { ...next[idx], [key]: value };
+    if (key === "label") next[idx].value = value;
+    onChange({ options: next });
   };
 
   const addOption = () => {
-    const n = field.options.length + 1;
+    const n = options.length + 1;
     onChange({
       options: [
-        ...field.options,
+        ...options,
         { id: genId("o"), label: `Option ${n}`, value: `Option ${n}` },
       ],
     });
   };
 
   const removeOption = (idx) => {
-    if (field.options.length <= 1) return;
-    onChange({ options: field.options.filter((_, i) => i !== idx) });
+    if (options.length <= 1) return;
+    onChange({ options: options.filter((_, i) => i !== idx) });
   };
 
   return (
     <div className="space-y-1.5">
-      {field.options.map((opt, idx) => (
+      {options.map((opt, idx) => (
         <div key={opt.id} className="flex items-center gap-2">
           <span className="h-3.5 w-3.5 shrink-0 rounded-full border border-stone-300 dark:border-stone-600" />
           <input
@@ -756,7 +775,7 @@ const OptionsEditor = ({ field, onChange }) => {
             placeholder={`Option ${idx + 1}`}
             className="min-w-0 flex-1 rounded-md border border-transparent bg-stone-50 px-2.5 py-1.5 text-[12.5px] text-stone-800 outline-none transition-all focus:border-teal-300 focus:bg-white focus:ring-2 focus:ring-teal-500/10 dark:bg-stone-800 dark:text-stone-100 dark:focus:border-teal-500/50 dark:focus:bg-stone-900"
           />
-          {field.options.length > 1 ? (
+          {options.length > 1 ? (
             <button
               type="button"
               onClick={() => removeOption(idx)}
@@ -836,7 +855,7 @@ const ScoringEditor = ({ field, onChange }) => {
             :
           </p>
           <div className="flex flex-wrap gap-1.5">
-            {field.options.map((opt) => {
+            {(field.options || []).map((opt) => {
               const active = correct.includes(opt.value);
               return (
                 <button
@@ -997,7 +1016,7 @@ const FieldCard = ({
 
           <input
             type="text"
-            value={field.label}
+            value={field.label || ""}
             onChange={(e) => patch({ label: e.target.value })}
             placeholder={isSection ? "Section title" : "Question"}
             className={`w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-stone-900 outline-none transition-all placeholder:text-stone-300 focus:border-teal-200 focus:bg-teal-50/30 focus:ring-2 focus:ring-teal-500/5 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus:border-teal-500/40 dark:focus:bg-teal-500/5 ${
@@ -1007,7 +1026,7 @@ const FieldCard = ({
 
           <input
             type="text"
-            value={field.description}
+            value={field.description || ""}
             onChange={(e) => patch({ description: e.target.value })}
             placeholder="Add a description (optional)"
             className="mt-0.5 w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[12px] text-stone-500 outline-none transition-all placeholder:text-stone-300 focus:border-teal-200 focus:bg-teal-50/30 dark:text-stone-400 dark:placeholder:text-stone-600 dark:focus:border-teal-500/40 dark:focus:bg-teal-500/5"
@@ -1248,7 +1267,7 @@ const CandidateRow = ({ formId, candidate, index, total, onChange, onDelete, onM
           <div className="flex items-center gap-2">
             <input
               type="text"
-              value={candidate.name}
+              value={candidate.name || ""}
               onChange={(e) => patch({ name: e.target.value })}
               placeholder={`Candidate ${index + 1} name`}
               className="min-w-0 flex-1 rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[13px] font-medium text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500"
@@ -1286,7 +1305,7 @@ const CandidateRow = ({ formId, candidate, index, total, onChange, onDelete, onM
 
           <input
             type="text"
-            value={candidate.slogan}
+            value={candidate.slogan || ""}
             onChange={(e) => patch({ slogan: e.target.value })}
             placeholder="Slogan (optional)"
             className="mt-1.5 w-full rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12px] text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
@@ -1307,14 +1326,14 @@ const CandidateRow = ({ formId, candidate, index, total, onChange, onDelete, onM
         <div className="mt-3 space-y-2 border-t border-stone-200/80 pt-3 dark:border-stone-800">
           <textarea
             rows={2}
-            value={candidate.bio}
+            value={candidate.bio || ""}
             onChange={(e) => patch({ bio: e.target.value })}
             placeholder="Short bio — who they are, what they've done."
             className="w-full resize-none rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12.5px] leading-relaxed text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
           />
           <textarea
             rows={3}
-            value={candidate.manifesto}
+            value={candidate.manifesto || ""}
             onChange={(e) => patch({ manifesto: e.target.value })}
             placeholder="Manifesto — what they promise to do."
             className="w-full resize-none rounded-md border border-stone-200 bg-white px-2.5 py-1.5 text-[12.5px] leading-relaxed text-stone-700 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:ring-2 focus:ring-teal-500/10 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200 dark:placeholder:text-stone-500"
@@ -1329,32 +1348,33 @@ const CandidateRow = ({ formId, candidate, index, total, onChange, onDelete, onM
 // Position card
 // ─────────────────────────────────────────────────────────────
 const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMoveUp, onMoveDown }) => {
+  const candidates = position.candidates || [];
   const patch = (partial) => onChange({ ...position, ...partial });
 
   const addCandidate = () => {
-    const order = position.candidates.length;
+    const order = candidates.length;
     patch({
-      candidates: [...position.candidates, defaultCandidate(order)],
+      candidates: [...candidates, defaultCandidate(order)],
     });
   };
 
   const updateCandidate = (idx, next) => {
-    const candidates = [...position.candidates];
-    candidates[idx] = next;
-    patch({ candidates });
+    const copy = [...candidates];
+    copy[idx] = next;
+    patch({ candidates: copy });
   };
 
   const deleteCandidate = (idx) => {
-    if (position.candidates.length <= 1) return;
-    patch({ candidates: position.candidates.filter((_, i) => i !== idx) });
+    if (candidates.length <= 1) return;
+    patch({ candidates: candidates.filter((_, i) => i !== idx) });
   };
 
   const moveCandidate = (idx, dir) => {
     const target = idx + dir;
-    if (target < 0 || target >= position.candidates.length) return;
-    const candidates = [...position.candidates];
-    [candidates[idx], candidates[target]] = [candidates[target], candidates[idx]];
-    patch({ candidates });
+    if (target < 0 || target >= candidates.length) return;
+    const copy = [...candidates];
+    [copy[idx], copy[target]] = [copy[target], copy[idx]];
+    patch({ candidates: copy });
   };
 
   return (
@@ -1367,8 +1387,8 @@ const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMo
               Position #{index + 1}
             </span>
             <span className="text-[10.5px] text-stone-400 dark:text-stone-500">
-              {position.candidates.length}{" "}
-              {position.candidates.length === 1 ? "candidate" : "candidates"}
+              {candidates.length}{" "}
+              {candidates.length === 1 ? "candidate" : "candidates"}
             </span>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
@@ -1403,14 +1423,14 @@ const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMo
 
         <input
           type="text"
-          value={position.title}
+          value={position.title || ""}
           onChange={(e) => patch({ title: e.target.value })}
           placeholder="Position title — e.g. President, Director of Socials"
           className="w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[15px] font-semibold text-stone-900 outline-none transition-all placeholder:text-stone-300 focus:border-rose-200 focus:bg-rose-50/30 dark:text-stone-100 dark:placeholder:text-stone-600 dark:focus:border-rose-500/40 dark:focus:bg-rose-500/5"
         />
         <input
           type="text"
-          value={position.description}
+          value={position.description || ""}
           onChange={(e) => patch({ description: e.target.value })}
           placeholder="Optional description shown to voters"
           className="mt-0.5 w-full rounded-md border border-transparent bg-transparent px-1.5 py-1 text-[12px] text-stone-500 outline-none transition-all placeholder:text-stone-300 focus:border-rose-200 focus:bg-rose-50/30 dark:text-stone-400 dark:placeholder:text-stone-600 dark:focus:border-rose-500/40 dark:focus:bg-rose-500/5"
@@ -1423,7 +1443,7 @@ const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMo
               type="number"
               min="1"
               max="20"
-              value={position.maxSelections}
+              value={position.maxSelections ?? 1}
               onChange={(e) =>
                 patch({
                   maxSelections: Math.max(
@@ -1449,13 +1469,13 @@ const PositionCard = ({ formId, position, index, total, onChange, onDelete, onMo
       </div>
 
       <div className="space-y-2 p-3.5 sm:p-4">
-        {position.candidates.map((c, i) => (
+        {candidates.map((c, i) => (
           <CandidateRow
             key={c.id}
             formId={formId}
             candidate={c}
             index={i}
-            total={position.candidates.length}
+            total={candidates.length}
             onChange={(next) => updateCandidate(i, next)}
             onDelete={() => deleteCandidate(i)}
             onMoveUp={() => moveCandidate(i, -1)}
@@ -1569,7 +1589,7 @@ const RequestFieldsEditor = ({ fields, onChange }) => {
           <div className="min-w-0 flex-1 space-y-1.5">
             <input
               type="text"
-              value={rf.label}
+              value={rf.label || ""}
               onChange={(e) => update(i, { ...rf, label: e.target.value })}
               placeholder="Field label — e.g. Matric number, Department"
               className="w-full rounded-md border border-transparent bg-stone-50 px-2 py-1.5 text-[12px] text-stone-800 outline-none transition-all placeholder:text-stone-400 focus:border-teal-300 focus:bg-white focus:ring-2 focus:ring-teal-500/10 dark:bg-stone-900 dark:text-stone-100 dark:placeholder:text-stone-500"
@@ -1646,7 +1666,8 @@ const RequestFieldsEditor = ({ fields, onChange }) => {
 const SettingsPanel = ({ form, onChange }) => {
   const settings = form.settings || {};
   const isQuiz =
-    form.type === "quiz" || form.fields.some((f) => f.scoring?.points > 0);
+    form.type === "quiz" ||
+    (form.fields || []).some((f) => f.scoring?.points > 0);
   const isElection = form.type === "election";
   const isPrivate = form.visibility === "private";
 
@@ -1939,7 +1960,7 @@ const SettingsPanel = ({ form, onChange }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// AI edit panel (unchanged — hidden for elections)
+// AI edit panel (hidden for elections)
 // ─────────────────────────────────────────────────────────────
 const AiEditPanel = ({ formId, dirty, onSaveFirst, onApplied }) => {
   const [prompt, setPrompt] = useState("");
@@ -2484,7 +2505,7 @@ const AccessRequestsModal = ({ open, onClose, formId, requestFields }) => {
                       </span>
                       <div className="min-w-0 flex-1">
                         <p className="truncate text-[13px] font-semibold text-stone-800 dark:text-stone-100">
-                          {r.name || r.email.split("@")[0]}
+                          {r.name || (r.email || "").split("@")[0]}
                         </p>
                         <p className="truncate text-[11px] text-stone-400 dark:text-stone-500">
                           {r.email} · {formatRelative(r.requestedAt)}
@@ -2605,7 +2626,7 @@ const AccessRequestsModal = ({ open, onClose, formId, requestFields }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Share modal (unchanged)
+// Share modal
 // ─────────────────────────────────────────────────────────────
 const ShareModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListCollaboratorsQuery(formId, { skip: !open });
@@ -2887,7 +2908,7 @@ const ShareModal = ({ open, onClose, formId }) => {
 };
 
 // ─────────────────────────────────────────────────────────────
-// Participants modal (unchanged)
+// Participants modal
 // ─────────────────────────────────────────────────────────────
 const ParticipantsModal = ({ open, onClose, formId }) => {
   const { data, isLoading } = useListParticipantsQuery(formId, { skip: !open });
@@ -3237,7 +3258,10 @@ const FormEditor = () => {
   const { id } = useParams();
   const navigate = useNavigate();
 
-  const { data, isLoading, error, refetch } = useGetFormQuery(id, { skip: !id });
+  // currentData = data for THIS id only (never a stale previous form)
+  const { currentData, isLoading, error, refetch } = useGetFormQuery(id, {
+    skip: !id,
+  });
 
   const [updateForm, { isLoading: saving }] = useUpdateFormMutation();
   const [publishForm, { isLoading: publishing }] = usePublishFormMutation();
@@ -3254,20 +3278,17 @@ const FormEditor = () => {
   const [accessOpen, setAccessOpen] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
 
-  const loadedRef = useRef(false);
+  // Remembers which form id has already been loaded into local state,
+  // so background refetches don't overwrite unsaved edits.
+  const loadedIdRef = useRef(null);
 
   useEffect(() => {
-    if (data?.form && !loadedRef.current) {
-      setForm(data.form);
-      loadedRef.current = true;
+    if (currentData?.form && loadedIdRef.current !== id) {
+      setForm(normalizeForm(currentData.form));
+      setDirty(false);
+      loadedIdRef.current = id;
     }
-  }, [data]);
-
-  useEffect(() => {
-    loadedRef.current = false;
-    setForm(null);
-    setDirty(false);
-  }, [id]);
+  }, [currentData, id]);
 
   const showToast = (msg) => {
     setToast(msg);
@@ -3335,7 +3356,7 @@ const FormEditor = () => {
         expiresAt: form.expiresAt || null,
       };
       const res = await updateForm({ id, ...payload }).unwrap();
-      setForm(res.form);
+      setForm(normalizeForm(res.form));
       setDirty(false);
       showToast("Saved.");
       return true;
@@ -3356,7 +3377,7 @@ const FormEditor = () => {
     }
     try {
       const res = await publishForm(id).unwrap();
-      setForm(res.form);
+      setForm(normalizeForm(res.form));
       showToast("Form published.");
     } catch (err) {
       showToast(err?.data?.message || "Couldn't publish.");
@@ -3366,7 +3387,7 @@ const FormEditor = () => {
   const handleClose = async () => {
     try {
       const res = await closeForm(id).unwrap();
-      setForm(res.form);
+      setForm(normalizeForm(res.form));
       setConfirmClose(false);
       showToast("Form closed.");
     } catch (err) {
@@ -3404,9 +3425,9 @@ const FormEditor = () => {
     try {
       const fresh = await refetch();
       if (fresh.data?.form) {
-        setForm(fresh.data.form);
+        setForm(normalizeForm(fresh.data.form));
         setDirty(false);
-        loadedRef.current = true;
+        loadedIdRef.current = id;
       }
       showToast("AI changes applied.");
     } catch {
@@ -3416,7 +3437,8 @@ const FormEditor = () => {
 
   const isQuiz = useMemo(
     () =>
-      form?.type === "quiz" || form?.fields?.some((f) => f.scoring?.points > 0),
+      form?.type === "quiz" ||
+      (form?.fields || []).some((f) => f.scoring?.points > 0),
     [form]
   );
   const isElection = form?.type === "election";
@@ -3449,20 +3471,8 @@ const FormEditor = () => {
       text: "text-stone-500 dark:text-stone-400",
     };
 
-  if (isLoading || !form) {
-    return (
-      <div className="flex min-h-dvh items-center justify-center bg-white dark:bg-stone-950">
-        <div className="flex flex-col items-center gap-3">
-          <span className="h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500 dark:border-stone-700 dark:border-t-teal-400" />
-          <p className="text-[12px] text-stone-400 dark:text-stone-500">
-            Loading editor…
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (error) {
+  // Error first, so a failed request never leaves you on the loader forever
+  if (error && !form) {
     return (
       <div className="flex min-h-dvh flex-col items-center justify-center gap-3 bg-white px-4 text-center dark:bg-stone-950">
         <p className="text-[14px] font-semibold text-stone-800 dark:text-stone-100">
@@ -3472,12 +3482,34 @@ const FormEditor = () => {
           {error?.data?.message ||
             "It may have been deleted or you don't have access."}
         </p>
-        <Link
-          to="/forms"
-          className="mt-2 rounded-md bg-stone-900 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
-        >
-          Back to forms
-        </Link>
+        <div className="mt-2 flex gap-2">
+          <button
+            type="button"
+            onClick={() => refetch()}
+            className="rounded-md border border-stone-200 px-4 py-2 text-[12.5px] font-semibold text-stone-700 hover:bg-stone-50 dark:border-stone-700 dark:text-stone-200 dark:hover:bg-stone-800"
+          >
+            Retry
+          </button>
+          <Link
+            to="/forms"
+            className="rounded-md bg-stone-900 px-4 py-2 text-[12.5px] font-semibold text-white hover:bg-stone-800 dark:bg-stone-100 dark:text-stone-900 dark:hover:bg-white"
+          >
+            Back to forms
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading || !form) {
+    return (
+      <div className="flex min-h-dvh items-center justify-center bg-white dark:bg-stone-950">
+        <div className="flex flex-col items-center gap-3">
+          <span className="h-8 w-8 animate-spin rounded-full border-2 border-stone-300 border-t-teal-500 dark:border-stone-700 dark:border-t-teal-400" />
+          <p className="text-[12px] text-stone-400 dark:text-stone-500">
+            Loading editor…
+          </p>
+        </div>
       </div>
     );
   }
@@ -3637,7 +3669,7 @@ const FormEditor = () => {
                     Add field
                   </button>
 
-                  {form.fields?.length === 0 ? (
+                  {form.fields.length === 0 ? (
                     <p className="mt-3 text-center text-[11.5px] text-stone-400 dark:text-stone-500">
                       A form needs at least one field before it can be published.
                     </p>
