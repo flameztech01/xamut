@@ -40,7 +40,7 @@ export const sendOtpEmail = async (email, otp, purpose = "email-verification") =
 
   try {
     const { data, error } = await resend.emails.send({
-      from: "Xamut <noreply@curriumx.online>", // change to your verified domain
+      from: "Xamut <growth@lovohcreate.com>", // change to your verified domain
       to: email,
       subject,
       html,
